@@ -34,7 +34,8 @@ class SamlTest extends AbstractKeycloakTest {
                 assertProtected(browser, "/saml2/authenticate/webstudio");
 
                 // Log in; the session resolves to admin.
-                browser.loginViaSaml("admin", "admin");
+                // V3: the realm password is generated at runtime
+                browser.loginViaSaml("admin", password("admin"));
                 assertAdminSession(browser);
 
                 // SP-initiated logout sends a SAML LogoutRequest to the IdP Single Logout Service.

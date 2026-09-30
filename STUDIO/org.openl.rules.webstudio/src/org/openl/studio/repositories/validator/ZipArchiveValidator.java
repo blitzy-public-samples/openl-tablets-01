@@ -2,15 +2,18 @@ package org.openl.studio.repositories.validator;
 
 import java.io.IOException;
 import java.io.RandomAccessFile;
+import java.nio.charset.Charset;
 import java.nio.file.FileSystem;
 import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.Map;
 import java.util.Set;
 
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.compress.archivers.zip.ZipFile;
 import org.eclipse.jgit.errors.CorruptObjectException;
 import org.eclipse.jgit.util.SystemReader;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -19,6 +22,7 @@ import org.springframework.validation.Errors;
 import org.springframework.validation.Validator;
 
 import org.openl.rules.project.resolving.ProjectResolver;
+import org.openl.rules.repository.api.Repository;
 import org.openl.rules.webstudio.util.NameChecker;
 import org.openl.rules.webstudio.web.repository.upload.zip.ZipCharsetDetector;
 import org.openl.rules.workspace.filter.PathFilter;
@@ -56,6 +60,9 @@ public class ZipArchiveValidator implements Validator {
             errors.reject("zip-archive.unknown.charset.message");
             return;
         }
+        // V1: raw entry names, validated before the zipfs view below normalizes them or fails on them
+        var rawViolations = rawEntryNameViolations(archive, charset);
+        var errorsBefore = errors.getErrorCount(); // V1: tells whether the existing checks rejected anything
 
         try (FileSystem fs = FileSystems.newFileSystem(ZipUtils.toJarURI(archive),
                 Map.of("encoding", charset.name()))) {
@@ -74,7 +81,21 @@ public class ZipArchiveValidator implements Validator {
                 stream.forEach(path -> validateEntryPath(path, rejectedPaths, errors));
             }
         } catch (IOException e) {
+            // V1: a crafted name that breaks the zipfs view (e.g. a '..' segment) is a path rejection, not a 500
+            if (rejectRawEntryNames(rawViolations, errors)) {
+                return;
+            }
             throw RuntimeExceptionWrapper.wrap(e);
+        } catch (RuntimeException e) {
+            // V1: the same for unchecked failures of the walk (e.g. InvalidPathException on a NUL byte)
+            if (rejectRawEntryNames(rawViolations, errors)) {
+                return;
+            }
+            throw e;
+        }
+        // V1: reported only when the existing checks found nothing, so today's rejections keep today's errors
+        if (errors.getErrorCount() == errorsBefore) {
+            rejectRawEntryNames(rawViolations, errors);
         }
     }
 
@@ -111,6 +132,69 @@ public class ZipArchiveValidator implements Validator {
                 rejectedPaths.add(path);
             }
         }
+    }
+
+    /**
+     * V1: collects the violations of the entry names exactly as the archive records them.
+     *
+     * <p>The zipfs view the other checks walk normalizes a name such as {@code a//x.xlsx} or {@code /etc/x}, and
+     * refuses to open an archive with a {@code .} or {@code ..} segment at all, so a crafted name is never checked
+     * there. Each raw name is therefore run through {@link Repository#validatePath(String)} (absolute paths,
+     * {@code .} and {@code ..} segments, {@code //} and {@code \}) and {@link NameChecker#validatePath(String)}
+     * (forbidden and control characters, reserved names, trailing dots and spaces). Names decode with the charset
+     * the archive was detected with, as in the zipfs view. Entries the upload filter drops are skipped, because they
+     * are never written.
+     *
+     * <p>The checks are private to this validator on purpose, not moved to a dedicated component as the Minimal
+     * Change Rule would prefer: each upload surface keeps its own guard, and no component is shared between them.
+     *
+     * @return the distinct violation messages, in the order of the entries
+     */
+    private Set<String> rawEntryNameViolations(Path archive, Charset charset) {
+        var violations = new LinkedHashSet<String>();
+        try (var zip = ZipFile.builder()
+                .setPath(archive)
+                .setCharset(charset)
+                .setUseUnicodeExtraFields(false)
+                .get()) {
+            var entries = zip.getEntries();
+            while (entries.hasMoreElements()) {
+                var name = entries.nextElement().getName().replace('\\', '/');
+                // The filter sees the raw name, trailing '/' of a folder entry included, as the other uploaders do.
+                if (!zipFilter.accept(name)) {
+                    continue;
+                }
+                // Only the '/' that marks a folder entry is dropped: a leading '/' is an absolute name.
+                if (name.endsWith("/")) {
+                    name = name.substring(0, name.length() - 1);
+                }
+                if (name.isEmpty()) {
+                    continue;
+                }
+                try {
+                    Repository.validatePath(name);
+                    NameChecker.validatePath(name);
+                } catch (IOException | IllegalArgumentException e) {
+                    // InvalidPathException, thrown for a traversal or a NUL byte, is an IllegalArgumentException.
+                    violations.add(e.getMessage());
+                }
+            }
+        } catch (IOException e) {
+            throw RuntimeExceptionWrapper.wrap(e);
+        }
+        return violations;
+    }
+
+    /**
+     * V1: rejects every raw entry name violation with the key the zipfs view check uses for a name failure.
+     *
+     * @return {@code true} when at least one violation was rejected
+     */
+    private static boolean rejectRawEntryNames(Set<String> violations, Errors errors) {
+        for (var message : violations) {
+            errors.reject("zip-archive.unknown.archive.path.message", new String[]{message}, message);
+        }
+        return !violations.isEmpty();
     }
 
     private boolean validateSignature(Path archive, Errors errors) {

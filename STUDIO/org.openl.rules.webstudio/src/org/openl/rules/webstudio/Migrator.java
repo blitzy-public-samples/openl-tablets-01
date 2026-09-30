@@ -4,6 +4,7 @@ import java.io.IOException;
 import java.nio.file.FileVisitOption;
 import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.SimpleFileVisitor;
 import java.nio.file.StandardOpenOption;
@@ -25,7 +26,9 @@ import org.openl.rules.dataformat.yaml.YamlMapperFactory;
 import org.openl.rules.project.impl.local.MetainfoRegistry;
 import org.openl.rules.project.impl.local.ProjectMetainfo;
 import org.openl.rules.repository.RepositoryInstatiator;
+import org.openl.rules.repository.api.Repository;
 import org.openl.rules.webstudio.migration.ProjectTagsMigrator;
+import org.openl.rules.webstudio.util.NameChecker;
 import org.openl.rules.webstudio.web.Props;
 import org.openl.rules.webstudio.web.admin.AdministrationSettings;
 import org.openl.rules.webstudio.web.admin.security.NOPUserSettings;
@@ -144,12 +147,25 @@ public class Migrator {
                 || LEGACY_SINGLE_USERNAME.equals(username)) {
             return;
         }
+        // V1: validate the user name before it is resolved as a path segment.
+        if (!isValidWorkspaceFolderName(username)) {
+            log.warn("The single-user name '{}' resolves outside the workspace root; the move is skipped.", username);
+            return;
+        }
         var workspacesRoot = Path.of(workspacePath).normalize();
         var legacy = workspacesRoot.resolve(LEGACY_SINGLE_USERNAME);
         var target = workspacesRoot.resolve(username).normalize();
         // The user name is a configured path segment: an absolute or traversing value would move the
         // workspace outside its root, so reject anything that escapes it.
         if (!target.startsWith(workspacesRoot)) {
+            log.warn("The single-user name '{}' resolves outside the workspace root; the move is skipped.", username);
+            return;
+        }
+        // V1: the user's folder must sit at its own place under the real workspace root (no link may lead out of it).
+        if (!Files.isDirectory(workspacesRoot)) {
+            return; // nothing to migrate, as the no-legacy return below
+        }
+        if (!isOwnWorkspaceFolder(workspacesRoot, username)) {
             log.warn("The single-user name '{}' resolves outside the workspace root; the move is skipped.", username);
             return;
         }
@@ -161,6 +177,63 @@ public class Migrator {
             log.info("Moved the single-user workspace from '{}' to '{}'.", LEGACY_SINGLE_USERNAME, username);
         } catch (IOException e) {
             log.error("Failed to move the single-user workspace from '{}' to '{}'.", LEGACY_SINGLE_USERNAME, username, e);
+        }
+    }
+
+    /**
+     * V1 surface A (workspace directory) name check, private to {@code Migrator}: the single-user name becomes a
+     * workspace folder, so it must pass both the repository path rules (no absolute path, no {@code .} or
+     * {@code ..} segment, no {@code //}, no backslash) and the cross-platform name rules of {@link NameChecker}
+     * (no forbidden or control character, no reserved name, no leading or trailing space, no trailing dot).
+     *
+     * <p>It runs before the name is resolved as a path, so an unparsable name (for example one with a NUL
+     * character) is skipped like any other invalid name instead of failing the startup.
+     *
+     * @param username a non-blank single-user name
+     * @return {@code true} if the name is a valid workspace folder name
+     */
+    private static boolean isValidWorkspaceFolderName(String username) {
+        try {
+            Repository.validatePath(username);
+            NameChecker.validatePath(username);
+            return true;
+        } catch (IOException | IllegalArgumentException e) {
+            // IllegalArgumentException covers the InvalidPathException of both validators and of Path parsing.
+            return false;
+        }
+    }
+
+    /**
+     * V1 surface A (workspace directory) containment check, private to {@code Migrator}: the user's folder must sit
+     * at its own lexical place under the real workspace root.
+     *
+     * <p>The configured root is the anchor: links in its own path are trusted and followed. The user's folder is the
+     * boundary: no existing link from the root down to it may lead elsewhere, neither outside the root nor into
+     * another user's folder. The part of the folder that does not exist yet cannot contain a link, so the deepest
+     * existing ancestor is resolved and the missing tail re-appended. A dangling link counts as existing and fails
+     * the resolution, which rejects it.
+     *
+     * @param workspacesRoot an existing workspace root
+     * @param username a user name that passed {@link #isValidWorkspaceFolderName(String)}
+     * @return {@code true} if the user's folder resolves to its own lexical place under the real root
+     */
+    private static boolean isOwnWorkspaceFolder(Path workspacesRoot, String username) {
+        try {
+            var anchorReal = workspacesRoot.toRealPath();
+            // Computed lexically, so a boundary that is itself a link is caught by the walk below.
+            var boundary = anchorReal.resolve(username).normalize();
+            var existing = boundary;
+            while (existing != null && !Files.exists(existing, LinkOption.NOFOLLOW_LINKS)) {
+                existing = existing.getParent();
+            }
+            if (existing == null) {
+                // Defensive: the walk stops at the real root at the latest, which exists unless removed meanwhile.
+                return false;
+            }
+            var walked = existing.toRealPath().resolve(existing.relativize(boundary));
+            return walked.startsWith(boundary);
+        } catch (IOException | IllegalArgumentException e) {
+            return false;
         }
     }
 

@@ -11,6 +11,7 @@ import org.springframework.security.config.annotation.web.configurers.AbstractHt
 import org.springframework.security.config.web.PathPatternRequestMatcherBuilderFactoryBean;
 import org.springframework.security.web.FilterChainProxy;
 import org.springframework.security.web.SecurityFilterChain;
+import org.springframework.security.web.util.matcher.AndRequestMatcher;
 
 @Configuration
 @EnableWebSecurity
@@ -32,20 +33,25 @@ public class SecurityConfig {
     public SecurityFilterChain staticResourcesFilterChain(HttpSecurity http) throws Exception {
 
         return http
-                .securityMatcher(
-                        "/favicon.ico",
-                        "/favicon.svg",
-                        "/application.properties",
-                        "/api-docs",
-                        "/icons/**",
-                        "/assets/**",
-                        "/.well-known/**",
-                        "/rest/public/**",
-                        "/rest/settings",
-                        "/rest/api-docs",
-                        "/rest/openapi.json"
-                )
+                // V10: sys.json and http.json leave the public chain, so each mode's /rest/** chain authenticates them
+                .securityMatcher(new AndRequestMatcher(
+                        RequestMatchers.anyOf(
+                                "/favicon.ico",
+                                "/favicon.svg",
+                                "/application.properties",
+                                "/api-docs",
+                                "/icons/**",
+                                "/assets/**",
+                                "/.well-known/**",
+                                "/rest/public/**",
+                                "/rest/settings",
+                                "/rest/api-docs",
+                                "/rest/openapi.json"),
+                        RequestMatchers.not(RequestMatchers.anyOf(
+                                "/rest/public/info/sys.json",
+                                "/rest/public/info/http.json"))))
                 // Disable any configurers and authentications for the static-like resources.
+                // V4: security headers stay enabled (HttpSecurity defaults) on the static chain.
                 .csrf(AbstractHttpConfigurer::disable)
                 .sessionManagement(AbstractHttpConfigurer::disable)
                 .logout(AbstractHttpConfigurer::disable)
@@ -53,7 +59,6 @@ public class SecurityConfig {
                 .anonymous(AbstractHttpConfigurer::disable)
                 .exceptionHandling(AbstractHttpConfigurer::disable)
                 .requestCache(AbstractHttpConfigurer::disable)
-                .headers(AbstractHttpConfigurer::disable)
                 .servletApi(AbstractHttpConfigurer::disable)
                 .build();
     }

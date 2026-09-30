@@ -4,6 +4,7 @@ import java.io.IOException;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 import jakarta.servlet.http.HttpServletRequest;
 
 import lombok.extern.slf4j.Slf4j;
@@ -36,6 +37,7 @@ import org.openl.util.StringUtils;
 public class JWTValidator implements AuthorizationChecker {
 
     private static final String BEARER = "Bearer ";
+    private static final List<String> PUBLIC_ADMIN_PREFIXES = List.of("/admin/healthcheck/", "/admin/info/", "/admin/config/");
 
 
     private final JwtConsumer jwtConsumer;
@@ -78,13 +80,13 @@ public class JWTValidator implements AuthorizationChecker {
     @Override
     public boolean authorize(HttpServletRequest httpRequest) {
         var pathInfo = httpRequest.getPathInfo();
-        // Swagger and admin actions should be available without authorization.
-        // Admin actions such as downloading or deploying via UI should be removed.
+        // V2: only the health-check, info and config admin paths are public; any other /admin/ path, OpenAPI documents included, needs a JWT.
         if (pathInfo.startsWith("/admin/")) {
-            return true;
-        }
-        // Access to openapi.json and openapi.yam should pass without authorization.
-        if (pathInfo.endsWith("openapi.json") || pathInfo.endsWith("openapi.yaml")) {
+            if (PUBLIC_ADMIN_PREFIXES.stream().anyMatch(pathInfo::startsWith)) {
+                return true;
+            }
+        } else if (pathInfo.endsWith("openapi.json") || pathInfo.endsWith("openapi.yaml")) {
+            // Service OpenAPI documents stay public.
             return true;
         }
 

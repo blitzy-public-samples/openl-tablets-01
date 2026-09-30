@@ -1,10 +1,21 @@
 package org.openl.studio.projects.service.files;
 
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.LinkOption;
+import java.nio.file.Path;
 import java.util.List;
+import java.util.Optional;
 
+import org.openl.rules.project.abstraction.AProject;
 import org.openl.rules.project.abstraction.AProjectFolder;
+import org.openl.rules.project.abstraction.RulesProject;
 import org.openl.rules.repository.api.ChangesetType;
 import org.openl.rules.repository.api.FileItem;
+import org.openl.rules.repository.api.Repository;
+import org.openl.rules.repository.api.RepositoryDelegate;
+import org.openl.rules.repository.file.FileSystemRepository;
+import org.openl.rules.workspace.dtr.FolderMapper;
 import org.openl.studio.projects.model.files.FsNode;
 
 /**
@@ -61,4 +72,169 @@ public interface FileRoot {
      * @param comment       the commit message
      */
     void writeBatch(String basePath, List<FileItem> items, ChangesetType changesetType, String comment);
+
+    // V1: path containment of a mount backed by a local directory; other mounts accept every path.
+    /**
+     * Tells whether the path stays inside the mount's boundary once it is resolved on disk.
+     *
+     * <p>The path is mount-relative, in the same form the service uses for {@link #readFolder(String)}
+     * lookups and that {@code AProjectArtefact.getInternalPath()} reports for entries of the mount; an
+     * empty path denotes the mount root. A mount backed by a local directory returns {@code false}
+     * when the real location of the path leaves the mount's boundary, through a link or otherwise.
+     * Other mounts (Git, JDBC, S3, Azure Blob) accept every path, because their content is not read
+     * through filesystem links.
+     *
+     * <p>The check only adds rejections: callers run it after the existing lexical validation.
+     *
+     * @param path mount-relative path; empty for the mount root
+     * @return {@code false} when the path resolves outside the mount's boundary
+     */
+    default boolean contains(String path) {
+        return true;
+    }
+
+    // V1: the local directory behind a repository, the anchor the containment checks resolve against.
+    /**
+     * Local root directory of a file-backed repository, as its real location.
+     *
+     * <p>The repository is unwrapped the way the ancestor lookup unwraps it: through every
+     * {@link RepositoryDelegate} (such as {@code SecureRepository} and {@code SecureBranchRepository}),
+     * then through one {@link FolderMapper}. That covers {@code SecureMappedRepository}, which
+     * extends {@code SecureBranchRepository} and implements {@code FolderMapper}, and whose
+     * {@code getOriginal()} leads to a {@code MappedRepository} whose {@code getDelegate()} is the
+     * file repository. The {@code repo-file} design repository
+     * ({@code org.openl.rules.repository.file.LocalRepository}) and the user's working copy
+     * ({@code org.openl.rules.project.impl.local.LocalRepository}) both extend
+     * {@link FileSystemRepository}.
+     *
+     * <p>The unwrapped instance is only asked for its root directory. Every read and write still goes
+     * through the (secured) wrapper the caller holds, so no ACL check is bypassed.
+     *
+     * <p>The configured root is the anchor: links in its own path are trusted and followed, so the
+     * real location is returned. A root that does not exist yet is resolved through its deepest
+     * existing ancestor.
+     *
+     * <p>Any other backend yields empty, including the Git branch wrapper {@code AuthoringRepository},
+     * which implements neither interface: Git reads blobs from its object database, never through
+     * working-tree links.
+     *
+     * @param repo the repository as the caller holds it, possibly wrapped; may be {@code null}
+     * @return the real root directory, or empty when the repository is not file-backed
+     */
+    static Optional<Path> localRoot(Repository repo) {
+        var current = repo;
+        while (current instanceof RepositoryDelegate delegate) {
+            current = delegate.getOriginal();
+        }
+        if (current instanceof FolderMapper mapper) {
+            current = mapper.getDelegate();
+        }
+        if (current instanceof FileSystemRepository fileSystem && fileSystem.getRoot() != null) {
+            return Optional.of(realLocation(fileSystem.getRoot()));
+        }
+        return Optional.empty();
+    }
+
+    // V1: the directory a project mount may touch, lexically under the real anchor.
+    /**
+     * Folder of the project inside its local anchor directory.
+     *
+     * <p>An opened {@link RulesProject} is served from the user's working copy, at its folder path.
+     * A closed one is served from its design repository, at its repository-internal path, flat or
+     * mapped. Any other project is served from its own repository, at its real path. The relative
+     * path is read only once the anchor is known to be file-backed, so projects on other backends
+     * never compute it.
+     *
+     * <p>The boundary is lexical under the real anchor, so a project folder that is itself a link
+     * fails {@link #resolvesInside(Path, String) resolvesInside(boundary, "")}. The boundary applies
+     * to the current state: historical reads of an opened project are checked against its working
+     * copy, which fails closed only when that working-copy path is a link leaving the project.
+     *
+     * @param project the project the mount serves; may be {@code null}
+     * @return the project folder, or empty when the project is not stored in a local directory
+     */
+    static Optional<Path> projectBoundary(AProject project) {
+        if (project == null) {
+            return Optional.empty();
+        }
+        if (project instanceof RulesProject rulesProject) {
+            if (rulesProject.isOpened()) {
+                return localRoot(rulesProject.getRepository())
+                        .map(anchor -> under(anchor, rulesProject.getFolderPath()));
+            }
+            return localRoot(rulesProject.getDesignRepository())
+                    .map(anchor -> under(anchor, rulesProject.getRealPath()));
+        }
+        return localRoot(project.getRepository()).map(anchor -> under(anchor, project.getRealPath()));
+    }
+
+    // V1: real-path containment of a path under a boundary; links may not lead out of it.
+    /**
+     * Tells whether the input, resolved under the boundary, stays inside the boundary on disk.
+     *
+     * <p>The input is resolved lexically first, which rejects absolute input and parent segments.
+     * The deepest existing entry of the result, a dangling link included, is then resolved to its
+     * real location and the part still to be created is appended to it. That part contains no links,
+     * because only existing entries can be links. The result must lie under the boundary.
+     *
+     * <p>The boundary itself is compared lexically, so a boundary that is itself a link, or that sits
+     * under a link, is rejected. With an empty input the check therefore means that the boundary sits
+     * at its own lexical place. Links that stay inside the boundary are accepted; links to a sibling
+     * project or outside are not. A dangling link, a link loop or an unparsable input is rejected.
+     *
+     * @param boundary absolute, normalized directory the input may not leave
+     * @param input    path relative to the boundary; {@code null} or empty for the boundary itself
+     * @return {@code true} only when the real location of the input lies under the boundary
+     */
+    static boolean resolvesInside(Path boundary, String input) {
+        try {
+            var target = input == null || input.isEmpty() ? boundary : boundary.resolve(input).normalize();
+            if (!target.startsWith(boundary)) {
+                return false;
+            }
+            return resolveThroughDeepestExisting(target).map(real -> real.startsWith(boundary)).orElse(false);
+        } catch (IOException | RuntimeException e) {
+            return false;
+        }
+    }
+
+    // V1: the anchor's real location; an unresolvable anchor stays lexical so later checks fail closed.
+    /**
+     * Real location of the path, resolved through its deepest existing ancestor. When nothing can be
+     * resolved, the absolute normalized path is returned, and the containment checks against it then
+     * fail closed.
+     */
+    private static Path realLocation(Path path) {
+        var absolute = path.toAbsolutePath().normalize();
+        try {
+            return resolveThroughDeepestExisting(absolute).orElse(absolute);
+        } catch (IOException | RuntimeException e) {
+            return absolute;
+        }
+    }
+
+    // V1: the walk shared by realLocation and resolvesInside.
+    /**
+     * Resolves the path through its deepest existing entry: the real location of that entry with the
+     * rest of the path appended. An entry exists when it is present itself, so a dangling link is
+     * found and then fails to resolve.
+     *
+     * @return the resolved path, or empty when no ancestor of the path exists
+     * @throws IOException when the deepest existing entry cannot be resolved, such as a dangling link
+     */
+    private static Optional<Path> resolveThroughDeepestExisting(Path path) throws IOException {
+        var existing = path;
+        while (existing != null && !Files.exists(existing, LinkOption.NOFOLLOW_LINKS)) {
+            existing = existing.getParent();
+        }
+        if (existing == null) {
+            return Optional.empty();
+        }
+        return Optional.of(existing.toRealPath().resolve(existing.relativize(path)));
+    }
+
+    // V1: a slash-separated relative path resolved lexically under an anchor.
+    private static Path under(Path anchor, String relative) {
+        return anchor.resolve(FilePaths.trimSlashes(relative)).normalize();
+    }
 }

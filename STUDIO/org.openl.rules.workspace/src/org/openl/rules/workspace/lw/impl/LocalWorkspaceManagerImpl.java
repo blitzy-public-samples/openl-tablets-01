@@ -2,20 +2,26 @@ package org.openl.rules.workspace.lw.impl;
 
 import java.io.File;
 import java.io.FileNotFoundException;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.text.MessageFormat;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Predicate;
 
 import lombok.Setter;
 import lombok.extern.slf4j.Slf4j;
+import org.jspecify.annotations.Nullable;
 import org.springframework.core.env.PropertyResolver;
 
 import org.openl.rules.project.abstraction.LockEngine;
 import org.openl.rules.project.impl.local.DummyLockEngine;
 import org.openl.rules.project.impl.local.LockEngineImpl;
 import org.openl.rules.project.impl.local.MetainfoRegistry;
+import org.openl.rules.repository.api.Repository;
 import org.openl.rules.workspace.dtr.DesignTimeRepository;
 import org.openl.rules.workspace.lw.LocalWorkspace;
 import org.openl.rules.workspace.lw.LocalWorkspaceListener;
@@ -34,6 +40,8 @@ public class LocalWorkspaceManagerImpl implements LocalWorkspaceManager, LocalWo
     private String workspaceHome;
     @Setter
     private boolean enableLocks = true;
+    // V1: extra user-id check injected by the web module; accepts every id by default
+    private Predicate<String> folderNameCheck = name -> true;
 
     // User name -> user workspace
     private final Map<String, LocalWorkspaceImpl> localWorkspaces = new HashMap<>();
@@ -54,6 +62,19 @@ public class LocalWorkspaceManagerImpl implements LocalWorkspaceManager, LocalWo
     public LocalWorkspaceManagerImpl(PropertyResolver propertyResolver, DesignTimeRepository designTimeRepository) {
         workspaceHome = propertyResolver.getProperty("user.workspace.home");
         this.designTimeRepository = designTimeRepository;
+    }
+
+    // V1: hand-written instead of @Setter, so that null restores the accept-all default
+    /**
+     * Sets the check each user id must pass before it names a workspace folder.
+     *
+     * <p>The web module injects its {@code NameChecker}-backed {@code WorkspaceFolderNameCheck} here, because
+     * this module cannot depend on the web module. {@code null} restores the default, which accepts every id.
+     *
+     * @param folderNameCheck returns {@code true} for an acceptable user id
+     */
+    public void setFolderNameCheck(@Nullable Predicate<String> folderNameCheck) {
+        this.folderNameCheck = folderNameCheck != null ? folderNameCheck : name -> true;
     }
 
     /**
@@ -92,15 +113,62 @@ public class LocalWorkspaceManagerImpl implements LocalWorkspaceManager, LocalWo
      *
      * <p>The user id comes from the authentication and is used as a folder name, so it must stay
      * a single path component right under the workspace root. Otherwise the workspace operations,
-     * including the registry reconciliation, could read or delete files outside the root.
+     * including the registry reconciliation, could read or delete files outside the root. Links under the root
+     * are resolved as well, so the folder cannot lead into another user's folder or outside the root.
      */
     private Path userDir(String userId) {
         var root = getWorkspaceHome();
-        var userDir = root.resolve(userId).toAbsolutePath().normalize();
-        if (!FolderHelper.isSafeFolderName(userId) || !root.equals(userDir.getParent())) {
-            throw new IllegalArgumentException("The user id is not a valid workspace folder name.");
+        try {
+            var userDir = root.resolve(userId).toAbsolutePath().normalize();
+            // V1: the lexical checks run first, then links under the root are resolved
+            if (FolderHelper.isSafeFolderName(userId) && root.equals(userDir.getParent())
+                    && isOwnWorkspaceFolder(root, userId, folderNameCheck)) {
+                return userDir;
+            }
+        } catch (IllegalArgumentException ignored) {
+            // V1: an id the path API cannot parse, such as one with a NUL byte, gets the rejection below
         }
-        return userDir;
+        throw new IllegalArgumentException("The user id is not a valid workspace folder name.");
+    }
+
+    // V1: kept private here, not in a dedicated file (Minimal Change Rule), as V1 allows no shared path component
+    /**
+     * Checks that the user folder is a real folder of its own right under the workspace root.
+     *
+     * <p>The id must pass {@link Repository#validatePath(String)} and the injected check. Then the folder must sit
+     * at its own place under the real root: a link that leads into another user's folder or outside the root is
+     * rejected, and so is a dangling link. Links in the root's own path are configured by the administrator and are
+     * followed. A root or a folder that does not exist yet is accepted, because a missing entry contains no links.
+     *
+     * @param root the lexical workspace root
+     * @param userId the user id, already known to be a single path component right under the root
+     * @param check the injected user-id check
+     * @return {@code true} if the folder cannot lead outside itself
+     */
+    private static boolean isOwnWorkspaceFolder(Path root, String userId, Predicate<String> check) {
+        try {
+            Repository.validatePath(userId);
+            if (!check.test(userId)) {
+                return false;
+            }
+            // The deepest existing ancestor of the root, walked down from the file-system root. A file-system root
+            // that does not exist, such as a missing drive, makes toRealPath() fail below.
+            var existing = root.getRoot();
+            for (var name : root) {
+                var next = existing.resolve(name);
+                if (!Files.exists(next, LinkOption.NOFOLLOW_LINKS)) {
+                    break;
+                }
+                existing = next;
+            }
+            var anchorReal = existing.toRealPath().resolve(existing.relativize(root));
+            var boundary = anchorReal.resolve(userId).normalize();
+            // A dangling link counts as existing here, so toRealPath() rejects it
+            var walked = Files.exists(boundary, LinkOption.NOFOLLOW_LINKS) ? boundary.toRealPath() : boundary;
+            return walked.startsWith(boundary);
+        } catch (IOException | IllegalArgumentException e) {
+            return false;
+        }
     }
 
     @Override

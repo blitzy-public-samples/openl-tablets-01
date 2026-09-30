@@ -9,8 +9,11 @@ import java.net.URISyntaxException;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
+import java.security.SecureRandom;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.Base64;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.Map;
@@ -32,7 +35,8 @@ import org.junit.jupiter.api.condition.DisabledIfSystemProperty;
 class OAuthTest extends AbstractKeycloakTest {
 
     private static final String CLIENT_ID = "openlstudio";
-    private static final String CLIENT_SECRET = "kXo86nuTdOYQzPZ7k09G7vQmqeDNNZoM";
+    // V3: randomness for the per-run unknown access token
+    private static final SecureRandom TOKEN_RANDOM = new SecureRandom();
 
     private final HttpClient client = HttpClient.newBuilder()
             .connectTimeout(Duration.ofMillis(Integer.parseInt(System.getProperty("http.timeout.connect"))))
@@ -124,7 +128,8 @@ class OAuthTest extends AbstractKeycloakTest {
                 assertProtected(browser, "/oauth2/authorization/webstudio");
 
                 // Log in; the session resolves to admin.
-                browser.loginViaOAuth2("admin", "admin");
+                // V3: the realm password is generated at runtime
+                browser.loginViaOAuth2("admin", password("admin"));
                 assertAdminSession(browser);
 
                 // SP-initiated logout redirects to the OIDC end-session endpoint with the id_token_hint.
@@ -144,32 +149,48 @@ class OAuthTest extends AbstractKeycloakTest {
 
     private Map<String, String> retrieveBearerAccessTokens(String authServerUrl) throws URISyntaxException, IOException, InterruptedException {
         Map<String, String> tokens = new HashMap<>();
-        tokens.put("ADMIN_ACCESS_TOKEN", getAccessTokenForUser(authServerUrl, "admin", "admin"));
-        tokens.put("USER1_ACCESS_TOKEN", getAccessTokenForUser(authServerUrl, "user1", "user1"));
-        tokens.put("GUEST_ACCESS_TOKEN", getAccessTokenForUser(authServerUrl, "guest", "guest"));
-        tokens.put("EPBDS12973_DEPLOYER_TOKEN", getAccessTokenForUser(authServerUrl, "epbds12973_deployer", "epbds12973_deployer"));
-        tokens.put("EPBDS12973_EDITOR_TOKEN", getAccessTokenForUser(authServerUrl, "epbds12973_editor", "epbds12973_editor"));
-        tokens.put("EPBDS12973_VIEWER_TOKEN", getAccessTokenForUser(authServerUrl, "epbds12973_viewer", "epbds12973_viewer"));
-        tokens.put("EPBDS14584_MANAGER_TOKEN", getAccessTokenForUser(authServerUrl, "epbds14584_manager", "epbds14584_manager"));
-        tokens.put("EPBDS14584_CONTRIBUTOR_TOKEN", getAccessTokenForUser(authServerUrl, "epbds14584_contributor", "epbds14584_contributor"));
-        tokens.put("EPBDS14584_VIEWER_TOKEN", getAccessTokenForUser(authServerUrl, "epbds14584_viewer", "epbds14584_viewer"));
-        tokens.put("EPBDS14670_MANAGER_TOKEN", getAccessTokenForUser(authServerUrl, "epbds14670_manager", "epbds14670_manager"));
-        tokens.put("EPBDS14670_CONTRIBUTOR_TOKEN", getAccessTokenForUser(authServerUrl, "epbds14670_contributor", "epbds14670_contributor"));
-        tokens.put("EPBDS14670_VIEWER_TOKEN", getAccessTokenForUser(authServerUrl, "epbds14670_viewer", "epbds14670_viewer"));
-        tokens.put("EPBDS14670R_MANAGER_TOKEN", getAccessTokenForUser(authServerUrl, "epbds14670r_manager", "epbds14670r_manager"));
-        tokens.put("EPBDS14670R_CONTRIBUTOR_TOKEN", getAccessTokenForUser(authServerUrl, "epbds14670r_contributor", "epbds14670r_contributor"));
-        tokens.put("EPBDS14670R_VIEWER_TOKEN", getAccessTokenForUser(authServerUrl, "epbds14670r_viewer", "epbds14670r_viewer"));
-        tokens.put("EPBDS15131_ADMIN_TOKEN", getAccessTokenForUser(authServerUrl, "epbds15131_admin", "epbds15131_admin"));
-        tokens.put("EPBDS15134_USER_TOKEN", getAccessTokenForUser(authServerUrl, "epbds15134_user", "epbds15134_user"));
-        tokens.put("EPBDS15621_USER_TOKEN", getAccessTokenForUser(authServerUrl, "epbds15621_user", "epbds15621_user"));
-        tokens.put("UNKNOWN_ACCESS_TOKEN", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c");
+        // V3: realm passwords are generated at runtime
+        tokens.put("ADMIN_ACCESS_TOKEN", getAccessTokenForUser(authServerUrl, "admin", password("admin")));
+        tokens.put("USER1_ACCESS_TOKEN", getAccessTokenForUser(authServerUrl, "user1", password("user1")));
+        tokens.put("GUEST_ACCESS_TOKEN", getAccessTokenForUser(authServerUrl, "guest", password("guest")));
+        tokens.put("EPBDS12973_DEPLOYER_TOKEN", getAccessTokenForUser(authServerUrl, "epbds12973_deployer", password("epbds12973_deployer")));
+        tokens.put("EPBDS12973_EDITOR_TOKEN", getAccessTokenForUser(authServerUrl, "epbds12973_editor", password("epbds12973_editor")));
+        tokens.put("EPBDS12973_VIEWER_TOKEN", getAccessTokenForUser(authServerUrl, "epbds12973_viewer", password("epbds12973_viewer")));
+        tokens.put("EPBDS14584_MANAGER_TOKEN", getAccessTokenForUser(authServerUrl, "epbds14584_manager", password("epbds14584_manager")));
+        tokens.put("EPBDS14584_CONTRIBUTOR_TOKEN", getAccessTokenForUser(authServerUrl, "epbds14584_contributor", password("epbds14584_contributor")));
+        tokens.put("EPBDS14584_VIEWER_TOKEN", getAccessTokenForUser(authServerUrl, "epbds14584_viewer", password("epbds14584_viewer")));
+        tokens.put("EPBDS14670_MANAGER_TOKEN", getAccessTokenForUser(authServerUrl, "epbds14670_manager", password("epbds14670_manager")));
+        tokens.put("EPBDS14670_CONTRIBUTOR_TOKEN", getAccessTokenForUser(authServerUrl, "epbds14670_contributor", password("epbds14670_contributor")));
+        tokens.put("EPBDS14670_VIEWER_TOKEN", getAccessTokenForUser(authServerUrl, "epbds14670_viewer", password("epbds14670_viewer")));
+        tokens.put("EPBDS14670R_MANAGER_TOKEN", getAccessTokenForUser(authServerUrl, "epbds14670r_manager", password("epbds14670r_manager")));
+        tokens.put("EPBDS14670R_CONTRIBUTOR_TOKEN", getAccessTokenForUser(authServerUrl, "epbds14670r_contributor", password("epbds14670r_contributor")));
+        tokens.put("EPBDS14670R_VIEWER_TOKEN", getAccessTokenForUser(authServerUrl, "epbds14670r_viewer", password("epbds14670r_viewer")));
+        tokens.put("EPBDS15131_ADMIN_TOKEN", getAccessTokenForUser(authServerUrl, "epbds15131_admin", password("epbds15131_admin")));
+        tokens.put("EPBDS15134_USER_TOKEN", getAccessTokenForUser(authServerUrl, "epbds15134_user", password("epbds15134_user")));
+        tokens.put("EPBDS15621_USER_TOKEN", getAccessTokenForUser(authServerUrl, "epbds15621_user", password("epbds15621_user")));
+        // V3: a per-run JWT-shaped token that no realm key signs
+        tokens.put("UNKNOWN_ACCESS_TOKEN", unknownAccessToken());
         return tokens;
+    }
+
+    // V3: header, payload and random signature, each base64url-encoded without padding
+    private static String unknownAccessToken() {
+        var encoder = Base64.getUrlEncoder().withoutPadding();
+        var header = "{\"alg\":\"HS256\",\"typ\":\"JWT\"}";
+        var payload = "{\"sub\":\"" + randomValue() + "\",\"jti\":\"" + randomValue() + "\",\"iat\":"
+                + Instant.now().getEpochSecond() + "}";
+        var signature = new byte[32];
+        TOKEN_RANDOM.nextBytes(signature);
+        return encoder.encodeToString(header.getBytes(StandardCharsets.UTF_8)) + "."
+                + encoder.encodeToString(payload.getBytes(StandardCharsets.UTF_8)) + "."
+                + encoder.encodeToString(signature);
     }
 
     private void initStudio(org.openl.itest.core.HttpClient httpClient, String authServerUrl) {
         var oauth2Config = (ObjectNode) httpClient.readTree("test-resources-oauth2/set-authentication-template.json");
         oauth2Config.put("issuerUri", authServerUrl + "/realms/openlstudio");
-        oauth2Config.put("clientSecret", CLIENT_SECRET);
+        // V3: generated client secret
+        oauth2Config.put("clientSecret", clientSecret());
         oauth2Config.put("clientId", CLIENT_ID);
         httpClient.postForObject("/rest/admin/settings/authentication", oauth2Config);
     }
@@ -181,7 +202,8 @@ class OAuthTest extends AbstractKeycloakTest {
                 .timeout(Duration.ofMillis(Integer.parseInt(System.getProperty("http.timeout.read"))))
                 .POST(HttpRequest.BodyPublishers.ofString("grant_type=password&scope=openid profile email" +
                         "&client_id=" + CLIENT_ID +
-                        "&client_secret=" + CLIENT_SECRET +
+                        // V3: generated client secret
+                        "&client_secret=" + clientSecret() +
                         "&username=" + username +
                         "&password=" + password))
                 .build();
