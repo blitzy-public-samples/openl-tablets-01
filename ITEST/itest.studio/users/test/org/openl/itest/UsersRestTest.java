@@ -2,18 +2,30 @@ package org.openl.itest;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
 
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
+import java.io.Reader;
+import java.io.UncheckedIOException;
 import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.security.SecureRandom;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.util.ArrayList;
+import java.util.Base64;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Properties;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 import jakarta.mail.Message;
 import jakarta.mail.MessagingException;
 import jakarta.mail.internet.MimeMessage;
@@ -45,6 +57,14 @@ class UsersRestTest {
     private static Connection h2Connection;
     private static final String DB_DUMP_FILE = "target/dump-%s.sql".formatted(System.currentTimeMillis());
 
+    // V7: generated at runtime (AAP 0.8.3); alphanumeric, so fixtures embed the values unescaped
+    private static final SecureRandom RANDOM = new SecureRandom();
+    private static final String ALPHANUMERIC = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    private static final int SECRET_LENGTH = 16;
+    private static final String BASIC_PREFIX = "Basic ";
+    private static String mailPassword;
+    private static String adminAuth;
+
     @BeforeAll
     static void setUp() throws Exception {
         h2Server = Server.createTcpServer("-tcp", "-tcpAllowOthers", "-ifNotExists");
@@ -57,8 +77,23 @@ class UsersRestTest {
                 .withInitParam("db.url", dbUrl)
                 .start();
 
+        // V7: credentials are generated or derived at runtime (AAP 0.8.3)
+        String adminName = administratorName();
+        adminAuth = basic(adminName, adminName); // AdminUsers seeds each administrator with its name as password
+        String jsmithPassword1 = randomSecret("jsmith", "jdoe", adminName);
+        String jsmithPassword2 = randomSecret("jsmith", "jdoe", adminName, jsmithPassword1);
+        String jsmithPassword3 = randomSecret("jsmith", "jdoe", adminName, jsmithPassword1, jsmithPassword2);
+        client.localEnv.put("ADMIN_AUTH_TOCKEN", adminAuth);
+        client.localEnv.put("JSMITH_PASSWORD_1", jsmithPassword1);
+        client.localEnv.put("JSMITH_PASSWORD_2", jsmithPassword2);
+        client.localEnv.put("JSMITH_PASSWORD_3", jsmithPassword3);
+        client.localEnv.put("JDOE_PASSWORD", randomSecret("jsmith", "jdoe", adminName));
+        client.localEnv.put("JSMITH_BASIC_2", basic("jsmith", jsmithPassword2));
+        client.localEnv.put("JSMITH_BASIC_3", basic("jsmith", jsmithPassword3));
+
+        mailPassword = randomSecret(); // V7: generated SMTP password instead of a literal
         smtpServer = new GreenMail(new ServerSetup(0, null, ServerSetup.PROTOCOL_SMTP));
-        smtpServer.setUser("username@email", "password");
+        smtpServer.setUser("username@email", mailPassword); // V7: generated at runtime
         smtpServer.start();
 
         SmtpServer smtp = smtpServer.getSmtp();
@@ -71,10 +106,15 @@ class UsersRestTest {
 
     @AfterAll
     static void tearDown() throws Exception {
-        client.close();
-        h2Connection.close();
-        h2Server.stop();
-        smtpServer.stop();
+        // V7: after shutdown, fail if a generated secret was saved with a mismatching response
+        try {
+            client.close();
+            h2Connection.close();
+            h2Server.stop();
+            smtpServer.stop();
+        } finally {
+            assertNoGeneratedSecretsSaved();
+        }
     }
 
     @AfterEach
@@ -143,13 +183,15 @@ class UsersRestTest {
         client.send("users-service/mail/users-mail-config-1.get");
 
         var newMailConfig = new MailConfigRequest();
-        newMailConfig.password = "password";
+        newMailConfig.password = mailPassword; // V7: generated at runtime
         newMailConfig.url = mailUrl;
         newMailConfig.username = "username@email";
-        client.postForObject("/rest/admin/settings/mail", newMailConfig, "Authorization", "Basic YWRtaW46YWRtaW4=");
+        // V7: the administrator header is derived at runtime
+        client.postForObject("/rest/admin/settings/mail", newMailConfig, "Authorization", adminAuth);
         client.send("users-service/mail/studio-settings");
 
-        var mailConfig = client.getForObject("/rest/admin/settings/mail", MailConfigResponse.class, 200, "Authorization", "Basic YWRtaW46YWRtaW4=");
+        // V7: the administrator header is derived at runtime
+        var mailConfig = client.getForObject("/rest/admin/settings/mail", MailConfigResponse.class, 200, "Authorization", adminAuth);
         assertTrue(mailConfig.password.secret); // password must not be exposed to the user due to security reasons
         assertEquals("username@email", mailConfig.username);
         assertEquals(mailUrl, mailConfig.url);
@@ -189,7 +231,8 @@ class UsersRestTest {
         String content = bufferedReader.lines().collect(Collectors.joining());
         int tokenStartIndex = content.indexOf(TOKEN_PARAM) + TOKEN_PARAM.length();
         String token = content.substring(tokenStartIndex, tokenStartIndex + TOKEN_LENGTH);
-        client.getForObject("/rest/mail/verify/" + token, String.class, 204, "Authorization", "Basic YWRtaW46YWRtaW4=");
+        // V7: the administrator header is derived at runtime
+        client.getForObject("/rest/mail/verify/" + token, String.class, 204, "Authorization", adminAuth);
         inputStreamReader.close();
         bufferedReader.close();
 
@@ -197,6 +240,94 @@ class UsersRestTest {
 
         client.send("users-service/mail/reset-mail-config");
         client.send("users-service/mail/users-mail-config-1.get");
+    }
+
+    // V7: first administrator configured for the suite; AdminUsers seeds it with its user name as the password
+    private static String administratorName() {
+        Path file = Path.of("openl-repository", "application.properties");
+        Properties properties = new Properties();
+        try (Reader reader = Files.newBufferedReader(file, StandardCharsets.UTF_8)) {
+            properties.load(reader);
+        } catch (IOException e) {
+            throw new IllegalStateException("Cannot read " + file, e);
+        }
+        for (String name : properties.getProperty("security.administrators", "").split(",", -1)) {
+            if (!name.isBlank()) {
+                return name.trim();
+            }
+        }
+        throw new IllegalStateException("security.administrators is not set in " + file);
+    }
+
+    // V7: random alphanumeric secret of SECRET_LENGTH characters, different from every excluded value
+    private static String randomSecret(String... excluded) {
+        List<String> taken = List.of(excluded);
+        String secret;
+        do {
+            StringBuilder builder = new StringBuilder(SECRET_LENGTH);
+            for (int i = 0; i < SECRET_LENGTH; i++) {
+                builder.append(ALPHANUMERIC.charAt(RANDOM.nextInt(ALPHANUMERIC.length())));
+            }
+            secret = builder.toString();
+        } while (taken.contains(secret));
+        return secret;
+    }
+
+    // V7: HTTP Basic header value, UTF-8 encoded as Spring's BasicAuthenticationFilter decodes it
+    private static String basic(String user, String password) {
+        return BASIC_PREFIX + Base64.getEncoder()
+                .encodeToString((user + ":" + password).getBytes(StandardCharsets.UTF_8));
+    }
+
+    // V7: fails, naming only variables and counts, when a saved mismatching response holds a generated secret.
+    // ADMIN_AUTH_TOCKEN is left out: it is derived, not secret, and unedited fixtures still carry it literally.
+    private static void assertNoGeneratedSecretsSaved() {
+        Path root = Path.of(System.getProperty("server.responses", "target/responses"));
+        if (!Files.isDirectory(root)) {
+            return;
+        }
+        Map<String, String> secrets = new LinkedHashMap<>();
+        if (client != null) {
+            for (String name : List.of("JSMITH_PASSWORD_1", "JSMITH_PASSWORD_2", "JSMITH_PASSWORD_3",
+                    "JDOE_PASSWORD")) {
+                secrets.put(name, client.localEnv.get(name));
+            }
+            for (String name : List.of("JSMITH_BASIC_2", "JSMITH_BASIC_3")) {
+                String value = client.localEnv.get(name);
+                secrets.put(name, value);
+                if (value != null && value.startsWith(BASIC_PREFIX)) {
+                    secrets.put(name + " (base64)", value.substring(BASIC_PREFIX.length()));
+                }
+            }
+        }
+        secrets.put("MAIL_PASSWORD", mailPassword);
+
+        List<Path> files;
+        try (Stream<Path> walk = Files.walk(root)) {
+            files = walk.filter(Files::isRegularFile).toList();
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+        Map<String, Integer> counts = new LinkedHashMap<>();
+        for (Path file : files) {
+            String content;
+            try {
+                // ISO-8859-1 maps every byte, and the generated values are ASCII
+                content = new String(Files.readAllBytes(file), StandardCharsets.ISO_8859_1);
+            } catch (IOException e) {
+                throw new UncheckedIOException(e);
+            }
+            secrets.forEach((name, value) -> {
+                if (value != null && !value.isEmpty() && content.contains(value)) {
+                    counts.merge(name, 1, Integer::sum);
+                }
+            });
+        }
+        if (!counts.isEmpty()) {
+            List<String> findings = new ArrayList<>();
+            counts.forEach((name, count) -> findings.add(name + " found in " + count + " saved response file(s)"));
+            fail(String.join("; ", findings));
+        }
     }
 
     public static class MailConfigRequest {

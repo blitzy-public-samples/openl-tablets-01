@@ -7,7 +7,7 @@ Content-Type: application/json
   "groups": [],
   "username": "EPBDS_16356",
   "internalPassword": {
-    "password": "EPBDS_16356"
+    "password": "${EPBDS_16356_PASSWORD}"
   },
   "firstName": "EPBDS",
   "lastName": "16356",
