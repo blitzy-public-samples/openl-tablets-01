@@ -10,6 +10,25 @@ ruleservice.authentication.jwks = https://www.googleapis.com/oauth2/v3/certs
 #ruleservice.authentication.aud = https://openl-tablets.org
 ```
 
+<!-- V2: only the health, info and config admin paths bypass the JWT check -->
+When `ruleservice.authentication.enabled = true`, only requests under the following `/admin/` prefixes are served without a JWT:
+
+* `/admin/healthcheck/`
+* `/admin/info/`
+* `/admin/config/`
+
+Every other `/admin/` path requires a valid JWT: a token with an `exp` claim, issued by the configured `ruleservice.authentication.iss` and addressed to the configured `ruleservice.authentication.aud`. This includes `/admin/deploy` (available when `ruleservice.deployer.enabled = true`), `/admin/services`, `/admin/ui/info`, and any `openapi.json` or `openapi.yaml` document under `/admin/`. Service OpenAPI documents outside `/admin/`, such as `/<service>/openapi.json`, remain public.
+
+Send the token in the `Authorization` header:
+
+```
+Authorization: Bearer ${JWT_TOKEN}
+```
+
+A request without the `Authorization` header receives `401` with `WWW-Authenticate: Basic`. A request with an invalid token receives `403`.
+
+The built-in Rule Services web page cannot attach a token, so its administrative actions (the service list, service errors, `MANIFEST.MF`, and deployment upload, download and delete) are unavailable while authentication is enabled. Its "Properties" (`admin/config/application.properties`) and "System Info" (`admin/info/sys.json`) links keep working.
+
 In case when the default security does not meet the requirements, a custom implementation can be added as follows:
 
 ```java

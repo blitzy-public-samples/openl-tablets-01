@@ -24,6 +24,7 @@ import org.openl.studio.common.exception.BadRequestException;
 import org.openl.studio.common.exception.NotFoundException;
 import org.openl.studio.security.CurrentUserInfo;
 import org.openl.studio.security.NotPatAuth;
+import org.openl.studio.security.audit.SecurityAuditLog;
 import org.openl.studio.security.pat.service.PatGeneratorService;
 import org.openl.studio.users.model.pat.CreatePersonalAccessTokenRequest;
 import org.openl.studio.users.model.pat.CreatedPersonalAccessTokenResponse;
@@ -64,7 +65,10 @@ public class PersonalAccessTokenController {
             throw new BadRequestException("pat.duplicate.name.message");
         }
 
-        return generatorService.generateToken(loginName, request.name(), request.expiresAt());
+        var response = generatorService.generateToken(loginName, request.name(), request.expiresAt());
+        // V11: audit PAT creation (public ID only)
+        SecurityAuditLog.patCreate(response.publicId());
+        return response;
     }
 
     @Operation(summary = "pat.list.summary", description = "pat.list.desc")
@@ -101,5 +105,7 @@ public class PersonalAccessTokenController {
             throw new NotFoundException("pat.not.found.message");
         }
         crudService.deleteByPublicId(publicId);
+        // V11: audit PAT revocation (public ID only)
+        SecurityAuditLog.patRevoke(publicId);
     }
 }

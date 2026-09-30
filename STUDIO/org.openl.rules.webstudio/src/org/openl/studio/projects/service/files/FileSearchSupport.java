@@ -62,6 +62,9 @@ class FileSearchSupport {
         while (!queue.isEmpty()) {
             var folder = queue.poll();
             for (AProjectArtefact artefact : folder.getArtefacts()) {
+                if (!root.contains(artefact.getInternalPath())) {
+                    continue; // V1: an entry a link places outside the mount is not matched, read or descended into
+                }
                 if (matchesSearch(artefact, query, pattern, matcher, extensions, contentNeedle)) {
                     result.add(resourceMapper.map(artefact));
                 }

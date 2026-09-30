@@ -1,0 +1,5 @@
+POST /rest/projects/{PROJECT_ID}/files/CON HTTP/1.1
+Authorization: ${ADMIN_AUTH_TOCKEN}
+Content-Type: application/octet-stream
+
+v1-b11-reserved-name

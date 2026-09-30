@@ -1,8 +1,10 @@
 package org.openl.studio.projects.service.files;
 
 import java.io.IOException;
+import java.nio.file.Path;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Optional;
 import java.util.function.Supplier;
 
 import lombok.AccessLevel;
@@ -57,6 +59,16 @@ public class ProjectFileRoot implements FileRoot {
      */
     private final Supplier<UserInfo> author;
     private final DesignTimeRepository designTimeRepository;
+    // V1: the project folder on disk that contains() keeps paths inside, resolved once per mount.
+    /**
+     * Folder of the project on disk, resolved on first use from {@link FileRoot#projectBoundary(AProject)}.
+     * Empty when the project is not stored in a local directory. Not final, so the generated
+     * constructor keeps its six parameters.
+     *
+     * <p>No synchronization is needed: {@link ProjectFileRootFactory} builds a new mount for each
+     * request, so the mount is never shared between threads.
+     */
+    private Optional<Path> boundary;
 
     @Override
     public AProjectFolder readFolder(String version) {
@@ -213,6 +225,44 @@ public class ProjectFileRoot implements FileRoot {
             return fileLookupService.lookup(project, project.getDesignRepository(), anchor, true);
         } catch (IOException e) {
             throw new ConflictException("file.read.failed.message");
+        }
+    }
+
+    // V1: real-path containment of the project mount; links may not lead out of the project folder.
+    /**
+     * Tells whether the path stays inside the project folder once it is resolved on disk.
+     *
+     * <p>The path is mount-relative, that is relative to the project folder; {@code ""} denotes the
+     * project folder itself. For an opened project the anchor is the root of the user's working copy
+     * and the boundary is {@code <anchor>/<getFolderPath()>}. For a closed project in a flat or mapped
+     * file design repository, reached through its secured wrapper, the anchor is that repository's
+     * root and the boundary is {@code <anchor>/<getRealPath()>}.
+     *
+     * <p>Links that stay inside the project folder are accepted. Links to a sibling project or
+     * outside the project, dangling links, and a project folder that is itself a link are rejected.
+     *
+     * <p>A project whose backing repository does not unwrap to a {@code FileSystemRepository} (Git,
+     * JDBC, S3, Azure Blob, mocks) has an empty boundary: every path is accepted, and the service's
+     * two lexical validators still apply.
+     *
+     * <p>The check applies to the current state. Historical reads through {@link #readFolder(String)}
+     * come from the versioned design repository; for an opened project they are checked against the
+     * working copy, which only fails closed where a working-copy path is a link leaving the project.
+     *
+     * @param path mount-relative path; empty for the project folder
+     * @return {@code false} when the path resolves outside the project folder or the boundary cannot
+     *         be resolved
+     */
+    @Override
+    public boolean contains(String path) {
+        try {
+            if (boundary == null) {
+                boundary = FileRoot.projectBoundary(project);
+            }
+            return boundary.isEmpty() || FileRoot.resolvesInside(boundary.get(), FilePaths.trimSlashes(path));
+        } catch (RuntimeException e) {
+            // V1: fail closed; the boundary is not cached, so the next call resolves it again.
+            return false;
         }
     }
 

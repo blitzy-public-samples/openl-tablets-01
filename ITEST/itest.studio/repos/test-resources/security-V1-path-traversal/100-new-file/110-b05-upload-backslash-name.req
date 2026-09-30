@@ -1,0 +1,11 @@
+POST /rest/projects/{PROJECT_ID}/files/files/ HTTP/1.1
+Authorization: ${ADMIN_AUTH_TOCKEN}
+Content-Type: multipart/form-data; boundary=WebKitFormBoundary7MA4YWxkTrZu0gW
+
+--WebKitFormBoundary7MA4YWxkTrZu0gW
+Content-Disposition: form-data; name="file"; filename="rules\..\..\x.xlsx"
+Content-Transfer-Encoding: binary
+Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet
+
+&../../task_EPBDS-15494-2-project-design-flat/100-files/Rating.xlsx
+--WebKitFormBoundary7MA4YWxkTrZu0gW--

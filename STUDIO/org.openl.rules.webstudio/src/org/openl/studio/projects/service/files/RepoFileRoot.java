@@ -1,10 +1,12 @@
 package org.openl.studio.projects.service.files;
 
 import java.io.IOException;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Optional;
 
 import lombok.RequiredArgsConstructor;
 import org.springframework.security.acls.domain.BasePermission;
@@ -48,6 +50,16 @@ public class RepoFileRoot implements FileRoot {
     private final AclProjectsHelper aclProjectsHelper;
     private final ProjectFileLookupService fileLookupService;
     private final ProjectLockGuard lockGuard;
+
+    // V1: the real local root of a file-backed repository, the anchor of the containment check.
+    /**
+     * Real root directory of the repository when it is file-backed, empty for any other backend.
+     *
+     * <p>Resolved on first use of {@link #contains(String)} from {@link FileRoot#localRoot(Repository)},
+     * and {@code null} until then. No synchronization is needed, because the mount is built per request
+     * by {@link RepoFileRootFactory#of(Repository, String)} and is not shared between threads.
+     */
+    private Optional<Path> anchor;
 
     @Override
     public AProjectFolder readFolder(String version) {
@@ -110,6 +122,56 @@ public class RepoFileRoot implements FileRoot {
             repository.save(folderData, items, changesetType);
         } catch (IOException e) {
             throw new ConflictException("file.archive.upload.failed.message");
+        }
+    }
+
+    // V1: strict containment; a repository path must sit at its own lexical place under the real root.
+    /**
+     * Tells whether the repository path sits at its own lexical place under the repository's real
+     * root directory.
+     *
+     * <p>This mount is rooted at the repository root and authorizes each repository path separately:
+     * {@code aclProjectsHelper} checks the permission of the artefact at that path. A link at the
+     * entry itself, or at any directory between the real root and it, would read or write a different
+     * repository path, or a location outside the repository, whose ACL was never checked. So no such
+     * link is accepted, even one that stays inside the repository; the check is stricter than the
+     * project boundary of a project mount.
+     *
+     * <p>Links in the root's own path are trusted, because {@link FileRoot#localRoot(Repository)}
+     * returns the real root, which the check starts from. A path that does not exist yet is accepted
+     * when its deepest existing ancestor sits at its own place, so new files and folders can be created.
+     *
+     * <p>Which repositories are checked: {@link RepoFileRootFactory#of(Repository, String)} passes a
+     * flat file repository as its {@code SecureRepository} wrapper, which {@code localRoot} unwraps
+     * through {@code RepositoryDelegate}, and a mapped file repository as the raw
+     * {@code FileSystemRepository} obtained from {@code SecureMappedRepository.getDelegate()}. Both
+     * engage the check. Any other backend accepts every path, including the Git branch wrapper
+     * {@code AuthoringRepository}, which implements {@code BranchRepository} only and so is not
+     * unwrapped: Git reads blobs from its object database, never through working-tree links.
+     *
+     * @param path repository-relative path; empty for the repository root
+     * @return {@code false} when the path, or a directory above it, is a link, or when it cannot be
+     *         resolved
+     */
+    @Override
+    public boolean contains(String path) {
+        try {
+            if (anchor == null) {
+                // V1: resolved once per mount; the mount lives for one request.
+                anchor = FileRoot.localRoot(repository);
+            }
+            if (anchor.isEmpty()) {
+                // V1: not file-backed, so there are no filesystem links to follow.
+                return true;
+            }
+            Path root = anchor.get();
+            Path target = root.resolve(FilePaths.trimSlashes(path)).normalize();
+            // V1: the lexical guard is defensive; callers validate the path first, but the empty-input
+            // walk below alone would accept a lexically escaping target that is not a link.
+            return target.startsWith(root) && FileRoot.resolvesInside(target, "");
+        } catch (RuntimeException e) {
+            // V1: an unparsable path, such as one holding a NUL byte, fails closed.
+            return false;
         }
     }
 

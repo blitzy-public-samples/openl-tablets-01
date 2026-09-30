@@ -1,10 +1,12 @@
 package org.openl.studio.security.pat.config;
 
 import java.time.Clock;
+import java.time.Duration;
 import java.util.Collection;
 import java.util.function.BiFunction;
 
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnExpression;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -67,13 +69,19 @@ public class PatSecurityConfiguration {
      * @param crudService the PAT CRUD service
      * @param passwordEncoder the password encoder for hashing secrets
      * @param clock the clock for generating timestamps
+     * @param defaultExpirationDays lifetime in days applied when a token is created without an expiration date ({@code security.pat.default-expiration-days})
+     * @param maxExpirationDays maximum lifetime in days accepted for a token's expiration date ({@code security.pat.max-expiration-days})
      * @return configured PAT generator service
      */
     @Bean
     public PatGeneratorServiceImpl patGeneratorService(PersonalAccessTokenService crudService,
                                                        PasswordEncoder passwordEncoder,
-                                                       Clock clock) {
-        return new PatGeneratorServiceImpl(crudService, passwordEncoder, clock);
+                                                       Clock clock,
+                                                       @Value("${security.pat.default-expiration-days}") int defaultExpirationDays,
+                                                       @Value("${security.pat.max-expiration-days}") int maxExpirationDays) {
+        // V8: tokens without expiresAt get the configured default lifetime; later dates are capped at the maximum
+        return new PatGeneratorServiceImpl(crudService, passwordEncoder, clock,
+                Duration.ofDays(defaultExpirationDays), Duration.ofDays(maxExpirationDays));
     }
 
     /**

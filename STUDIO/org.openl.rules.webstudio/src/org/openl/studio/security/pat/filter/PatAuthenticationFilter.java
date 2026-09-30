@@ -14,6 +14,7 @@ import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.security.core.context.SecurityContextHolderStrategy;
 import org.springframework.web.filter.OncePerRequestFilter;
 
+import org.openl.studio.security.audit.SecurityAuditLog;
 import org.openl.studio.security.pat.model.PatToken;
 import org.openl.studio.security.pat.service.PatAuthService;
 
@@ -77,6 +78,8 @@ public class PatAuthenticationFilter extends OncePerRequestFilter {
         try {
             patToken = PatToken.parse(tokenValue);
         } catch (IllegalArgumentException e) {
+            // V11: audit the failed PAT attempt; no public ID exists for an unparsable token
+            SecurityAuditLog.authFailure(request, null);
             response.sendError(HttpServletResponse.SC_UNAUTHORIZED, HttpStatus.UNAUTHORIZED.getReasonPhrase());
             return;
         }
@@ -84,11 +87,15 @@ public class PatAuthenticationFilter extends OncePerRequestFilter {
         var resolution = patAuthService.resolveAuthentication(patToken);
 
         if (!resolution.valid()) {
+            // V11: audit the rejected PAT; only the non-secret public ID is logged
+            SecurityAuditLog.authFailure(request, patToken.publicId());
             response.sendError(HttpServletResponse.SC_UNAUTHORIZED, HttpStatus.UNAUTHORIZED.getReasonPhrase());
             return;
         }
 
         var authResult = resolution.authentication();
+        // V11: log every valid PAT authentication, even when the context already holds this user
+        SecurityAuditLog.authSuccess(request, authResult.getName(), patToken.publicId());
 
         if (authenticationIsRequired(authResult.getName())) {
             var context = securityContextHolderStrategy.createEmptyContext();

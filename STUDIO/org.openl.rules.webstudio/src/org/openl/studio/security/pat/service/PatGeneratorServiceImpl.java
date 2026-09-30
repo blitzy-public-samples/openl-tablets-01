@@ -1,6 +1,7 @@
 package org.openl.studio.security.pat.service;
 
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import jakarta.validation.constraints.NotBlank;
 
@@ -9,6 +10,7 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.validation.annotation.Validated;
 
 import org.openl.rules.security.standalone.persistence.PersonalAccessToken;
+import org.openl.studio.common.exception.BadRequestException;
 import org.openl.studio.security.pat.Base62Generator;
 import org.openl.studio.security.pat.model.PatToken;
 import org.openl.studio.users.model.pat.CreatedPersonalAccessTokenResponse;
@@ -33,6 +35,9 @@ public class PatGeneratorServiceImpl implements PatGeneratorService {
     private final PersonalAccessTokenService crudService;
     private final PasswordEncoder passwordEncoder;
     private final Clock clock;
+    // V8: configured default and maximum PAT lifetime
+    private final Duration defaultLifetime;
+    private final Duration maxLifetime;
 
     /**
      * Constructs a new PatGeneratorServiceImpl.
@@ -40,13 +45,33 @@ public class PatGeneratorServiceImpl implements PatGeneratorService {
      * @param crudService     the PAT CRUD service for database operations
      * @param passwordEncoder the password encoder for hashing secrets
      * @param clock           the clock for generating timestamps
+     * @param defaultLifetime the lifetime applied when a token is created without an expiration date
+     *                        ({@code security.pat.default-expiration-days})
+     * @param maxLifetime     the maximum lifetime a token may be created with
+     *                        ({@code security.pat.max-expiration-days})
+     * @throws IllegalArgumentException if a lifetime is null, zero or negative, or the default exceeds the maximum
      */
     public PatGeneratorServiceImpl(PersonalAccessTokenService crudService,
                                    PasswordEncoder passwordEncoder,
-                                   Clock clock) {
+                                   Clock clock,
+                                   Duration defaultLifetime,
+                                   Duration maxLifetime) {
         this.crudService = crudService;
         this.passwordEncoder = passwordEncoder;
         this.clock = clock;
+        // V8: a misconfigured lifetime fails at startup instead of producing unbounded or already-expired tokens
+        if (defaultLifetime == null || defaultLifetime.isZero() || defaultLifetime.isNegative()) {
+            throw new IllegalArgumentException("security.pat.default-expiration-days must be a positive number of days");
+        }
+        if (maxLifetime == null || maxLifetime.isZero() || maxLifetime.isNegative()) {
+            throw new IllegalArgumentException("security.pat.max-expiration-days must be a positive number of days");
+        }
+        if (defaultLifetime.compareTo(maxLifetime) > 0) {
+            throw new IllegalArgumentException(
+                    "security.pat.default-expiration-days must not exceed security.pat.max-expiration-days");
+        }
+        this.defaultLifetime = defaultLifetime;
+        this.maxLifetime = maxLifetime;
     }
 
     /**
@@ -54,6 +79,11 @@ public class PatGeneratorServiceImpl implements PatGeneratorService {
      * <p>
      * This implementation generates a unique 16-character public ID and a 32-character secret,
      * handles collision detection for public IDs, and stores the token with a hashed secret.
+     * </p>
+     * <p>
+     * V8: a token requested without an expiration date expires after the configured default lifetime, and an
+     * expiration date later than now plus the configured maximum lifetime is rejected with a
+     * {@link BadRequestException} before anything is generated or stored.
      * </p>
      */
     @Transactional
@@ -65,6 +95,13 @@ public class PatGeneratorServiceImpl implements PatGeneratorService {
 
         if (expiresAt != null && expiresAt.isBefore(now)) {
             throw new IllegalArgumentException("expiresAt must be in the future");
+        }
+
+        // V8: a missing expiration gets the configured default lifetime
+        Instant effectiveExpiresAt = expiresAt != null ? expiresAt : now.plus(defaultLifetime);
+        // V8: reject an expiration beyond the configured maximum lifetime (exactly now + max is accepted)
+        if (effectiveExpiresAt.isAfter(now.plus(maxLifetime))) {
+            throw new BadRequestException("pat.expires-at.max.message", new Object[]{maxLifetime.toDays()});
         }
 
         // generate unique publicId (very low collision, but handle it)
@@ -83,7 +120,7 @@ public class PatGeneratorServiceImpl implements PatGeneratorService {
         token.setLoginName(loginName);
         token.setName(name);
         token.setCreatedAt(now);
-        token.setExpiresAt(expiresAt);
+        token.setExpiresAt(effectiveExpiresAt); // V8
 
         crudService.save(token);
 
@@ -95,7 +132,7 @@ public class PatGeneratorServiceImpl implements PatGeneratorService {
                 .loginName(loginName)
                 .token(pat.asTokenValue())
                 .createdAt(now)
-                .expiresAt(expiresAt)
+                .expiresAt(effectiveExpiresAt) // V8
                 .build();
     }
 }

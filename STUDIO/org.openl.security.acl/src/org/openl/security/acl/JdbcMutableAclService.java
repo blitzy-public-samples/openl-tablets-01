@@ -5,12 +5,15 @@ import java.sql.SQLException;
 import java.sql.Savepoint;
 import javax.sql.DataSource;
 
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.ConnectionCallback;
 import org.springframework.lang.Nullable;
 import org.springframework.security.acls.domain.GrantedAuthoritySid;
 import org.springframework.security.acls.domain.PrincipalSid;
 import org.springframework.security.acls.jdbc.LookupStrategy;
 import org.springframework.security.acls.model.AclCache;
+import org.springframework.security.acls.model.MutableAcl;
+import org.springframework.security.acls.model.ObjectIdentity;
 import org.springframework.security.acls.model.Sid;
 
 public class JdbcMutableAclService extends org.springframework.security.acls.jdbc.JdbcMutableAclService implements MutableAclService {
@@ -24,6 +27,8 @@ public class JdbcMutableAclService extends org.springframework.security.acls.jdb
 
     private final AclCache aclCache;
     private final Sid relevantSystemWideSid;
+    // V11: optional listener told about ACL changes; null when none is defined
+    private AclChangeListener aclChangeListener;
 
     public JdbcMutableAclService(DataSource dataSource,
                                  LookupStrategy lookupStrategy,
@@ -32,6 +37,12 @@ public class JdbcMutableAclService extends org.springframework.security.acls.jdb
         super(dataSource, lookupStrategy, aclCache);
         this.aclCache = aclCache;
         this.relevantSystemWideSid = relevantSystemWideSid;
+    }
+
+    // V11: injected when an AclChangeListener bean exists; absent otherwise
+    @Autowired(required = false)
+    public void setAclChangeListener(AclChangeListener aclChangeListener) {
+        this.aclChangeListener = aclChangeListener;
     }
 
     /**
@@ -144,6 +155,7 @@ public class JdbcMutableAclService extends org.springframework.security.acls.jdb
         jdbcOperations.update(UPDATE_OWNER_QUERY, newOwnerSid, sidId);
         jdbcOperations.update(DELETE_SID_QUERY, sidId);
         aclCache.clearCache();
+        AclChangeListener.record(aclChangeListener, "deleteSid", "sid", false); // V11: report the SID removal
     }
 
     public void updateSid(Sid sid, String newSidName) {
@@ -163,5 +175,50 @@ public class JdbcMutableAclService extends org.springframework.security.acls.jdb
 
         jdbcOperations.update(UPDATE_SID_QUERY, newSidName, currentSidName, isPrincipal);
         aclCache.clearCache();
+        AclChangeListener.record(aclChangeListener, "updateSid", "sid", false); // V11: report the SID rename
+    }
+
+    // V11: report the created ACL to the listener; the parent's exception is rethrown unchanged
+    @Override
+    public MutableAcl createAcl(ObjectIdentity objectIdentity) {
+        try {
+            var acl = super.createAcl(objectIdentity);
+            AclChangeListener.record(aclChangeListener, "createAcl", typeOf(objectIdentity), false);
+            return acl;
+        } catch (RuntimeException e) {
+            AclChangeListener.record(aclChangeListener, "createAcl", typeOf(objectIdentity), true);
+            throw e;
+        }
+    }
+
+    // V11: report the updated ACL to the listener; the parent's exception is rethrown unchanged
+    @Override
+    public MutableAcl updateAcl(MutableAcl acl) {
+        var objectType = acl == null ? null : typeOf(acl.getObjectIdentity());
+        try {
+            var updated = super.updateAcl(acl);
+            AclChangeListener.record(aclChangeListener, "updateAcl", objectType, false);
+            return updated;
+        } catch (RuntimeException e) {
+            AclChangeListener.record(aclChangeListener, "updateAcl", objectType, true);
+            throw e;
+        }
+    }
+
+    // V11: report the deleted ACL to the listener; the parent recurses into this override for each child
+    @Override
+    public void deleteAcl(ObjectIdentity objectIdentity, boolean deleteChildren) {
+        try {
+            super.deleteAcl(objectIdentity, deleteChildren);
+            AclChangeListener.record(aclChangeListener, "deleteAcl", typeOf(objectIdentity), false);
+        } catch (RuntimeException e) {
+            AclChangeListener.record(aclChangeListener, "deleteAcl", typeOf(objectIdentity), true);
+            throw e;
+        }
+    }
+
+    // V11: only the code-defined type name reaches the listener, never the identifier
+    private static @Nullable String typeOf(@Nullable ObjectIdentity oid) {
+        return oid == null ? null : oid.getType();
     }
 }

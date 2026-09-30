@@ -4,7 +4,6 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -16,6 +15,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
 
@@ -29,6 +29,7 @@ import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.security.crypto.password.PasswordEncoder;
 
 import org.openl.rules.security.standalone.persistence.PersonalAccessToken;
+import org.openl.studio.common.exception.BadRequestException;
 import org.openl.studio.security.pat.model.PatToken;
 import org.openl.studio.users.service.pat.PersonalAccessTokenService;
 
@@ -56,7 +57,9 @@ class PatGeneratorServiceImplTest {
         Clock clock = Clock.fixed(FIXED_TIME, ZoneId.of("UTC"));
 
         // Create service with mocked CRUD service
-        generatorService = new PatGeneratorServiceImpl(crudService, passwordEncoder, clock);
+        // V8: default and maximum lifetime
+        generatorService = new PatGeneratorServiceImpl(crudService, passwordEncoder, clock,
+                Duration.ofDays(90), Duration.ofDays(365));
     }
 
     @Test
@@ -72,7 +75,7 @@ class PatGeneratorServiceImplTest {
         assertEquals("jdoe", response.loginName());
         assertEquals("My Token", response.name());
         assertEquals(FIXED_TIME, response.createdAt());
-        assertNull(response.expiresAt());
+        assertEquals(FIXED_TIME.plus(Duration.ofDays(90)), response.expiresAt()); // V8: null expiry defaults to 90 days
 
         // Verify publicId format and length (16 chars, base62)
         assertNotNull(response.publicId());
@@ -90,6 +93,11 @@ class PatGeneratorServiceImplTest {
         // Verify service interactions
         verify(crudService, times(1)).existsByPublicId(anyString());
         verify(crudService, times(1)).save(any(PersonalAccessToken.class));
+
+        // V8: the saved token carries the default expiry, too
+        var tokenCaptor = ArgumentCaptor.forClass(PersonalAccessToken.class);
+        verify(crudService).save(tokenCaptor.capture());
+        assertEquals(FIXED_TIME.plus(Duration.ofDays(90)), tokenCaptor.getValue().getExpiresAt());
     }
 
     @Test
@@ -343,5 +351,87 @@ class PatGeneratorServiceImplTest {
         assertFalse(parts[0].contains("_"), "PublicId should not contain underscores");
         assertFalse(parts[1].contains("-"), "Secret should not contain hyphens");
         assertFalse(parts[1].contains("_"), "Secret should not contain underscores");
+    }
+
+    // V8: builds a service with custom lifetimes over the same fixed clock
+    private PatGeneratorServiceImpl newService(Duration defaultLifetime, Duration maxLifetime) {
+        return new PatGeneratorServiceImpl(crudService,
+                passwordEncoder,
+                Clock.fixed(FIXED_TIME, ZoneId.of("UTC")),
+                defaultLifetime,
+                maxLifetime);
+    }
+
+    // V8: an expiration exactly at now + maximum lifetime is accepted and stored as given
+    @Test
+    void testGenerateToken_AtMaximumExpiration_IsAccepted() {
+        // Arrange
+        var maxExpiration = FIXED_TIME.plus(Duration.ofDays(365));
+        when(crudService.existsByPublicId(anyString())).thenReturn(false);
+        var tokenCaptor = ArgumentCaptor.forClass(PersonalAccessToken.class);
+
+        // Act
+        var response = generatorService.generateToken("jdoe", "My Token", maxExpiration);
+
+        // Assert
+        assertEquals(maxExpiration, response.expiresAt());
+        verify(crudService).save(tokenCaptor.capture());
+        assertEquals(maxExpiration, tokenCaptor.getValue().getExpiresAt());
+    }
+
+    // V8: an expiration one second beyond now + maximum lifetime is rejected with 400 before anything is stored
+    @Test
+    void testGenerateToken_BeyondMaximumExpiration_ThrowsBadRequest() {
+        // Arrange
+        var tooLate = FIXED_TIME.plus(Duration.ofDays(365)).plusSeconds(1);
+
+        // Act & Assert
+        var ex = assertThrows(BadRequestException.class,
+                () -> generatorService.generateToken("jdoe", "My Token", tooLate));
+
+        assertEquals("openl.error.400.pat.expires-at.max.message", ex.getErrorCode());
+        assertEquals("365", String.valueOf(ex.getArgs()[0]));
+        verify(crudService, never()).existsByPublicId(anyString());
+        verify(crudService, never()).save(any(PersonalAccessToken.class));
+    }
+
+    // V8: configured default and maximum lifetimes are honored
+    @Test
+    void testGenerateToken_CustomLifetimes_AreHonored() {
+        // Arrange
+        var service = newService(Duration.ofDays(7), Duration.ofDays(30));
+        when(crudService.existsByPublicId(anyString())).thenReturn(false);
+        var maxExpiration = FIXED_TIME.plus(Duration.ofDays(30));
+
+        // Act
+        var defaulted = service.generateToken("jdoe", "Token 1", null);
+        var atMaximum = service.generateToken("jdoe", "Token 2", maxExpiration);
+        var ex = assertThrows(BadRequestException.class,
+                () -> service.generateToken("jdoe", "Token 3", maxExpiration.plusSeconds(1)));
+
+        // Assert
+        assertEquals(FIXED_TIME.plus(Duration.ofDays(7)), defaulted.expiresAt());
+        assertEquals(maxExpiration, atMaximum.expiresAt());
+        assertEquals("openl.error.400.pat.expires-at.max.message", ex.getErrorCode());
+        assertEquals("30", String.valueOf(ex.getArgs()[0]));
+        verify(crudService, times(2)).save(any(PersonalAccessToken.class));
+    }
+
+    // V8: a null, zero or negative lifetime, or a default above the maximum, fails at construction
+    @Test
+    void testConstructor_RejectsInvalidLifetimes() {
+        var max = Duration.ofDays(365);
+        var def = Duration.ofDays(90);
+
+        assertThrows(IllegalArgumentException.class, () -> newService(null, max));
+        assertThrows(IllegalArgumentException.class, () -> newService(Duration.ZERO, max));
+        assertThrows(IllegalArgumentException.class, () -> newService(Duration.ofDays(-1), max));
+        assertThrows(IllegalArgumentException.class, () -> newService(def, null));
+        assertThrows(IllegalArgumentException.class, () -> newService(def, Duration.ZERO));
+        assertThrows(IllegalArgumentException.class, () -> newService(def, Duration.ofDays(-1)));
+        assertThrows(IllegalArgumentException.class, () -> newService(Duration.ofDays(31), Duration.ofDays(30)));
+
+        // Equal default and maximum are a valid configuration
+        assertNotNull(newService(Duration.ofDays(30), Duration.ofDays(30)));
     }
 }
