@@ -1,5 +1,9 @@
 package org.openl.studio.repositories.service;
 
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.LinkOption;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -27,7 +31,10 @@ import org.openl.rules.project.abstraction.RulesProject;
 import org.openl.rules.repository.api.BranchRepository;
 import org.openl.rules.repository.api.FileData;
 import org.openl.rules.repository.api.Repository;
+import org.openl.rules.repository.api.RepositoryDelegate;
+import org.openl.rules.repository.file.FileSystemRepository;
 import org.openl.rules.rest.acl.service.AclProjectsHelper;
+import org.openl.rules.webstudio.util.NameChecker;
 import org.openl.rules.webstudio.web.CopyProjectTransformer;
 import org.openl.rules.webstudio.web.repository.project.CustomTemplatesResolver;
 import org.openl.rules.webstudio.web.repository.project.PredefinedTemplatesResolver;
@@ -36,6 +43,7 @@ import org.openl.rules.webstudio.web.repository.project.TemplatesResolver;
 import org.openl.rules.webstudio.web.repository.upload.ProjectUploader;
 import org.openl.rules.webstudio.web.repository.upload.zip.ZipCharsetDetector;
 import org.openl.rules.workspace.dtr.DesignTimeRepository;
+import org.openl.rules.workspace.dtr.FolderMapper;
 import org.openl.rules.workspace.dtr.impl.FileMappingData;
 import org.openl.rules.workspace.filter.PathFilter;
 import org.openl.rules.workspace.uw.UserWorkspace;
@@ -100,6 +108,95 @@ public class ProjectCreationService {
                 throw new BadRequestException("file.path.invalid.message");
             }
         }
+    }
+
+    /**
+     * V1: keeps the folder of a new project inside the design repository it is written to.
+     *
+     * <p>The name and the optional parent path are joined the way the write joins them
+     * ({@link FileMappingData#internalPath}, which trims and normalizes separators), so a value the write
+     * accepts today is not newly rejected for its spacing. The joined path then passes
+     * {@link Repository#validatePath} and {@link NameChecker#validatePath}.
+     *
+     * <p>When the repository keeps its content in a local directory, the physical project folder must also
+     * sit at its own lexical place under the real repository root: a link inside the repository may not
+     * redirect it to another project or outside the root. The folder and the rules location need not exist
+     * yet. Other backends (Git, JDBC, S3, Azure Blob) get the lexical checks only, because they never follow
+     * a working-tree link. The unwrapped repository is only asked for its root; the write still goes through
+     * the secured wrapper, so no ACL check is bypassed.
+     *
+     * <p>A blank name is left to the bean validation that owns it. Every rejection is a 400
+     * {@code file.path.invalid.message}, raised before any conflict mapping of the caller.
+     *
+     * <p>The checks are private to this class: each V1 surface guards its own inputs, and no component is
+     * shared with the file, workspace or upload surfaces. This departs from the Minimal Change Rule's
+     * clause to isolate new code in dedicated files, which the V1 instruction overrides.
+     */
+    private void requireContainedProjectFolder(Repository repository, String projectName, String path) {
+        if (StringUtils.isBlank(projectName)) {
+            return;
+        }
+        try {
+            var relative = FileMappingData.internalPath(path, projectName);
+            Repository.validatePath(relative);
+            NameChecker.validatePath(relative);
+            var root = localRoot(repository);
+            if (root == null) {
+                return;
+            }
+            // The rules location is read only for a local directory, so other backends never need a workspace.
+            var physicalFolder = repository.supports().mappedFolders()
+                    ? relative
+                    : getUserWorkspace().getDesignTimeRepository().getRulesLocation() + projectName;
+            if (!isContained(root, physicalFolder)) {
+                log.debug("A new project folder resolves outside its place in the design repository.");
+                throw new BadRequestException("file.path.invalid.message");
+            }
+        } catch (IOException | IllegalArgumentException e) {
+            // IllegalArgumentException covers InvalidPathException, for example a NUL character in the path.
+            log.debug("A new project folder is rejected: {}", e.getClass().getSimpleName());
+            throw new BadRequestException("file.path.invalid.message");
+        }
+    }
+
+    // V1: the root of a file-backed repository behind its secured and mapped wrappers, or null for other backends
+    @Nullable
+    private static Path localRoot(Repository repository) {
+        var current = repository;
+        while (current instanceof RepositoryDelegate delegate) {
+            current = delegate.getOriginal();
+        }
+        if (current instanceof FolderMapper mapper) {
+            current = mapper.getDelegate();
+        }
+        return current instanceof FileSystemRepository fileSystem ? fileSystem.getRoot() : null;
+    }
+
+    /**
+     * V1: whether the physical folder sits at its own lexical place under the real root.
+     *
+     * <p>Links in the root's own path are configured by an administrator and followed. Below the root, the
+     * folder is compared with its real location, so a folder that is itself a link, or sits under one, is
+     * refused. A dangling link fails to resolve and is refused by the caller.
+     */
+    private static boolean isContained(Path root, String physicalFolder) throws IOException {
+        var anchorReal = realPathOf(root.toAbsolutePath().normalize());
+        var boundary = anchorReal.resolve(physicalFolder).normalize();
+        if (!boundary.startsWith(anchorReal)) {
+            return false;
+        }
+        return realPathOf(boundary).startsWith(boundary);
+    }
+
+    // V1: the real location of a path that may not exist yet: its deepest existing entry resolved, the rest appended
+    private static Path realPathOf(Path target) throws IOException {
+        for (var existing = target; existing != null; existing = existing.getParent()) {
+            // NOFOLLOW_LINKS counts a dangling link as existing, so toRealPath() fails on it instead of skipping it.
+            if (Files.exists(existing, LinkOption.NOFOLLOW_LINKS)) {
+                return existing.toRealPath().resolve(existing.relativize(target));
+            }
+        }
+        return target;
     }
 
     /**
@@ -247,6 +344,16 @@ public class ProjectCreationService {
         if (files.length == 0) {
             throw new NotFoundException("project.template.not-found.message");
         }
+        // V1: contain the new project folder inside the design repository root. A rejection releases the template
+        // files here, because the upload that would release them never runs.
+        try {
+            requireContainedProjectFolder(repository, projectName, path);
+        } catch (BadRequestException e) {
+            for (var file : files) {
+                file.destroy();
+            }
+            throw e;
+        }
         return createFromFiles(repository, projectName, path, new ArrayList<>(List.of(files)), comment,
                 "rules/Models.xlsx", "rules/Algorithms.xlsx", "Models", "Algorithms", tags);
     }
@@ -280,6 +387,8 @@ public class ProjectCreationService {
         // V1: a rejected path or name never reaches the upload, so the files it would have released are released here
         try {
             requireNoControlCharacters(path, projectName);
+            // V1: contain the new project folder inside the design repository root
+            requireContainedProjectFolder(repository, projectName, path);
         } catch (BadRequestException e) {
             files.forEach(ProjectFile::destroy);
             throw e;
@@ -430,6 +539,8 @@ public class ProjectCreationService {
             requireNoControlCharacters(path, newName);
             var designTimeRepository = workspace.getDesignTimeRepository();
             var designPath = designTimeRepository.getRulesLocation() + newName;
+            // V1: contain the copy's folder inside the target repository root; the 400 is never mapped to a conflict
+            requireContainedProjectFolder(targetRepository, newName, path);
             var designData = new FileData();
             designData.setName(designPath);
             designData.setComment(comment);

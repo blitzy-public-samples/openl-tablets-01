@@ -1,0 +1,5 @@
+POST /login HTTP/1.1
+Content-type: application/x-www-form-urlencoded
+Cookie: NO_JSESSIONID=noAuth
+
+username=v9_form&password=${FORM_WRONG_PASSWORD}

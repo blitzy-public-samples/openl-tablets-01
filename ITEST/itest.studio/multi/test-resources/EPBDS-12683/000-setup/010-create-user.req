@@ -1,12 +1,12 @@
 PUT /rest/users HTTP/1.1
-Authorization: Basic YWRtaW46YWRtaW4=
+Authorization: ${ADMIN_AUTH_TOCKEN}
 Content-Type: application/json
 
 {
   "displayName": "EPBDS 12683",
   "username": "EPBDS_12683",
   "internalPassword": {
-    "password": "EPBDS_12683"
+    "password": "${EPBDS_12683_PASSWORD}"
   },
   "firstName": "EPBDS",
   "lastName": "12683",

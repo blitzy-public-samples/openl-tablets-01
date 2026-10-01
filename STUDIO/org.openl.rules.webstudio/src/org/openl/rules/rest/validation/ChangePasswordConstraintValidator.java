@@ -50,6 +50,11 @@ public class ChangePasswordConstraintValidator implements ConstraintValidator<Ch
                 return false;
             }
 
+            // V7: a new password must satisfy the local password policy.
+            if (StringUtils.isNotEmpty(value.getNewPassword()) && !LocalPasswordPolicy.check(value.getNewPassword(), context)) {
+                return false;
+            }
+
         }
         return true;
     }

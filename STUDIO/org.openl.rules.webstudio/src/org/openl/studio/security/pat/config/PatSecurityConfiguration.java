@@ -18,6 +18,7 @@ import org.openl.rules.security.standalone.dao.PersonalAccessTokenDao;
 import org.openl.rules.security.standalone.dao.UserDao;
 import org.openl.rules.webstudio.service.AdminUsers;
 import org.openl.rules.webstudio.service.ExternalGroupService;
+import org.openl.studio.security.GetUserPrivileges;
 import org.openl.studio.security.pat.filter.PatAuthenticationFilter;
 import org.openl.studio.security.pat.service.PatAuthService;
 import org.openl.studio.security.pat.service.PatAuthServiceImpl;
@@ -104,6 +105,9 @@ public class PatSecurityConfiguration {
      * <p>
      * This service loads user details with external group privileges, ensuring that
      * PAT-authenticated users have the same authorities as interactively-authenticated users.
+     * When the privilege mapper is {@link GetUserPrivileges}, its
+     * {@link GetUserPrivileges#withoutAdminMatchWarning() non-warning view} is used, because PAT requests
+     * replay the groups stored at the last IdP login and are not IdP logins.
      * </p>
      *
      * @param userDao the user DAO
@@ -117,7 +121,12 @@ public class PatSecurityConfiguration {
                                                                            @Qualifier("adminUsersInitializer") AdminUsers adminUsersInitializer,
                                                                            @Qualifier("privilegeMapper") BiFunction<String, Collection<? extends GrantedAuthority>, Collection<GrantedAuthority>> privilegeMapper,
                                                                            ExternalGroupService externalGroupService) {
-        return new PatUserInfoUserDetailsServiceImpl(userDao, adminUsersInitializer, privilegeMapper, externalGroupService);
+        // V12: PAT requests replay stored groups, so they must not repeat the IdP ADMIN name-match WARN
+        BiFunction<String, Collection<? extends GrantedAuthority>, Collection<GrantedAuthority>> patPrivilegeMapper =
+                privilegeMapper instanceof GetUserPrivileges getUserPrivileges
+                        ? getUserPrivileges.withoutAdminMatchWarning()
+                        : privilegeMapper;
+        return new PatUserInfoUserDetailsServiceImpl(userDao, adminUsersInitializer, patPrivilegeMapper, externalGroupService);
     }
 
     /**

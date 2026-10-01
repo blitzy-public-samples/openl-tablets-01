@@ -1,5 +1,5 @@
 PUT /rest/users HTTP/1.1
-Authorization: Basic YWRtaW46YWRtaW4=
+Authorization: ${ADMIN_AUTH_TOCKEN}
 Content-Type: application/json
 
 {
@@ -7,7 +7,7 @@ Content-Type: application/json
   "groups": ["Administrators"],
   "username": "aa ",
   "internalPassword": {
-    "password": "pass"
+    "password": "${EPBDS_12819_PASSWORD}"
   },
   "firstName": "John",
   "lastName": "Smith",

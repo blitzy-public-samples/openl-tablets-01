@@ -1,16 +1,22 @@
 package org.openl.rules.rest.validation;
 
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.reset;
 import static org.mockito.Mockito.when;
 
 import java.util.HashSet;
+import java.util.Objects;
+import java.util.stream.Stream;
 
 import org.apache.commons.lang3.RandomStringUtils;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.security.crypto.password.PasswordEncoder;
@@ -33,6 +39,9 @@ class UsersValidatorTest extends AbstractConstraintValidatorTest {
 
     private static final String MUST_BE_LESS_THAN_25 = "Must be less than 25.";
     private static final String CANNOT_BE_EMPTY = "Cannot be empty.";
+    // V7: messages of LocalPasswordPolicy
+    private static final String PASSWORD_MIN_LENGTH = "The password must contain at least 12 characters.";
+    private static final String PASSWORD_MAX_BYTES = "The password must not exceed 72 bytes in UTF-8.";
     private static final String MUST_NOT_CONTAIN_FOLLOWING_CHARS = "The name cannot contain spaces and any of the following characters: / \\ : * ? \" < > | { } ~ ^ ; %";
 
     @Autowired
@@ -43,6 +52,13 @@ class UsersValidatorTest extends AbstractConstraintValidatorTest {
 
     @Autowired
     private PasswordEncoder passwordEncoder;
+
+    // V7: credentials generated per test instance (AAP 0.8.3); no literal password in this class
+    private final String currentPassword = RandomStringUtils.secure().nextAlphanumeric(16);
+    private final String currentPasswordHash = RandomStringUtils.secure().nextAlphanumeric(16);
+    private final String newPassword = RandomStringUtils.secure().nextAlphanumeric(16);
+    private final String otherPassword = RandomStringUtils.secure().nextAlphanumeric(16);
+    private final String otherPasswordHash = RandomStringUtils.secure().nextAlphanumeric(16);
 
     @AfterEach
     void reset_mocks() {
@@ -123,6 +139,12 @@ class UsersValidatorTest extends AbstractConstraintValidatorTest {
 
         userEditModel.setPassword(null);
         assertNull(validateAndGetResult(userEditModel));
+
+        // V7: blank password on edit means "unchanged" and stays valid
+        userEditModel.setPassword("");
+        assertNull(validateAndGetResult(userEditModel));
+        userEditModel.setPassword(" ");
+        assertNull(validateAndGetResult(userEditModel));
     }
 
     @Test
@@ -152,7 +174,8 @@ class UsersValidatorTest extends AbstractConstraintValidatorTest {
 
         assertNull(validateAndGetResult(getValidUserCreateModel()));
 
-        userCreateModel.setInternalPassword(new InternalPasswordModel().setPassword("password"));
+        // V7: a generated policy-compliant password instead of a literal
+        userCreateModel.setInternalPassword(new InternalPasswordModel().setPassword(otherPassword));
         assertNull(validateAndGetResult(userCreateModel));
 
         userCreateModel.setUsername("a1!@#$&()_-+='.,");
@@ -196,14 +219,17 @@ class UsersValidatorTest extends AbstractConstraintValidatorTest {
                 CANNOT_BE_EMPTY,
                 wrongInternalPassword,
                 bindingResult.getFieldError("internalPassword"));
+        // V7: the 25-character maximum is replaced by the policy cases of testCreateUser_password_policy
+    }
 
-        wrongInternalPassword = new InternalPasswordModel().setPassword(RandomStringUtils.random(26, "pass"));
-        userCreateModel.setInternalPassword(wrongInternalPassword);
-        bindingResult = validateAndGetResult(userCreateModel);
-        assertFieldError("internalPassword",
-                MUST_BE_LESS_THAN_25,
-                wrongInternalPassword,
-                bindingResult.getFieldError("internalPassword"));
+    // V7: create route, boundary cases of LocalPasswordPolicy
+    @ParameterizedTest(name = "[{index}] {0}")
+    @MethodSource("passwordPolicyCases")
+    void testCreateUser_password_policy(String label, String candidate, String expectedMessage) {
+        when(userManagementService.getUser(anyString())).thenReturn(null);
+        var internalPassword = new InternalPasswordModel().setPassword(candidate);
+        var model = getValidUserCreateModel().setInternalPassword(internalPassword);
+        assertPasswordPolicy(label, model, "internalPassword", expectedMessage, internalPassword);
     }
 
     @Test
@@ -265,9 +291,10 @@ class UsersValidatorTest extends AbstractConstraintValidatorTest {
     void testEditUserProfile_valid() {
         var userProfileEditModel = getValidUserProfileEditModel();
         when(currentUserInfo.getUserName()).thenReturn("jsmith");
-        when(passwordEncoder.matches("pass", "passHash")).thenReturn(true);
+        // V7: generated current password and hash instead of literals
+        when(passwordEncoder.matches(currentPassword, currentPasswordHash)).thenReturn(true);
         var existedUser = new SimpleUser();
-        existedUser.setPassword("passHash");
+        existedUser.setPassword(currentPasswordHash);
         when(userManagementService.getUser(anyString())).thenReturn(existedUser);
 
         assertNull(validateAndGetResult(userProfileEditModel));
@@ -278,13 +305,14 @@ class UsersValidatorTest extends AbstractConstraintValidatorTest {
 
     @Test
     void testEditUserProfile_password_notValid() {
-        when(passwordEncoder.matches("pass", "passHash")).thenReturn(true);
+        // V7: generated credentials instead of literals; the three steps and their messages are unchanged
+        when(passwordEncoder.matches(currentPassword, currentPasswordHash)).thenReturn(true);
         when(currentUserInfo.getUserName()).thenReturn("jsmith");
         var existedUser = new SimpleUser();
-        existedUser.setPassword("passHash");
+        existedUser.setPassword(currentPasswordHash);
         var userProfileEditModel = getValidUserProfileEditModel();
 
-        var changePasswordModel = new ChangePasswordModel().setNewPassword("pass2");
+        var changePasswordModel = new ChangePasswordModel().setNewPassword(newPassword);
         userProfileEditModel.setChangePassword(changePasswordModel);
         when(userManagementService.getUser(anyString())).thenReturn(existedUser);
         var bindingResult = validateAndGetResult(userProfileEditModel);
@@ -293,9 +321,9 @@ class UsersValidatorTest extends AbstractConstraintValidatorTest {
                 changePasswordModel,
                 bindingResult.getFieldError("changePassword"));
 
-        changePasswordModel = new ChangePasswordModel().setNewPassword("pass2")
-                .setCurrentPassword("pass")
-                .setConfirmPassword("pass1");
+        changePasswordModel = new ChangePasswordModel().setNewPassword(newPassword)
+                .setCurrentPassword(currentPassword)
+                .setConfirmPassword(otherPassword);
         userProfileEditModel.setChangePassword(changePasswordModel);
         bindingResult = validateAndGetResult(userProfileEditModel);
         assertFieldError("changePassword",
@@ -303,17 +331,48 @@ class UsersValidatorTest extends AbstractConstraintValidatorTest {
                 changePasswordModel,
                 bindingResult.getFieldError("changePassword"));
 
-        when(passwordEncoder.matches("pass", "passHash")).thenReturn(true);
-        when(passwordEncoder.matches("pass1", "passHash1")).thenReturn(true);
-        changePasswordModel = new ChangePasswordModel().setNewPassword("pass2")
-                .setCurrentPassword("pass1")
-                .setConfirmPassword("pass2");
+        when(passwordEncoder.matches(currentPassword, currentPasswordHash)).thenReturn(true);
+        when(passwordEncoder.matches(otherPassword, otherPasswordHash)).thenReturn(true);
+        changePasswordModel = new ChangePasswordModel().setNewPassword(newPassword)
+                .setCurrentPassword(otherPassword)
+                .setConfirmPassword(newPassword);
         userProfileEditModel.setChangePassword(changePasswordModel);
         bindingResult = validateAndGetResult(userProfileEditModel);
         assertFieldError("changePassword",
                 "Incorrect current password.",
                 changePasswordModel,
                 bindingResult.getFieldError("changePassword"));
+    }
+
+    // V7: profile change route, boundary cases of LocalPasswordPolicy
+    @ParameterizedTest(name = "[{index}] {0}")
+    @MethodSource("passwordPolicyCases")
+    void testEditUserProfile_password_policy(String label, String candidate, String expectedMessage) {
+        when(currentUserInfo.getUserName()).thenReturn("jsmith");
+        var existedUser = new SimpleUser();
+        existedUser.setPassword(currentPasswordHash);
+        when(userManagementService.getUser(anyString())).thenReturn(existedUser);
+        when(passwordEncoder.matches(currentPassword, currentPasswordHash)).thenReturn(true);
+        var changePasswordModel = new ChangePasswordModel().setNewPassword(candidate)
+                .setConfirmPassword(candidate)
+                .setCurrentPassword(currentPassword);
+        var model = getValidUserProfileEditModel().setChangePassword(changePasswordModel);
+        assertPasswordPolicy(label, model, "changePassword", expectedMessage, changePasswordModel);
+    }
+
+    // V7: the policy applies only to a non-empty new password
+    @Test
+    void testEditUserProfile_emptyNewPassword_valid() {
+        when(currentUserInfo.getUserName()).thenReturn("jsmith");
+        var existedUser = new SimpleUser();
+        existedUser.setPassword(currentPasswordHash);
+        when(userManagementService.getUser(anyString())).thenReturn(existedUser);
+        when(passwordEncoder.matches(currentPassword, currentPasswordHash)).thenReturn(true);
+        var changePasswordModel = new ChangePasswordModel().setCurrentPassword(currentPassword)
+                .setNewPassword("")
+                .setConfirmPassword("");
+        var model = getValidUserProfileEditModel().setChangePassword(changePasswordModel);
+        assertNull(validateAndGetResult(model));
     }
 
     @Test
@@ -337,7 +396,8 @@ class UsersValidatorTest extends AbstractConstraintValidatorTest {
                 .setFirstName("John")
                 .setEmail("jsmith@email")
                 .setLastName("Smith")
-                .setInternalPassword(new InternalPasswordModel().setPassword("pass"))
+                // V7: a generated policy-compliant password instead of a literal
+                .setInternalPassword(new InternalPasswordModel().setPassword(newPassword))
                 .setGroups(groups)
                 .setUsername("jsmith");
     }
@@ -349,7 +409,8 @@ class UsersValidatorTest extends AbstractConstraintValidatorTest {
                 .setFirstName("John")
                 .setEmail("jsmith@email")
                 .setLastName("Smith")
-                .setPassword("pass")
+                // V7: a generated password instead of a literal
+                .setPassword(newPassword)
                 .setGroups(groups);
     }
 
@@ -368,8 +429,9 @@ class UsersValidatorTest extends AbstractConstraintValidatorTest {
     }
 
     private UserProfileEditModel getValidUserProfileEditModel() {
+        // V7: generated policy-compliant passwords instead of literals
         return new UserProfileEditModel().setChangePassword(
-                        new ChangePasswordModel().setConfirmPassword("pass2").setNewPassword("pass2").setCurrentPassword("pass"))
+                        new ChangePasswordModel().setConfirmPassword(newPassword).setNewPassword(newPassword).setCurrentPassword(currentPassword))
                 .setShowComplexResult(true)
                 .setShowFormulas(true)
                 .setShowRealNumbers(true)
@@ -386,5 +448,43 @@ class UsersValidatorTest extends AbstractConstraintValidatorTest {
     private void assertOptionalNamesValid(UserInfoModel userInfoModel) {
         userInfoModel.setFirstName("").setLastName(" ");
         assertNull(validateAndGetResult(userInfoModel));
+    }
+
+    // V7: boundary cases of LocalPasswordPolicy (12 code points min, 72 UTF-8 bytes max)
+    static Stream<Arguments> passwordPolicyCases() {
+        var euro = "\u20AC"; // 3 UTF-8 bytes, 1 UTF-16 unit
+        var emoji = Character.toString(0x1F600); // 4 UTF-8 bytes, 2 UTF-16 units
+        return Stream.of(
+                Arguments.of("11 code points", RandomStringUtils.secure().nextAlphanumeric(11), PASSWORD_MIN_LENGTH),
+                Arguments.of("12 code points", RandomStringUtils.secure().nextAlphanumeric(12), null),
+                Arguments.of("72 ASCII bytes", RandomStringUtils.secure().nextAlphanumeric(72), null),
+                Arguments.of("73 ASCII bytes", RandomStringUtils.secure().nextAlphanumeric(73), PASSWORD_MAX_BYTES),
+                Arguments.of("24 x U+20AC (72 bytes)", euro.repeat(24), null),
+                Arguments.of("24 x U+20AC + a (73 bytes)", euro.repeat(24) + "a", PASSWORD_MAX_BYTES),
+                Arguments.of("18 x U+1F600 (72 bytes, 36 UTF-16 units)", emoji.repeat(18), null),
+                Arguments.of("11 x U+1F600 (11 code points, 44 bytes)", emoji.repeat(11), PASSWORD_MIN_LENGTH));
+    }
+
+    // V7: asserts the policy outcome without putting the submitted password into any failure message
+    private void assertPasswordPolicy(String label,
+                                      Object model,
+                                      String field,
+                                      String expectedMessage,
+                                      Object expectedRejectedValue) {
+        var bindingResult = validateAndGetResult(model);
+        if (expectedMessage == null) {
+            assertTrue(bindingResult == null,
+                    () -> label + ": unexpected violations on " + bindingResult.getFieldErrors()
+                            .stream()
+                            .map(e -> e.getField() + "/" + e.getCode())
+                            .toList());
+            return;
+        }
+        assertNotNull(bindingResult, label + ": expected a violation");
+        var fieldError = bindingResult.getFieldError(field);
+        assertNotNull(fieldError, label + ": no error on " + field);
+        assertTrue(Objects.equals(expectedRejectedValue, fieldError.getRejectedValue()),
+                label + ": rejected value is not the submitted one");
+        assertFieldError(field, expectedMessage, expectedRejectedValue, fieldError);
     }
 }

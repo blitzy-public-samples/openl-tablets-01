@@ -1,4 +1,4 @@
 GET /rest/projects/EPBDS-16253-acl-opened?fields=status HTTP/1.1
-Authorization: Basic RVBCRFNfMTYyNTM6RVBCRFNfMTYyNTM=
+Authorization: ${EPBDS_16253_BASIC}
 Cookie: NO_JSESSIONID=noAuth
 

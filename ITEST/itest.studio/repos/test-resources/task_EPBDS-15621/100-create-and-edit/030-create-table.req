@@ -1,5 +1,5 @@
 POST /rest/projects/ZGVzaWduLWZsYXQ6RVBCRFNfMTU2MjE6YzZlMWFkYmZmZjZhNDQzMWU5NzdhODUzNmZmYThhODBmODUwMmZkMGQ5YWM0ZTFlZDM3YmQ0NTgyMmYyZDNiNA==/tables HTTP/1.1
-Authorization: Basic RVBCRFNfMTU2MjE6RVBCRFNfMTU2MjE=
+Authorization: ${EPBDS_15621_BASIC}
 Content-Type: application/json
 
 {

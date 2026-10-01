@@ -14,6 +14,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.io.IOException;
+import java.util.List;
 import java.util.stream.Stream;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
@@ -42,7 +43,6 @@ import org.springframework.security.core.userdetails.User;
 import org.springframework.security.core.userdetails.UserDetails;
 import org.springframework.security.core.userdetails.UsernameNotFoundException;
 
-import org.openl.studio.security.audit.SecurityAuditLog;
 import org.openl.studio.security.pat.model.PatAuthResolution;
 import org.openl.studio.security.pat.model.PatAuthenticationToken;
 import org.openl.studio.security.pat.model.PatToken;
@@ -57,11 +57,13 @@ import org.openl.studio.security.pat.service.PatAuthService;
 class PatAuthenticationFilterTest {
 
     // Valid test tokens matching PatToken format requirements (16 char publicId, 32 char secret)
-    private static final String TEST_PUBLIC_ID = "abc123DEF4567890"; // 16 Base62 chars
-    // V11: every credential in this test (token secret, anonymous key, password) is generated per run
+    // V11: every credential in this test (token parts, anonymous key, password) is generated per run
+    private static final String TEST_PUBLIC_ID = RandomStringUtils.secure().nextAlphanumeric(PatToken.PUBLIC_ID_LENGTH);
     private static final String TEST_SECRET = RandomStringUtils.secure().nextAlphanumeric(PatToken.SECRET_LENGTH);
     private static final String TEST_TOKEN_VALUE = new PatToken(TEST_PUBLIC_ID, TEST_SECRET).asTokenValue();
     private static final String ANONYMOUS_KEY = RandomStringUtils.secure().nextAlphanumeric(16);
+    // V11: the audit logger name, as a literal, so these tests pin the name and compile without the audit class
+    private static final String AUDIT_LOGGER = "org.openl.security.audit";
 
     @Mock
     private PatAuthService patAuthService;
@@ -513,7 +515,7 @@ class PatAuthenticationFilterTest {
         assertNull(response.getErrorMessage());
 
         // Assert - exactly one failure line, with the public ID and never the secret or the token
-        var marker = " " + SecurityAuditLog.LOGGER_NAME + " - ";
+        var marker = " " + AUDIT_LOGGER + " - ";
         var lines = err.capturedString().lines().filter(l -> l.contains(marker)).toList();
         assertEquals(1, lines.size(), () -> "Expected one audit line, got: " + String.join("\n", lines));
         var line = lines.getFirst();
@@ -525,17 +527,191 @@ class PatAuthenticationFilterTest {
         assertFalse(output.contains(TEST_TOKEN_VALUE), "The token reached the log output.");
     }
 
+    // V11: a valid token gets exactly one success line, carrying the public ID and never the token or its secret
+    @Test
+    @StdIo
+    void testAudit_ValidToken_LogsOneSuccessLine(StdErr err) throws ServletException, IOException {
+        // Arrange
+        request.addHeader(HttpHeaders.AUTHORIZATION, "Token " + TEST_TOKEN_VALUE);
+
+        var userDetails = createUserDetails("jdoe", "ROLE_USER");
+        var authentication = new PatAuthenticationToken(
+                userDetails,
+                null,
+                userDetails.getAuthorities()
+        );
+        when(patAuthService.resolveAuthentication(any(PatToken.class)))
+                .thenReturn(PatAuthResolution.valid(authentication));
+
+        // Act
+        filter.doFilterInternal(request, response, filterChain);
+
+        // Assert - one success line with user, address, method and public ID, written to the audit logger
+        var lines = auditLines(err);
+        var successLines = lines.stream().filter(l -> l.contains("event=auth.success")).toList();
+        assertEquals(1, successLines.size(), "exactly one auth.success line is expected");
+        var line = successLines.getFirst();
+        assertTrue(line.contains(AUDIT_LOGGER), "the line must be written to the audit logger");
+        assertTrue(line.contains("outcome=success"), "the line must carry outcome=success");
+        assertTrue(line.contains("user=\"jdoe\""), "the line must carry the authenticated user");
+        assertTrue(line.contains("ip=" + request.getRemoteAddr()), "the line must carry the remote address");
+        assertTrue(line.contains("method=pat"), "the line must carry method=pat");
+        assertTrue(line.contains("pat=" + TEST_PUBLIC_ID), "the line must carry the public ID");
+        assertTrue(lines.stream().noneMatch(l -> l.contains("event=auth.failure")),
+                "no auth.failure line is expected");
+        verify(filterChain, times(1)).doFilter(request, response);
+        assertNoSecretCaptured(err);
+    }
+
+    // V11: an unparsable token gets exactly one failure line, without a public ID and without the token itself
+    @Test
+    @StdIo
+    void testAudit_MalformedToken_LogsOneFailureLineWithoutPublicId(StdErr err) throws ServletException, IOException {
+        // Arrange
+        request.addHeader(HttpHeaders.AUTHORIZATION, "Token invalid-token-format");
+
+        // Act
+        filter.doFilterInternal(request, response, filterChain);
+
+        // Assert - the response is unchanged
+        assertEquals(HttpServletResponse.SC_UNAUTHORIZED, response.getStatus());
+        verify(filterChain, never()).doFilter(request, response);
+
+        // Assert - one failure line, with no user, no public ID and not the presented value
+        var lines = auditLines(err);
+        var failureLines = lines.stream().filter(l -> l.contains("event=auth.failure")).toList();
+        assertEquals(1, failureLines.size(), "exactly one auth.failure line is expected");
+        var line = failureLines.getFirst();
+        assertTrue(line.contains(AUDIT_LOGGER), "the line must be written to the audit logger");
+        assertTrue(line.contains("outcome=failure"), "the line must carry outcome=failure");
+        assertTrue(line.contains("user=\"-\""), "the line must not name a user");
+        assertTrue(line.contains("method=pat"), "the line must carry method=pat");
+        assertFalse(line.contains(" pat="), "the line must not carry a public ID for an unparsable token");
+        assertTrue(lines.stream().noneMatch(l -> l.contains("event=auth.success")),
+                "no auth.success line is expected");
+        assertTrue(Stream.of(err.capturedLines()).noneMatch(l -> l.contains("invalid-token-format")),
+                "captured output must not contain the presented token value");
+        assertNoSecretCaptured(err);
+    }
+
+    // V11: a parsed token that does not resolve gets exactly one failure line with its public ID
+    @Test
+    @StdIo
+    void testAudit_InvalidResolution_LogsOneFailureLineWithPublicId(StdErr err) throws ServletException, IOException {
+        // Arrange
+        request.addHeader(HttpHeaders.AUTHORIZATION, "Token " + TEST_TOKEN_VALUE);
+        when(patAuthService.resolveAuthentication(any(PatToken.class))).thenReturn(PatAuthResolution.invalid());
+
+        // Act
+        filter.doFilterInternal(request, response, filterChain);
+
+        // Assert - the response is unchanged
+        assertEquals(HttpServletResponse.SC_UNAUTHORIZED, response.getStatus());
+        verify(filterChain, never()).doFilter(request, response);
+
+        // Assert - one failure line with the public ID and no user
+        var lines = auditLines(err);
+        var failureLines = lines.stream().filter(l -> l.contains("event=auth.failure")).toList();
+        assertEquals(1, failureLines.size(), "exactly one auth.failure line is expected");
+        var line = failureLines.getFirst();
+        assertTrue(line.contains(AUDIT_LOGGER), "the line must be written to the audit logger");
+        assertTrue(line.contains("outcome=failure"), "the line must carry outcome=failure");
+        assertTrue(line.contains("user=\"-\""), "the line must not name a user");
+        assertTrue(line.contains("method=pat"), "the line must carry method=pat");
+        assertTrue(line.contains("pat=" + TEST_PUBLIC_ID), "the line must carry the public ID");
+        assertTrue(lines.stream().noneMatch(l -> l.contains("event=auth.success")),
+                "no auth.success line is expected");
+        assertNoSecretCaptured(err);
+    }
+
+    // V11: a valid token of the user already in the context is logged once, and the context is left as it is
+    @Test
+    @StdIo
+    void testAudit_ValidTokenSameUserInContext_LogsSuccessWithoutReplacingContext(StdErr err)
+            throws ServletException, IOException {
+        // Arrange
+        request.addHeader(HttpHeaders.AUTHORIZATION, "Token " + TEST_TOKEN_VALUE);
+
+        // Existing authentication for jdoe
+        var existingUserDetails = createUserDetails("jdoe", "ROLE_USER");
+        var existingAuth = new PatAuthenticationToken(
+                existingUserDetails,
+                null,
+                existingUserDetails.getAuthorities()
+        );
+        when(securityContext.getAuthentication()).thenReturn(existingAuth);
+
+        // New PAT authentication also for jdoe
+        var newUserDetails = createUserDetails("jdoe", "ROLE_USER");
+        var newAuth = new PatAuthenticationToken(
+                newUserDetails,
+                null,
+                newUserDetails.getAuthorities()
+        );
+        when(patAuthService.resolveAuthentication(any(PatToken.class))).thenReturn(PatAuthResolution.valid(newAuth));
+
+        // Act
+        filter.doFilterInternal(request, response, filterChain);
+
+        // Assert - the success is logged even though the context is not replaced
+        var successLines = auditLines(err).stream().filter(l -> l.contains("event=auth.success")).toList();
+        assertEquals(1, successLines.size(), "exactly one auth.success line is expected");
+        var line = successLines.getFirst();
+        assertTrue(line.contains("user=\"jdoe\""), "the line must carry the authenticated user");
+        assertTrue(line.contains("pat=" + TEST_PUBLIC_ID), "the line must carry the public ID");
+
+        // Assert - the context decision is unchanged
+        verify(securityContextHolderStrategy, never()).createEmptyContext();
+        verify(securityContextHolderStrategy, never()).setContext(any());
+        verify(securityContext, never()).setAuthentication(any());
+        verify(filterChain, times(1)).doFilter(request, response);
+        assertEquals(200, response.getStatus());
+        assertNoSecretCaptured(err);
+    }
+
+    // V11: a request without the Token prefix is not a PAT attempt, so it writes no audit line
+    @Test
+    @StdIo
+    void testAudit_BearerHeader_LogsNothing(StdErr err) throws ServletException, IOException {
+        // Arrange
+        var bearerValue = RandomStringUtils.secure().nextAlphanumeric(24);
+        request.addHeader(HttpHeaders.AUTHORIZATION, "Bearer " + bearerValue);
+
+        // Act
+        filter.doFilterInternal(request, response, filterChain);
+
+        // Assert
+        assertTrue(auditLines(err).isEmpty(), "no audit line is expected for a request without a PAT");
+        assertTrue(Stream.of(err.capturedLines()).noneMatch(l -> l.contains(bearerValue)),
+                "captured output must not contain the bearer value");
+        verify(patAuthService, never()).resolveAuthentication(any(PatToken.class));
+        verify(filterChain, times(1)).doFilter(request, response);
+        assertNoSecretCaptured(err);
+    }
+
     /**
      * Helper method to create UserDetails with authorities.
      */
     private UserDetails createUserDetails(String username, String... authorities) {
         return new User(
                 username,
-                RandomStringUtils.secure().nextAlphanumeric(16),
+                RandomStringUtils.secure().nextAlphanumeric(16), // V11: generated password (secret hygiene)
                 Stream.of(authorities)
                         .map(SimpleGrantedAuthority::new)
                         .map(a -> (org.springframework.security.core.GrantedAuthority) a)
                         .toList()
         );
+    }
+
+    // V11: the captured audit lines, that is every captured line that carries an event pair
+    private static List<String> auditLines(StdErr err) {
+        return Stream.of(err.capturedLines()).filter(l -> l.contains("event=")).toList();
+    }
+
+    // V11: no captured line may contain the PAT or its secret; the message names the fields, never their values
+    private static void assertNoSecretCaptured(StdErr err) {
+        assertTrue(Stream.of(err.capturedLines())
+                        .noneMatch(l -> l.contains(TEST_TOKEN_VALUE) || l.contains(TEST_SECRET)),
+                "captured output must not contain the PAT or its secret");
     }
 }

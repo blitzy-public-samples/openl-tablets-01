@@ -3,6 +3,7 @@ package org.openl.studio.projects.service.files;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.same;
 import static org.mockito.Mockito.mock;
@@ -237,6 +238,8 @@ class FileRootWriteBatchTest {
         FileRoot root = mock(FileRoot.class);
         when(root.writeFolder()).thenReturn(tree);
         when(root.readFolder(null)).thenReturn(tree);
+        // V1: a mock answers false for the default contains(); this mount holds every path.
+        when(root.contains(anyString())).thenReturn(true);
         return root;
     }
 

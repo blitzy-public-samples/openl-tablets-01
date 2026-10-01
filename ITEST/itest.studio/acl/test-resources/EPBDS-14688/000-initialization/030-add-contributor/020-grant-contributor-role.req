@@ -1,5 +1,5 @@
 PUT /rest/acls/projects/ZGVzaWduOkVQQkRTXzE0NjcwX1Byb2plY3Q=?sid=jdoe&principal=true HTTP/1.1
-Authorization: Basic anNtaXRoOmpzbWl0aA==
+Authorization: ${JSMITH_BASIC}
 Content-Type: application/json
 
 {

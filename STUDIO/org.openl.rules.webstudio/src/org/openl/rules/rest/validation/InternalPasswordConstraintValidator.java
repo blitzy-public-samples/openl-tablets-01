@@ -4,8 +4,6 @@ import jakarta.annotation.Resource;
 import jakarta.validation.ConstraintValidator;
 import jakarta.validation.ConstraintValidatorContext;
 
-import org.hibernate.validator.constraintvalidation.HibernateConstraintValidatorContext;
-
 import org.openl.rules.rest.model.InternalPasswordModel;
 import org.openl.util.StringUtils;
 
@@ -23,11 +21,8 @@ public class InternalPasswordConstraintValidator implements ConstraintValidator<
     public boolean isValid(InternalPasswordModel value, ConstraintValidatorContext context) {
         context.disableDefaultConstraintViolation();
         if (StringUtils.isNotBlank(value.getPassword())) {
-            if (value.getPassword().length() > 25) {
-                context.unwrap(HibernateConstraintValidatorContext.class)
-                        .addMessageParameter("max", 25)
-                        .buildConstraintViolationWithTemplate("{openl.constraints.size.max.message}")
-                        .addConstraintViolation();
+            // V7: the local password policy (12 code points to 72 UTF-8 bytes) replaces the 25-character maximum.
+            if (!LocalPasswordPolicy.check(value.getPassword(), context)) {
                 return false;
             }
         } else if (canCreateInternalUsers) {
