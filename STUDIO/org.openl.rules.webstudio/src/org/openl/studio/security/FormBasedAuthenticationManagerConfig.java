@@ -8,6 +8,7 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.security.authentication.AuthenticationManager;
 import org.springframework.security.config.annotation.authentication.builders.AuthenticationManagerBuilder;
 import org.springframework.security.config.annotation.authentication.configuration.GlobalAuthenticationConfigurerAdapter;
+import org.springframework.util.function.SingletonSupplier;
 
 /**
  * Makes the form login and the HTTP Basic authentication of the {@code ad} and {@code multi} modes authenticate
@@ -26,7 +27,8 @@ import org.springframework.security.config.annotation.authentication.configurati
  * authentication for SAML single logout, and a {@code ProviderManager} given as a parent would pass that setting on
  * to the global manager. Behind the delegate, the global manager keeps its default and erases the credentials of
  * every successful form or HTTP Basic login, as it does without this configurer. The delegate also looks the bean
- * up only on the first attempt, so the global manager can be built before the bean exists.
+ * up on the first attempt and reuses it for every later one, so the global manager can be built before the bean
+ * exists. A lookup that fails is not kept, and the next attempt looks the bean up again.
  */
 // V11: form login and HTTP Basic of the ad and multi modes reach the audited (and V9 lockout) authentication manager
 @Configuration
@@ -38,12 +40,13 @@ public class FormBasedAuthenticationManagerConfig {
     @Bean
     public static GlobalAuthenticationConfigurerAdapter formBasedAuthenticationManagerConfigurer(
             @Qualifier("authenticationManager") ObjectProvider<AuthenticationManager> authenticationManager) {
+        // V11 (PERF-F03): resolve the authenticationManager bean once, on the first attempt, then reuse it
+        SingletonSupplier<AuthenticationManager> manager = SingletonSupplier.of(authenticationManager::getObject);
         return new GlobalAuthenticationConfigurerAdapter() {
             @Override
             public void init(AuthenticationManagerBuilder auth) {
                 // A parent marks the builder as configured, so Spring Security adds no provider bean of its own.
-                auth.parentAuthenticationManager(
-                        authentication -> authenticationManager.getObject().authenticate(authentication));
+                auth.parentAuthenticationManager(authentication -> manager.obtain().authenticate(authentication));
             }
         };
     }

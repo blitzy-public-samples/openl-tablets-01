@@ -37,9 +37,15 @@ import org.openl.rules.workspace.lw.impl.LocalWorkspaceManagerImpl;
  * {@code refreshMetainfoRegistry}. It proves the {@code NameChecker} rows A7 to A11 on the runtime path: the
  * workspace module's own checks accept the A10 and A11 ids, so only the installed check can reject them.
  *
- * <p>Every row asserts the exact rejection message of {@code LocalWorkspaceManagerImpl}, and that the call changes
- * nothing on disk. The parameterized display names hold the row id only, because the payloads carry NUL and control
- * characters that would corrupt the test reports.
+ * <p>The tests of the check on its own assert its boolean result. The lexical rows, run through the manager, assert
+ * that nothing changes in or beside the workspace home, and the exact rejection message of
+ * {@code LocalWorkspaceManagerImpl}; on Windows, the drive-relative row {@code C:x} accepts either that rejection or a
+ * direct child of the home. The look-alike rows A15 accept either the exact rejection or a direct child of the home,
+ * and assert only that nothing changes beside the home. The link rows A12, A13 and A16 assert the exact rejection from
+ * both {@code getWorkspace} and {@code refreshMetainfoRegistry}, and that the link and what lies behind it are
+ * unchanged: for A13, the missing target is never created and the link is still a link. The new-user test asserts that
+ * a new user's first access succeeds with a folder right under the home. The parameterized display names hold the row
+ * id only, because the payloads carry NUL and control characters that would corrupt the test reports.
  */
 class WorkspaceFolderNameCheckTest {
 
@@ -72,10 +78,15 @@ class WorkspaceFolderNameCheckTest {
      * makes the path API throw {@code InvalidPathException}, and the other rows make {@code NameChecker} throw
      * {@code IOException}. On Windows the path API already refuses the control characters of A10.
      *
-     * <p>{@code /etc} (A3), {@code C:\Windows} and {@code C:x} (A4) are left out on purpose. {@code NameChecker} checks
-     * the name elements of the parsed path, so it accepts {@code /etc} on Unix, and {@code C:\Windows} and
-     * {@code C:x} on Windows. {@code LocalWorkspaceManagerImpl} rejects those ids with its own earlier checks, which
-     * {@link #managerRejectsLexicalPayloads(String, String)} covers. This is the existing behavior of
+     * <p>{@code /etc} (A3), {@code C:\Windows} and {@code C:x} (A4) are left out on purpose, because the check does not
+     * reject them on every operating system. {@code NameChecker} checks the name elements of the parsed path, so it
+     * accepts {@code /etc} on Unix, and {@code C:\Windows} and {@code C:x} on Windows.
+     * {@link #managerRejectsLexicalPayloads(String, String)} covers the three ids through the manager. The manager's
+     * earlier checks reject {@code /etc} and {@code C:\Windows} on every operating system, because
+     * {@code FolderHelper.isSafeFolderName} refuses {@code /} and {@code \}. {@code C:x} holds neither separator. On
+     * Windows it is drive-relative, and the manager either rejects it or gives it a direct child of the workspace home,
+     * which stays contained. On every other operating system the installed check rejects it, because
+     * {@code NameChecker} forbids {@code :} in a single-element path. This is the existing behavior of
      * {@code NameChecker}, which this work does not change.
      */
     static Stream<Arguments> rejectedIds() {

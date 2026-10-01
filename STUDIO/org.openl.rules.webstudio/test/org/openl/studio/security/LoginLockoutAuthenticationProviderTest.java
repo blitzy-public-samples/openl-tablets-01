@@ -15,11 +15,6 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.mockito.Mockito.withSettings;
 
-import static org.openl.studio.security.LoginLockoutAuthenticationProvider.LOCK_DURATION;
-import static org.openl.studio.security.LoginLockoutAuthenticationProvider.MAX_ENTRIES;
-import static org.openl.studio.security.LoginLockoutAuthenticationProvider.MAX_FAILURES;
-import static org.openl.studio.security.LoginLockoutAuthenticationProvider.WINDOW;
-
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -57,15 +52,21 @@ import org.springframework.security.core.AuthenticationException;
 import org.springframework.security.core.userdetails.UsernameNotFoundException;
 
 /**
- * Unit tests for {@link LoginLockoutAuthenticationProvider}.
+ * Coverage-only unit tests for {@link LoginLockoutAuthenticationProvider}.
  *
- * <p>V9: an account locks for {@link LoginLockoutAuthenticationProvider#LOCK_DURATION} once
- * {@link LoginLockoutAuthenticationProvider#MAX_FAILURES} consecutive failed logins fall within
- * {@link LoginLockoutAuthenticationProvider#WINDOW}; a successful login resets the counter; and a locked account, known
- * or not, answers exactly like a wrong password. The cases pin each edge of the window and of the lock to the
- * millisecond with a clock moved by hand, prove that concurrent failures always engage the lock, and prove that a
- * burst of distinct names keeps the state within {@link LoginLockoutAuthenticationProvider#MAX_ENTRIES}, purging
- * expired names before evicting the oldest live ones.
+ * <p><b>Evidence class.</b> These are coverage tests of the code the V9 fix adds. The provider does not exist on the
+ * reproduction baseline {@code 7015c25d68}, so this class does not compile there and is not baseline reproduction
+ * evidence. The baseline-compatible V9 reproduction is the {@code repos} ITEST suite: its {@code WebStudioTest} runs
+ * the HTTP flows {@code 020-basic}, {@code 030-ghost}, {@code 040-reset} and {@code 050-form} of
+ * {@code ITEST/itest.studio/repos/test-resources/security-V9-lockout} against the baseline and the fix alike.
+ *
+ * <p>V9: an account locks for fifteen minutes once five consecutive failed logins fall within fifteen minutes; a
+ * successful login resets the counter; and a locked account, known or not, answers exactly like a wrong password. The
+ * cases pin each edge of the window and of the lock to the millisecond with a clock moved by hand, prove that
+ * concurrent failures always engage the lock, and prove that a burst of distinct names keeps the state within ten
+ * thousand names, purging expired names before evicting the oldest live ones. Every expected value is one of this
+ * class's own constants, the specified V9 values, never a constant of the provider; {@link #policyIsTheSpecifiedOne()}
+ * pins the provider's constants to them, so a change of the provider's policy fails these tests.
  *
  * <p>The delegate is a Mockito mock whose answer authenticates the generated password and rejects any other one the
  * way the DAO provider does. It counts its calls, so every helper proves whether an attempt reached it, and it can run
@@ -81,11 +82,26 @@ class LoginLockoutAuthenticationProviderTest {
     /** The message of a rejected login, for a wrong password and for a locked account alike. */
     private static final String BAD_CREDENTIALS = "Bad credentials";
 
+    /** The specified number of consecutive failed logins within the window that locks an account: five. */
+    private static final int FAILURES_TO_LOCK = 5;
+
+    /** The specified sliding window of the failures that lock an account, both ends inclusive: fifteen minutes. */
+    private static final Duration WINDOW_LENGTH = Duration.ofMinutes(15);
+
+    /** The specified length of a lock, from the failure that engaged it: fifteen minutes. */
+    private static final Duration LOCK_LENGTH = Duration.ofMinutes(15);
+
+    /** The specified bound of the names tracked at once: ten thousand. */
+    private static final int ENTRY_BOUND = 10_000;
+
+    /** How many threads fail one account at once in the concurrent-failure case: five, as specified. */
+    private static final int CONCURRENT_FAILURES = 5;
+
     /** How many times the concurrent-failure case runs, each time with a fresh provider and a fresh delegate. */
     private static final int CONCURRENT_ROUNDS = 100;
 
-    /** The number of distinct names in the memory-bound burst: twice the bound. */
-    private static final int BURST_NAMES = 2 * MAX_ENTRIES;
+    /** The number of distinct names in the memory-bound burst: twenty thousand, as specified. */
+    private static final int BURST_NAMES = 20_000;
 
     /** How long a concurrent attempt may take before the test fails instead of hanging. */
     private static final long TIMEOUT_SECONDS = 30;
@@ -122,36 +138,48 @@ class LoginLockoutAuthenticationProviderTest {
     private final LoginLockoutAuthenticationProvider provider = new LoginLockoutAuthenticationProvider(delegate,
             clock);
 
+    /**
+     * Pins the provider's policy, literally, to the specified V9 values, the values every other case of this class
+     * expects through its own constants.
+     */
+    @Test
+    void policyIsTheSpecifiedOne() {
+        assertEquals(5, LoginLockoutAuthenticationProvider.MAX_FAILURES, "Failed logins that lock an account");
+        assertEquals(Duration.ofMinutes(15), LoginLockoutAuthenticationProvider.WINDOW, "Window of the failures");
+        assertEquals(Duration.ofMinutes(15), LoginLockoutAuthenticationProvider.LOCK_DURATION, "Length of a lock");
+        assertEquals(10_000, LoginLockoutAuthenticationProvider.MAX_ENTRIES, "Bound of the tracked names");
+    }
+
     @Test
     void successBeforeTheFifthFailureResetsTheCounter() {
-        failLogins(provider, "alice", MAX_FAILURES - 1);
+        failLogins(provider, "alice", FAILURES_TO_LOCK - 1);
         assertAuthenticates(provider, "alice");
 
         // The success cleared the counter, so as many failures again still do not lock.
-        failLogins(provider, "alice", MAX_FAILURES - 1);
+        failLogins(provider, "alice", FAILURES_TO_LOCK - 1);
         assertAuthenticates(provider, "alice");
 
-        // Only MAX_FAILURES consecutive failures lock.
-        failLogins(provider, "alice", MAX_FAILURES);
+        // Only five consecutive failures lock.
+        failLogins(provider, "alice", FAILURES_TO_LOCK);
         assertLocked(provider, "alice");
     }
 
     @Test
     void fifthConsecutiveFailureLocksTheAccount() {
-        failLogins(provider, "alice", MAX_FAILURES);
+        failLogins(provider, "alice", FAILURES_TO_LOCK);
 
         var thrown = assertThrowsExactly(BadCredentialsException.class,
                 () -> provider.authenticate(attempt("alice", password)));
         assertEquals(BAD_CREDENTIALS, thrown.getMessage());
         assertNull(thrown.getCause(), "A locked attempt must not wrap another exception");
-        verify(delegate, times(MAX_FAILURES)).authenticate(any());
+        verify(delegate, times(FAILURES_TO_LOCK)).authenticate(any());
     }
 
     @Test
     void lockEndsExactlyLockDurationAfterTheLockingFailure() {
-        failLogins(provider, "alice", MAX_FAILURES); // locked at L = START
+        failLogins(provider, "alice", FAILURES_TO_LOCK); // locked at L = START
 
-        clock.advance(LOCK_DURATION.minusMillis(1)); // L + 14:59.999
+        clock.advance(LOCK_LENGTH.minusMillis(1)); // L + 14:59.999
         assertLocked(provider, "alice");
 
         clock.advance(Duration.ofMillis(1)); // exactly L + 15:00
@@ -159,49 +187,53 @@ class LoginLockoutAuthenticationProviderTest {
 
         // The counter starts again from zero. Each failure reaches the delegate, so none of the first four locks;
         // the fifth does.
-        failLogins(provider, "alice", MAX_FAILURES - 1);
+        failLogins(provider, "alice", FAILURES_TO_LOCK - 1);
         failLogin(provider, "alice");
         assertLocked(provider, "alice");
     }
 
     @Test
     void firstAttemptAfterTheLockStartsFromAClearedCounter() {
-        failLogins(provider, "alice", MAX_FAILURES); // locked at L = START
-        clock.advance(LOCK_DURATION); // exactly L + 15:00
+        failLogins(provider, "alice", FAILURES_TO_LOCK); // locked at L = START
+        clock.advance(LOCK_LENGTH); // exactly L + 15:00
 
         // The lock and the window both last 15 minutes, so the locking failures sit at the inclusive edge of the
         // window. The lock that ended cleared them: each new failure reaches the delegate, and only the fifth new
         // one locks again.
-        failLogins(provider, "alice", MAX_FAILURES);
+        failLogins(provider, "alice", FAILURES_TO_LOCK);
         assertLocked(provider, "alice");
-        assertEquals(2 * MAX_FAILURES, delegateCalls.get(), "Attempts that reached the delegate");
+        assertEquals(2 * FAILURES_TO_LOCK, delegateCalls.get(), "Attempts that reached the delegate");
     }
 
     @Test
     void fifthFailureExactlyWindowAfterTheFirstLocks() {
         failLogin(provider, "alice"); // T
         clock.advance(Duration.ofMinutes(1));
-        failLogins(provider, "alice", MAX_FAILURES - 2); // T + 1:00
-        clock.advance(WINDOW.minusMinutes(1)); // exactly T + 15:00
+        failLogins(provider, "alice", FAILURES_TO_LOCK - 2); // T + 1:00
+        clock.advance(WINDOW_LENGTH.minusMinutes(1)); // exactly T + 15:00
         failLogin(provider, "alice");
 
         assertLocked(provider, "alice");
     }
 
     @Test
-    void fifthFailureJustAfterTheWindowDoesNotLock() {
+    void fifthFailureJustAfterTheWindowDoesNotLockAndTheWindowSlides() {
         failLogin(provider, "alice"); // T
         clock.advance(Duration.ofMinutes(1));
-        failLogins(provider, "alice", MAX_FAILURES - 2); // T + 1:00
-        clock.advance(WINDOW.minusMinutes(1).plusMillis(1)); // T + 15:00.001: the first failure left the window
+        failLogins(provider, "alice", FAILURES_TO_LOCK - 2); // T + 1:00
+        clock.advance(WINDOW_LENGTH.minusMinutes(1).plusMillis(1)); // T + 15:00.001: the failure at T left the window
         failLogin(provider, "alice");
 
-        assertAuthenticates(provider, "alice");
+        // No success in between. The sixth failure still reaches the delegate, so the fifth did not lock. The window
+        // slid past the failure at T only: those at T + 1:00, T + 15:00.001 and T + 15:00.002 are five, and lock.
+        clock.advance(Duration.ofMillis(1)); // T + 15:00.002
+        failLogin(provider, "alice");
+        assertLocked(provider, "alice");
     }
 
     @Test
     void attemptsDuringTheLockDoNotExtendIt() {
-        failLogins(provider, "alice", MAX_FAILURES); // locked at L = START
+        failLogins(provider, "alice", FAILURES_TO_LOCK); // locked at L = START
 
         clock.advance(Duration.ofMinutes(5)); // L + 5:00
         assertLocked(provider, "alice");
@@ -211,13 +243,13 @@ class LoginLockoutAuthenticationProviderTest {
         assertLocked(provider, "alice");
         assertRejectedWithoutDelegate(provider, attempt("alice", wrongPassword));
 
-        clock.advance(LOCK_DURATION.minusMinutes(10)); // exactly L + 15:00
+        clock.advance(LOCK_LENGTH.minusMinutes(10)); // exactly L + 15:00
         assertAuthenticates(provider, "alice");
     }
 
     @Test
     void caseVariantsOfANameShareOneCounter() {
-        failLogins(provider, "Alice", MAX_FAILURES - 2);
+        failLogins(provider, "Alice", FAILURES_TO_LOCK - 2);
         failLogins(provider, "alice", 2);
 
         assertLocked(provider, "ALICE");
@@ -228,7 +260,7 @@ class LoginLockoutAuthenticationProviderTest {
     @Test
     void unknownNameLocksAndAnswersLikeALockedExistingAccount() {
         unknownNames.add("ghost");
-        for (int i = 0; i < MAX_FAILURES; i++) {
+        for (int i = 0; i < FAILURES_TO_LOCK; i++) {
             int before = delegateCalls.get();
             var thrown = assertThrowsExactly(UsernameNotFoundException.class,
                     () -> provider.authenticate(attempt("ghost", password)));
@@ -237,7 +269,7 @@ class LoginLockoutAuthenticationProviderTest {
         }
         BadCredentialsException ghostLocked = assertLocked(provider, "ghost");
 
-        failLogins(provider, "alice", MAX_FAILURES);
+        failLogins(provider, "alice", FAILURES_TO_LOCK);
         BadCredentialsException aliceLocked = assertLocked(provider, "alice");
 
         // Whether the account exists cannot be told from the locked response.
@@ -249,12 +281,12 @@ class LoginLockoutAuthenticationProviderTest {
     @Test
     void internalAuthenticationFailuresAreNotCounted() {
         unreachableNames.add("alice");
-        for (int i = 0; i < 2 * MAX_FAILURES; i++) {
+        for (int i = 0; i < 2 * FAILURES_TO_LOCK; i++) {
             var thrown = assertThrowsExactly(InternalAuthenticationServiceException.class,
                     () -> provider.authenticate(attempt("alice", password)));
             assertSame(lastFailure.get(), thrown, "The delegate's exception must be rethrown unchanged");
         }
-        assertEquals(2 * MAX_FAILURES, delegateCalls.get(), "Every uncounted failure must reach the delegate");
+        assertEquals(2 * FAILURES_TO_LOCK, delegateCalls.get(), "Every uncounted failure must reach the delegate");
         assertEquals(0, provider.size(), "An uncounted failure must leave no state behind");
 
         unreachableNames.remove("alice");
@@ -263,7 +295,7 @@ class LoginLockoutAuthenticationProviderTest {
 
     @Test
     void uncountedFailureKeepsTheEarlierFailures() {
-        failLogins(provider, "alice", MAX_FAILURES - 1);
+        failLogins(provider, "alice", FAILURES_TO_LOCK - 1);
         unreachableNames.add("alice");
         assertThrowsExactly(InternalAuthenticationServiceException.class,
                 () -> provider.authenticate(attempt("alice", password)));
@@ -277,24 +309,24 @@ class LoginLockoutAuthenticationProviderTest {
     @Test
     void attemptTheDelegateDoesNotHandleIsNeitherCountedNorKept() {
         declinedNames.add("alice");
-        for (int i = 0; i < 2 * MAX_FAILURES; i++) {
+        for (int i = 0; i < 2 * FAILURES_TO_LOCK; i++) {
             assertNull(provider.authenticate(attempt("alice", wrongPassword)), "A declined attempt has no result");
         }
-        assertEquals(2 * MAX_FAILURES, delegateCalls.get(), "Every declined attempt must reach the delegate");
+        assertEquals(2 * FAILURES_TO_LOCK, delegateCalls.get(), "Every declined attempt must reach the delegate");
         assertEquals(0, provider.size(), "A declined attempt must leave no state behind");
     }
 
     @Test
     void concurrentFailuresAlwaysEngageTheLock() throws Exception {
-        ExecutorService executor = Executors.newFixedThreadPool(MAX_FAILURES);
+        ExecutorService executor = Executors.newFixedThreadPool(CONCURRENT_FAILURES);
         try {
             for (int round = 0; round < CONCURRENT_ROUNDS; round++) {
                 AuthenticationProvider roundDelegate = newDelegate(withSettings());
                 var roundProvider = new LoginLockoutAuthenticationProvider(roundDelegate, clock);
-                var ready = new CountDownLatch(MAX_FAILURES);
+                var ready = new CountDownLatch(CONCURRENT_FAILURES);
                 var start = new CountDownLatch(1);
-                var attempts = new ArrayList<Future<@Nullable Authentication>>(MAX_FAILURES);
-                for (int i = 0; i < MAX_FAILURES; i++) {
+                var attempts = new ArrayList<Future<@Nullable Authentication>>(CONCURRENT_FAILURES);
+                for (int i = 0; i < CONCURRENT_FAILURES; i++) {
                     attempts.add(executor.submit(() -> {
                         ready.countDown();
                         if (!start.await(TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
@@ -313,7 +345,7 @@ class LoginLockoutAuthenticationProviderTest {
                     assertEquals(BAD_CREDENTIALS, cause.getMessage());
                 }
                 assertLocked(roundProvider, "alice");
-                verify(roundDelegate, times(MAX_FAILURES)).authenticate(any());
+                verify(roundDelegate, times(CONCURRENT_FAILURES)).authenticate(any());
             }
         } finally {
             executor.shutdownNow();
@@ -330,22 +362,22 @@ class LoginLockoutAuthenticationProviderTest {
             var thrown = assertThrowsExactly(BadCredentialsException.class,
                     () -> burstProvider.authenticate(attempt(name, wrongPassword)));
             assertEquals(BAD_CREDENTIALS, thrown.getMessage());
-            assertTrue(burstProvider.size() <= MAX_ENTRIES, "The state must never exceed the entry bound");
+            assertTrue(burstProvider.size() <= ENTRY_BOUND, "The state must never exceed the entry bound");
         }
 
         assertEquals(BURST_NAMES, delegateCalls.get(), "Every attempt of the burst must reach the delegate");
-        assertEquals(MAX_ENTRIES, burstProvider.size(), "Names are evicted only down to the entry bound");
+        assertEquals(ENTRY_BOUND, burstProvider.size(), "Names are evicted only down to the entry bound");
     }
 
     @Test
     void expiredEntriesArePurgedBeforeLiveOnesAreEvicted() {
         var boundedProvider = newBoundedProvider();
-        failDistinctNames(boundedProvider, "old", MAX_ENTRIES - 2, Duration.ZERO);
-        failLogins(boundedProvider, "expired-lock", MAX_FAILURES); // locked until START + 15:00
+        failDistinctNames(boundedProvider, "old", ENTRY_BOUND - 2, Duration.ZERO);
+        failLogins(boundedProvider, "expired-lock", FAILURES_TO_LOCK); // locked until START + 15:00
 
-        clock.advance(WINDOW); // START + 15:00
-        failLogins(boundedProvider, "live-lock", MAX_FAILURES); // locked until START + 30:00
-        assertEquals(MAX_ENTRIES, boundedProvider.size());
+        clock.advance(WINDOW_LENGTH); // START + 15:00
+        failLogins(boundedProvider, "live-lock", FAILURES_TO_LOCK); // locked until START + 30:00
+        assertEquals(ENTRY_BOUND, boundedProvider.size());
 
         // One more name takes the state above the bound. Every single failure has left its window and the first
         // lock has ended, so they are purged; the live lock and the new name stay.
@@ -360,55 +392,55 @@ class LoginLockoutAuthenticationProviderTest {
     @Test
     void oldestEntryIsEvictedWhenNoEntryHasExpired() {
         var boundedProvider = newBoundedProvider();
-        failDistinctNames(boundedProvider, "u", MAX_ENTRIES, Duration.ofMillis(1));
-        assertEquals(MAX_ENTRIES, boundedProvider.size());
+        failDistinctNames(boundedProvider, "u", ENTRY_BOUND, Duration.ofMillis(1));
+        assertEquals(ENTRY_BOUND, boundedProvider.size());
 
         failLogin(boundedProvider, "newest");
-        assertEquals(MAX_ENTRIES, boundedProvider.size(), "One name must be evicted for the new one");
+        assertEquals(ENTRY_BOUND, boundedProvider.size(), "One name must be evicted for the new one");
 
         // The oldest name was evicted, so its first failure is forgotten: four more failures do not lock it.
-        failLogins(boundedProvider, "u0", MAX_FAILURES - 1);
+        failLogins(boundedProvider, "u0", FAILURES_TO_LOCK - 1);
         assertAuthenticates(boundedProvider, "u0");
 
         // The newest names were kept, so their earlier failure still counts.
-        String recent = "u" + (MAX_ENTRIES - 1);
-        failLogins(boundedProvider, recent, MAX_FAILURES - 1);
+        String recent = "u" + (ENTRY_BOUND - 1);
+        failLogins(boundedProvider, recent, FAILURES_TO_LOCK - 1);
         assertLocked(boundedProvider, recent);
-        failLogins(boundedProvider, "newest", MAX_FAILURES - 1);
+        failLogins(boundedProvider, "newest", FAILURES_TO_LOCK - 1);
         assertLocked(boundedProvider, "newest");
     }
 
     @Test
     void namesThatFailedAgainAreNotEvictedAsTheOldest() {
         var boundedProvider = newBoundedProvider();
-        failDistinctNames(boundedProvider, "u", MAX_ENTRIES, Duration.ofMillis(1));
+        failDistinctNames(boundedProvider, "u", ENTRY_BOUND, Duration.ofMillis(1));
         failLogin(boundedProvider, "first-new"); // evicts u0, the oldest
 
         // The first half of the remaining names fails again, so the second half now holds the oldest last updates.
-        for (int i = 1; i <= MAX_ENTRIES / 2; i++) {
+        for (int i = 1; i <= ENTRY_BOUND / 2; i++) {
             failLogin(boundedProvider, "u" + i);
         }
         failLogin(boundedProvider, "second-new");
-        assertEquals(MAX_ENTRIES, boundedProvider.size());
+        assertEquals(ENTRY_BOUND, boundedProvider.size());
 
         // The oldest name that did not fail again was evicted, so its only failure is forgotten.
-        String oldestUntouched = "u" + (MAX_ENTRIES / 2 + 1);
-        failLogins(boundedProvider, oldestUntouched, MAX_FAILURES - 1);
+        String oldestUntouched = "u" + (ENTRY_BOUND / 2 + 1);
+        failLogins(boundedProvider, oldestUntouched, FAILURES_TO_LOCK - 1);
         assertAuthenticates(boundedProvider, oldestUntouched);
 
         // A name that failed again was kept with both of its failures.
-        failLogins(boundedProvider, "u1", MAX_FAILURES - 2);
+        failLogins(boundedProvider, "u1", FAILURES_TO_LOCK - 2);
         assertLocked(boundedProvider, "u1");
     }
 
     @Test
     void everyExpiredNameIsPurgedWhenTheBoundIsExceededAgain() {
         var boundedProvider = newBoundedProvider();
-        failDistinctNames(boundedProvider, "u", MAX_ENTRIES, Duration.ofMillis(1));
+        failDistinctNames(boundedProvider, "u", ENTRY_BOUND, Duration.ofMillis(1));
         failLogin(boundedProvider, "first-new"); // every name is live, so only the oldest is evicted
-        assertEquals(MAX_ENTRIES, boundedProvider.size());
+        assertEquals(ENTRY_BOUND, boundedProvider.size());
 
-        clock.advance(WINDOW.plusMinutes(1)); // every failure so far has left its window
+        clock.advance(WINDOW_LENGTH.plusMinutes(1)); // every failure so far has left its window
         failLogin(boundedProvider, "second-new");
         assertEquals(1, boundedProvider.size(), "Every expired name must be purged");
     }
@@ -416,17 +448,17 @@ class LoginLockoutAuthenticationProviderTest {
     @Test
     void stateStaysBoundedAndEvictsTheOldestWhenTheClockGoesBack() {
         var boundedProvider = newBoundedProvider();
-        failDistinctNames(boundedProvider, "u", MAX_ENTRIES, Duration.ofMillis(1));
+        failDistinctNames(boundedProvider, "u", ENTRY_BOUND, Duration.ofMillis(1));
         failLogin(boundedProvider, "first-new"); // evicts u0
 
         clock.advance(Duration.ofMillis(-1));
         failLogin(boundedProvider, "second-new"); // evicts u1, the oldest left
-        assertEquals(MAX_ENTRIES, boundedProvider.size());
+        assertEquals(ENTRY_BOUND, boundedProvider.size());
 
-        failLogins(boundedProvider, "u1", MAX_FAILURES - 1);
+        failLogins(boundedProvider, "u1", FAILURES_TO_LOCK - 1);
         assertAuthenticates(boundedProvider, "u1");
-        String recent = "u" + (MAX_ENTRIES - 1);
-        failLogins(boundedProvider, recent, MAX_FAILURES - 1);
+        String recent = "u" + (ENTRY_BOUND - 1);
+        failLogins(boundedProvider, recent, FAILURES_TO_LOCK - 1);
         assertLocked(boundedProvider, recent);
     }
 
@@ -437,13 +469,13 @@ class LoginLockoutAuthenticationProviderTest {
         // the victim's name, the oldest, is evicted before its attempt ends.
         whileInFlight.put("victim", () -> {
             clock.advance(Duration.ofMillis(1));
-            failDistinctNames(boundedProvider, "other", MAX_ENTRIES, Duration.ZERO);
+            failDistinctNames(boundedProvider, "other", ENTRY_BOUND, Duration.ZERO);
         });
         assertThrowsExactly(BadCredentialsException.class,
                 () -> boundedProvider.authenticate(attempt("victim", wrongPassword)));
 
         // The failure was counted again for the victim's name, so four more lock it.
-        failLogins(boundedProvider, "victim", MAX_FAILURES - 1);
+        failLogins(boundedProvider, "victim", FAILURES_TO_LOCK - 1);
         assertLocked(boundedProvider, "victim");
     }
 
@@ -453,14 +485,14 @@ class LoginLockoutAuthenticationProviderTest {
         // While the victim's attempt is in flight, its name is evicted and then locked by five other attempts at L.
         whileInFlight.put("victim", () -> {
             clock.advance(Duration.ofMillis(1));
-            failDistinctNames(boundedProvider, "other", MAX_ENTRIES, Duration.ZERO);
-            failLogins(boundedProvider, "victim", MAX_FAILURES); // locked at L
+            failDistinctNames(boundedProvider, "other", ENTRY_BOUND, Duration.ZERO);
+            failLogins(boundedProvider, "victim", FAILURES_TO_LOCK); // locked at L
             clock.advance(Duration.ofMinutes(1)); // the attempt in flight ends at L + 1:00
         });
         assertThrowsExactly(BadCredentialsException.class,
                 () -> boundedProvider.authenticate(attempt("victim", wrongPassword)));
 
-        clock.advance(LOCK_DURATION.minusMinutes(1).minusMillis(1)); // L + 14:59.999
+        clock.advance(LOCK_LENGTH.minusMinutes(1).minusMillis(1)); // L + 14:59.999
         assertLocked(boundedProvider, "victim");
         clock.advance(Duration.ofMillis(1)); // exactly L + 15:00: the late failure did not extend the lock
         assertAuthenticates(boundedProvider, "victim");
@@ -473,15 +505,15 @@ class LoginLockoutAuthenticationProviderTest {
         // lock ends before the attempt in flight does.
         whileInFlight.put("victim", () -> {
             clock.advance(Duration.ofMillis(1));
-            failDistinctNames(boundedProvider, "other", MAX_ENTRIES, Duration.ZERO);
-            failLogins(boundedProvider, "victim", MAX_FAILURES); // locked at L
-            clock.advance(LOCK_DURATION); // the attempt in flight ends at exactly L + 15:00
+            failDistinctNames(boundedProvider, "other", ENTRY_BOUND, Duration.ZERO);
+            failLogins(boundedProvider, "victim", FAILURES_TO_LOCK); // locked at L
+            clock.advance(LOCK_LENGTH); // the attempt in flight ends at exactly L + 15:00
         });
         assertThrowsExactly(BadCredentialsException.class,
                 () -> boundedProvider.authenticate(attempt("victim", wrongPassword)));
 
         // The late failure is the first of a new count, so four more lock the name again.
-        failLogins(boundedProvider, "victim", MAX_FAILURES - 1);
+        failLogins(boundedProvider, "victim", FAILURES_TO_LOCK - 1);
         assertLocked(boundedProvider, "victim");
     }
 
@@ -503,7 +535,7 @@ class LoginLockoutAuthenticationProviderTest {
     @Test
     @StdIo
     void lockIsAuditedOnce(StdErr err) {
-        failLogins(provider, "alice", MAX_FAILURES);
+        failLogins(provider, "alice", FAILURES_TO_LOCK);
         assertLocked(provider, "alice");
         assertRejectedWithoutDelegate(provider, attempt("alice", wrongPassword));
 

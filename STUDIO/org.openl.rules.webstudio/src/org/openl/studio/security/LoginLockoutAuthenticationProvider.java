@@ -42,7 +42,7 @@ import org.openl.studio.security.audit.SecurityAuditLog;
  * <li>A lock lasts {@link #LOCK_DURATION} from the failure that engaged it. An attempt strictly before the lock ends
  * is rejected without calling the delegate and does not extend the lock. The first attempt at or after its end
  * proceeds with a cleared counter.</li>
- * <li>A successful login clears the counter, but never a lock still in force when it completes.</li>
+ * <li>A successful login clears the counter and the lock, a lock engaged while it was in flight included.</li>
  * <li>Only {@link BadCredentialsException} and {@link UsernameNotFoundException} count as failures. Any other
  * {@link AuthenticationException}, for example an {@code InternalAuthenticationServiceException} while the directory
  * is unreachable, propagates without being counted.</li>
@@ -61,25 +61,26 @@ import org.openl.studio.security.audit.SecurityAuditLog;
  * </p>
  * <p>
  * Every read-modify-write of one key runs inside {@link ConcurrentHashMap#compute} or
- * {@link ConcurrentHashMap#computeIfPresent}, and the delegate is always called outside them. Before the delegate is
- * called, an attempt reserves a slot of its name and holds it while in flight. A name has {@value #MAX_FAILURES}
- * slots, less one per failure inside the window, so at most {@value #MAX_FAILURES} guesses per name reach the
- * delegate per window, however many attempts arrive in parallel. An attempt that finds no free slot is rejected like
- * a locked one and is not counted. Each attempt releases its slot exactly once when it ends: a counted failure turns
- * the slot into a failure, so the {@value #MAX_FAILURES}th failure always engages the lock. A success clears the
- * counter but never a lock still in force when it completes, and keeps the slots of the other attempts in flight.
- * Every slot belongs to the generation of the entry that granted it: a name evicted and tracked again while attempts
- * were in flight starts a new generation, and an attempt of an older generation that ends afterwards releases no
- * slot of the new one, although its failure still counts and its success still clears the counter. The class is
- * thread-safe.
+ * {@link ConcurrentHashMap#computeIfPresent}, and the delegate is always called outside them. Only a lock in force
+ * holds an attempt back: until a lock engages, every attempt of a name reaches the delegate, however many attempts of
+ * it are in flight. Each failure is counted when it completes, so the {@value #MAX_FAILURES}th completed failure
+ * always engages the lock. Before the delegate is called, an attempt is counted in flight in the entry of its name,
+ * and it leaves that count exactly once when it ends. The in-flight count never rejects an attempt: it keeps an entry
+ * from being purged as stale while an attempt of the name is in flight, and it tells whether an attempt that ends
+ * leaves an entry that can be removed. A success clears the counter and the lock, and removes the entry unless
+ * another attempt of the name is still in flight. Every in-flight count belongs to the generation of the entry that
+ * took it: a name evicted and tracked again while attempts were in flight starts a new generation, and an attempt of
+ * an older generation that ends afterwards leaves the in-flight count of the new one unchanged, although its failure
+ * still counts and its success still clears the counter and the lock. The class is thread-safe.
  * </p>
  * <p>
- * The state holds at most {@value #MAX_ENTRIES} names. When an attempt takes it above that bound, one guarded pass
- * removes the names whose window and lock have both elapsed and that have no attempt in flight and then, if the state
- * is still above the bound, the names with the oldest last update until it is back at the bound. Eviction ignores
- * whether a name exists, so unknown names are treated exactly like known ones. A burst of more than
- * {@value #MAX_ENTRIES} distinct names can therefore evict an older lock or the slots of an attempt in flight; every
- * such failure is still visible in the security audit trail.
+ * The state holds at most {@value #MAX_ENTRIES} names once the attempts in flight have ended. When an attempt takes
+ * it above that bound, a guarded pass removes the names whose window and lock have both elapsed and that have no
+ * attempt in flight and then, if the state is still above the bound, the names with the oldest last update until it
+ * is back at the bound; passes repeat while the state is above the bound. Eviction ignores whether a name exists, so
+ * unknown names are treated exactly like known ones. A burst of more than {@value #MAX_ENTRIES} distinct names can
+ * therefore evict an older lock or the entry of an attempt in flight; every such failure is still visible in the
+ * security audit trail.
  * </p>
  */
 public final class LoginLockoutAuthenticationProvider implements AuthenticationProvider {
@@ -151,7 +152,7 @@ public final class LoginLockoutAuthenticationProvider implements AuthenticationP
 
     /**
      * The last generation given to a new entry. Each entry a name gets, first or after an eviction, has its own, so
-     * an attempt releases a slot only in the entry that granted it.
+     * an attempt leaves the in-flight count only of the entry that counted it.
      */
     private final AtomicLong generations = new AtomicLong(NOT_RESERVED);
 
@@ -178,14 +179,14 @@ public final class LoginLockoutAuthenticationProvider implements AuthenticationP
     }
 
     /**
-     * Rejects the attempt while its name is locked or has no free slot; otherwise delegates it, clears the counter on
-     * success and counts a rejected credential.
+     * Rejects the attempt while its name is locked; otherwise delegates it, clears the counter and the lock on success
+     * and counts a rejected credential.
      *
      * @param authentication the authentication attempt
      * @return the authenticated result of the delegate, or {@code null} when the delegate does not handle the attempt
-     * @throws BadCredentialsException   while the name is locked, or while {@value #MAX_FAILURES} of its attempts are
-     *                                   counted or in flight, without calling the delegate and without being counted;
-     *                                   or when the delegate rejects the credentials, counted and rethrown unchanged
+     * @throws BadCredentialsException   while the name is locked, without calling the delegate and without being
+     *                                   counted; or when the delegate rejects the credentials, counted and rethrown
+     *                                   unchanged
      * @throws UsernameNotFoundException when the delegate does not know the name, counted like a wrong password and
      *                                   rethrown unchanged
      * @throws AuthenticationException   any other failure of the delegate, unchanged and not counted
@@ -218,7 +219,7 @@ public final class LoginLockoutAuthenticationProvider implements AuthenticationP
             }
 
             if (result != null) {
-                // A successful login clears the counter.
+                // A successful login clears the counter and the lock.
                 recordSuccess(key, clock.instant(), generation);
                 released = true;
             }
@@ -264,16 +265,16 @@ public final class LoginLockoutAuthenticationProvider implements AuthenticationP
     }
 
     /**
-     * Reserves a slot for an attempt of the name atomically, before the delegate is called. The attempt is refused
-     * while the name is locked, and while its failures inside the window and its attempts in flight together reach
-     * {@link #MAX_FAILURES}. A refused attempt leaves the entry unchanged, so it neither extends the lock nor counts
+     * Counts an attempt of the name in flight atomically, before the delegate is called. The attempt is refused only
+     * while the name is locked; a refused attempt leaves the entry unchanged, so it neither extends the lock nor counts
      * as a failure. A lock that has elapsed is cleared together with the counter, so the attempt proceeds from zero.
-     * A reservation keeps the last update of an entry whose counter it keeps; a new entry, or one whose elapsed lock it
-     * clears, is stamped with the reservation's instant. A new entry gets a new generation, and an existing one keeps
-     * its own.
+     * An unlocked name holds fewer than {@link #MAX_FAILURES} failures, because the failure that completes that many
+     * engages the lock, so its attempt always proceeds, however many of its attempts are in flight. The attempt keeps
+     * the last update of an entry whose counter it keeps; a new entry, or one whose elapsed lock it clears, is stamped
+     * with the attempt's instant. A new entry gets a new generation, and an existing one keeps its own.
      *
-     * @return the generation of the entry that holds the attempt's slot, or {@link #NOT_RESERVED} if the attempt is
-     *         refused and must not reach the delegate
+     * @return the generation of the entry that counts the attempt in flight, or {@link #NOT_RESERVED} if the attempt
+     *         is refused and must not reach the delegate
      */
     private long reserve(String key, Instant now) {
         var reserved = new long[]{NOT_RESERVED};
@@ -291,22 +292,19 @@ public final class LoginLockoutAuthenticationProvider implements AuthenticationP
                 reserved[0] = entry.generation();
                 return new Entry(List.of(), null, now, entry.inFlight() + 1, entry.generation());
             }
-            List<Instant> failures = inWindow(entry.failures(), now);
-            if (failures.size() + entry.inFlight() >= MAX_FAILURES) {
-                return entry;
-            }
             reserved[0] = entry.generation();
-            return new Entry(failures, null, entry.lastUpdate(), entry.inFlight() + 1, entry.generation());
+            return new Entry(inWindow(entry.failures(), now), null, entry.lastUpdate(), entry.inFlight() + 1,
+                    entry.generation());
         });
         return reserved[0];
     }
 
     /**
-     * Counts one failed login of the name and releases its slot, atomically. A name evicted while the attempt was in
-     * flight is counted again from this failure, in a new generation; an entry of a newer generation counts the
-     * failure but keeps all of its slots, because none of them is this attempt's.
+     * Counts one failed login of the name and ends the attempt's in-flight count, atomically. A name evicted while the
+     * attempt was in flight is counted again from this failure, in a new generation; an entry of a newer generation
+     * counts the failure but keeps its in-flight count, which does not include this attempt.
      *
-     * @param generation the generation of the entry that granted the attempt's slot
+     * @param generation the generation of the entry that counted the attempt in flight
      * @return {@code true} if this failure engaged a lock
      */
     private boolean recordFailure(String key, Instant failedAt, long generation) {
@@ -344,20 +342,18 @@ public final class LoginLockoutAuthenticationProvider implements AuthenticationP
     }
 
     /**
-     * Clears the counter of the name after a successful login and releases its slot, atomically. A lock still in
-     * force is kept, because another attempt engaged it while this one was in flight. The slots of the other
-     * attempts in flight are kept as well, so they still count against {@link #MAX_FAILURES}; an entry of a newer
-     * generation keeps all of its slots.
+     * Resets the name after a successful login and ends the attempt's in-flight count, atomically: the counter and
+     * the lock are cleared, a lock other attempts engaged while this one was in flight included, and the entry is
+     * removed. Only while other attempts of the name are still in flight is the cleared entry kept, with their
+     * in-flight count, so their outcomes are still told apart by generation. The success of an attempt whose entry was
+     * evicted meanwhile resets the entry of the newer generation the same way but keeps its in-flight count, which
+     * does not include this attempt.
      *
-     * @param generation the generation of the entry that granted the attempt's slot
+     * @param generation the generation of the entry that counted the attempt in flight
      */
     private void recordSuccess(String key, Instant now, long generation) {
         entries.computeIfPresent(key, (k, entry) -> {
             Entry released = entry.released(generation);
-            Instant lockedUntil = entry.lockedUntil();
-            if (lockedUntil != null && now.isBefore(lockedUntil)) {
-                return released;
-            }
             return released.inFlight() == 0
                     ? null
                     : new Entry(List.of(), null, now, released.inFlight(), entry.generation());
@@ -365,11 +361,11 @@ public final class LoginLockoutAuthenticationProvider implements AuthenticationP
     }
 
     /**
-     * Releases the slot of an attempt that ended in neither a counted failure nor a success, atomically: the
+     * Ends the in-flight count of an attempt that ended in neither a counted failure nor a success, atomically: the
      * delegate did not handle it, or failed in a way that is not counted. An entry of a newer generation is left
      * unchanged. An entry left with no failure, no lock and no attempt in flight is removed.
      *
-     * @param generation the generation of the entry that granted the attempt's slot
+     * @param generation the generation of the entry that counted the attempt in flight
      */
     private void release(String key, long generation) {
         entries.computeIfPresent(key, (k, entry) -> {
@@ -398,8 +394,12 @@ public final class LoginLockoutAuthenticationProvider implements AuthenticationP
     /**
      * Brings the state back to {@link #MAX_ENTRIES} names after an attempt has taken it above that bound: first the
      * names whose window and lock have both elapsed and that have no attempt in flight are removed, then the names
-     * with the oldest last update are evicted until the state is back at the bound. Only one thread cleans at a time;
-     * an attempt that arrives meanwhile skips the cleaning, and the next one catches up.
+     * with the oldest last update are evicted until the state is back at the bound. Only one thread cleans at a time.
+     * A thread that finds another one cleaning leaves the work to it, and a cleaner reads the size again each time it
+     * lets go of the guard and cleans again while the state is above the bound: names may have been added during its
+     * pass, or a pass may run out of candidates because the names it chose were updated meanwhile. A cleaner lets go
+     * of the guard before it reads the size, and an attempt reads the guard only after it has added its name, so of
+     * the two at least one sees the other, and the state is back at the bound once the attempts in flight have ended.
      * <p>
      * A full pass traverses every name. To keep a burst of new names from paying one traversal per name, the pass
      * selects {@value #EVICTION_BATCH} candidates beyond the current excess and keeps them for the next attempts that
@@ -411,15 +411,14 @@ public final class LoginLockoutAuthenticationProvider implements AuthenticationP
      * @param now the instant stale names are judged against
      */
     private void evictIfNeeded(Instant now) {
-        if (entries.size() <= MAX_ENTRIES || !cleaning.compareAndSet(false, true)) {
-            return;
-        }
-        try {
-            if (!canEvictPending(now) || !evictPending()) {
-                fullPass(now);
+        while (entries.size() > MAX_ENTRIES && cleaning.compareAndSet(false, true)) {
+            try {
+                if (!canEvictPending(now) || !evictPending()) {
+                    fullPass(now);
+                }
+            } finally {
+                cleaning.set(false);
             }
-        } finally {
-            cleaning.set(false);
         }
     }
 
@@ -456,7 +455,8 @@ public final class LoginLockoutAuthenticationProvider implements AuthenticationP
      * Traverses every name once: stale names are removed, and a heap bounded to the excess plus
      * {@value #EVICTION_BATCH} collects the live names with the oldest last update in O(n log k), instead of sorting
      * every name. The candidates become the new kept candidates, and the oldest are evicted until the state is back at
-     * the bound.
+     * the bound or they run out; in that case the state is still above the bound, and {@link #evictIfNeeded} passes
+     * again.
      */
     private void fullPass(Instant now) {
         Instant windowStart = now.minus(WINDOW);
@@ -480,6 +480,7 @@ public final class LoginLockoutAuthenticationProvider implements AuthenticationP
         pending.clear();
         pending.addAll(candidates);
         pendingSince = now;
+        // When the candidates run out first, the state is still above the bound, and evictIfNeeded passes again.
         evictPending();
     }
 
@@ -506,11 +507,11 @@ public final class LoginLockoutAuthenticationProvider implements AuthenticationP
      *                    while locked
      * @param lockedUntil the instant the lock ends, or {@code null} when the name is not locked
      * @param lastUpdate  the instant of the last failure, lock or cleared counter recorded for the name, or of the
-     *                    reservation that created the entry; reserving a slot in an existing entry keeps it
-     * @param inFlight    the attempts of the name that hold a slot of this entry and have not ended yet, never
-     *                    negative
+     *                    attempt that created the entry; an attempt counted in flight in an existing entry keeps it
+     * @param inFlight    the attempts of the name that this entry counted in flight and that have not ended yet,
+     *                    never negative; it never rejects an attempt
      * @param generation  the generation of the entry, given when the name gets it and kept while the name stays
-     *                    tracked, so the attempts that hold its slots are told apart from those of an evicted one
+     *                    tracked, so the attempts it counts in flight are told apart from those of an evicted one
      */
     private record Entry(List<Instant> failures,
                          @Nullable Instant lockedUntil,
@@ -523,11 +524,11 @@ public final class LoginLockoutAuthenticationProvider implements AuthenticationP
         }
 
         /**
-         * Returns this entry with the slot of an attempt released. Only an attempt whose slot this entry granted
-         * holds one of its slots; for the attempt of an older, evicted generation the entry is returned unchanged.
+         * Returns this entry with an attempt that ended taken out of its in-flight count. Only an attempt this entry
+         * counted is in that count; for the attempt of an older, evicted generation the entry is returned unchanged.
          * The count never drops below zero.
          *
-         * @param reservation the generation of the entry that granted the attempt's slot
+         * @param reservation the generation of the entry that counted the attempt in flight
          */
         private Entry released(long reservation) {
             if (reservation != generation) {

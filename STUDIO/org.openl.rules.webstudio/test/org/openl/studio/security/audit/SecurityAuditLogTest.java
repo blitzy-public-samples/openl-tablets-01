@@ -1,6 +1,5 @@
 package org.openl.studio.security.audit;
 
-import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -15,7 +14,6 @@ import jakarta.servlet.http.HttpServletRequest;
 import org.apache.commons.lang3.RandomStringUtils;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.function.Executable;
 import org.junitpioneer.jupiter.StdErr;
 import org.junitpioneer.jupiter.StdIo;
 import org.springframework.mock.web.MockHttpServletRequest;
@@ -108,11 +106,13 @@ class SecurityAuditLogTest {
 
         SecurityAuditLog.authSuccess(attempt, result);
 
+        assertNoLeak(err, password, sessionId);
         var line = singleAuditLine(err);
         assertLevel(line, "INFO");
-        assertTrue(line.contains("event=auth.success outcome=success user=\"jdoe\" ip=192.0.2.10"), line);
-        assertTrue(line.endsWith(" method=UsernamePasswordAuthenticationToken"), line);
-        assertNoLeak(err, password, sessionId);
+        assertTrue(line.contains("event=auth.success outcome=success user=\"jdoe\" ip=192.0.2.10"),
+                "auth.success must carry the result name and the details address");
+        assertTrue(line.endsWith(" method=UsernamePasswordAuthenticationToken"),
+                "auth.success must end with the attempt method");
     }
 
     @Test
@@ -125,11 +125,13 @@ class SecurityAuditLogTest {
 
         SecurityAuditLog.authFailure(attempt);
 
+        assertNoLeak(err, password, sessionId);
         var line = singleAuditLine(err);
         assertLevel(line, "WARN");
-        assertTrue(line.contains("event=auth.failure outcome=failure user=\"jdoe\" ip=192.0.2.10"), line);
-        assertTrue(line.endsWith(" method=UsernamePasswordAuthenticationToken"), line);
-        assertNoLeak(err, password, sessionId);
+        assertTrue(line.contains("event=auth.failure outcome=failure user=\"jdoe\" ip=192.0.2.10"),
+                "auth.failure must carry the attempted user name and the details address");
+        assertTrue(line.endsWith(" method=UsernamePasswordAuthenticationToken"),
+                "auth.failure must end with the attempt method");
     }
 
     @Test
@@ -142,11 +144,13 @@ class SecurityAuditLogTest {
 
         SecurityAuditLog.lockout(attempt);
 
+        assertNoLeak(err, password, sessionId);
         var line = singleAuditLine(err);
         assertLevel(line, "WARN");
-        assertTrue(line.contains("event=auth.lockout outcome=locked user=\"jdoe\" ip=192.0.2.10"), line);
-        assertTrue(line.endsWith(" method=UsernamePasswordAuthenticationToken"), line);
-        assertNoLeak(err, password, sessionId);
+        assertTrue(line.contains("event=auth.lockout outcome=locked user=\"jdoe\" ip=192.0.2.10"),
+                "auth.lockout must carry outcome=locked, the user name and the details address");
+        assertTrue(line.endsWith(" method=UsernamePasswordAuthenticationToken"),
+                "auth.lockout must end with the attempt method");
     }
 
     @Test
@@ -159,11 +163,12 @@ class SecurityAuditLogTest {
 
         SecurityAuditLog.authSuccess(request, USER_NAME, publicId);
 
+        assertNoLeak(err, secret, token);
         var line = singleAuditLine(err);
         assertLevel(line, "INFO");
-        assertTrue(line.contains("event=auth.success outcome=success user=\"jdoe\" ip=198.51.100.7"), line);
-        assertTrue(line.endsWith(" method=pat pat=" + publicId), line);
-        assertNoLeak(err, secret, token);
+        assertTrue(line.contains("event=auth.success outcome=success user=\"jdoe\" ip=198.51.100.7"),
+                "PAT auth.success must carry the user and the request address");
+        assertTrue(line.endsWith(" method=pat pat=" + publicId), "PAT auth.success must end with the public ID");
     }
 
     @Test
@@ -175,11 +180,12 @@ class SecurityAuditLogTest {
 
         SecurityAuditLog.authFailure(patRequest(token), publicId);
 
+        assertNoLeak(err, secret, token);
         var line = singleAuditLine(err);
         assertLevel(line, "WARN");
-        assertTrue(line.contains("event=auth.failure outcome=failure user=\"-\" ip=198.51.100.7"), line);
-        assertTrue(line.endsWith(" method=pat pat=" + publicId), line);
-        assertNoLeak(err, secret, token);
+        assertTrue(line.contains("event=auth.failure outcome=failure user=\"-\" ip=198.51.100.7"),
+                "PAT auth.failure must name no user and carry the request address");
+        assertTrue(line.endsWith(" method=pat pat=" + publicId), "PAT auth.failure must end with the public ID");
     }
 
     @Test
@@ -189,12 +195,13 @@ class SecurityAuditLogTest {
 
         SecurityAuditLog.authFailure(patRequest(token), null);
 
+        assertNoLeak(err, token);
         var line = singleAuditLine(err);
         assertLevel(line, "WARN");
-        assertTrue(line.contains("event=auth.failure outcome=failure user=\"-\" ip=198.51.100.7"), line);
-        assertTrue(line.endsWith(" method=pat"), line);
-        assertFalse(line.contains("pat="), line);
-        assertNoLeak(err, token);
+        assertTrue(line.contains("event=auth.failure outcome=failure user=\"-\" ip=198.51.100.7"),
+                "PAT auth.failure must name no user and carry the request address");
+        assertTrue(line.endsWith(" method=pat"), "PAT auth.failure must end with method=pat");
+        assertFalse(line.contains("pat="), "PAT auth.failure of an unparsed token must not carry a pat pair");
     }
 
     @Test
@@ -208,12 +215,13 @@ class SecurityAuditLogTest {
 
         SecurityAuditLog.patCreate(publicId);
 
+        assertNoLeak(err, password, secret, pat(publicId, secret));
         var line = singleAuditLine(err);
         assertLevel(line, "INFO");
-        assertTrue(line.contains("event=pat.create outcome=success user=\"jdoe\" ip=203.0.113.5"), line);
-        assertTrue(line.contains(" pat=" + publicId), line);
+        assertTrue(line.contains("event=pat.create outcome=success user=\"jdoe\" ip=203.0.113.5"),
+                "pat.create must carry the context user and the request address");
+        assertTrue(line.contains(" pat=" + publicId), "pat.create must carry the public ID");
         assertNoMethodOtherThanPat(line);
-        assertNoLeak(err, password, secret, pat(publicId, secret));
     }
 
     @Test
@@ -227,12 +235,13 @@ class SecurityAuditLogTest {
 
         SecurityAuditLog.patRevoke(publicId);
 
+        assertNoLeak(err, password, secret, pat(publicId, secret));
         var line = singleAuditLine(err);
         assertLevel(line, "INFO");
-        assertTrue(line.contains("event=pat.revoke outcome=success user=\"jdoe\" ip=203.0.113.5"), line);
-        assertTrue(line.contains(" pat=" + publicId), line);
+        assertTrue(line.contains("event=pat.revoke outcome=success user=\"jdoe\" ip=203.0.113.5"),
+                "pat.revoke must carry the context user and the request address");
+        assertTrue(line.contains(" pat=" + publicId), "pat.revoke must carry the public ID");
         assertNoMethodOtherThanPat(line);
-        assertNoLeak(err, password, secret, pat(publicId, secret));
     }
 
     @Test
@@ -247,13 +256,15 @@ class SecurityAuditLogTest {
                 new TreeSet<>(List.of("updateAcl", "createAcl")),
                 new TreeSet<>(List.of("Root", "ProjectArtifact")));
 
+        assertNoLeak(err, password);
         var line = singleAuditLine(err);
         assertLevel(line, "INFO");
-        assertTrue(line.contains("event=acl.change outcome=success user=\"jdoe\" ip=203.0.113.5"), line);
-        assertTrue(line.endsWith(" changes=3 kinds=createAcl,updateAcl objectTypes=ProjectArtifact,Root"), line);
-        assertFalse(line.contains("method="), line);
-        assertFalse(line.contains("pat="), line);
-        assertNoLeak(err, password);
+        assertTrue(line.contains("event=acl.change outcome=success user=\"jdoe\" ip=203.0.113.5"),
+                "acl.change must carry the context user and the request address");
+        assertTrue(line.endsWith(" changes=3 kinds=createAcl,updateAcl objectTypes=ProjectArtifact,Root"),
+                "acl.change must end with the count and the sorted names");
+        assertFalse(line.contains("method="), "acl.change must not carry a method pair");
+        assertFalse(line.contains("pat="), "acl.change must not carry a pat pair");
     }
 
     @Test
@@ -264,11 +275,13 @@ class SecurityAuditLogTest {
 
         SecurityAuditLog.aclChange("failure", 1, new TreeSet<>(List.of("deleteAcl")), new TreeSet<>(List.of("Root")));
 
+        assertNoLeak(err, password);
         var line = singleAuditLine(err);
         assertLevel(line, "WARN");
-        assertTrue(line.contains("event=acl.change outcome=failure user=\"jdoe\""), line);
-        assertTrue(line.endsWith(" changes=1 kinds=deleteAcl objectTypes=Root"), line);
-        assertNoLeak(err, password);
+        assertTrue(line.contains("event=acl.change outcome=failure user=\"jdoe\""),
+                "acl.change must carry outcome=failure and the context user");
+        assertTrue(line.endsWith(" changes=1 kinds=deleteAcl objectTypes=Root"),
+                "acl.change must end with the count and the names");
     }
 
     @Test
@@ -278,7 +291,8 @@ class SecurityAuditLogTest {
 
         var line = singleAuditLine(err);
         assertLevel(line, "INFO");
-        assertTrue(line.contains("event=acl.change outcome=success user=\"system\" ip=- changes=2"), line);
+        assertTrue(line.contains("event=acl.change outcome=success user=\"system\" ip=- changes=2"),
+                "acl.change without an authentication must name the system user and no address");
     }
 
     @Test
@@ -287,7 +301,7 @@ class SecurityAuditLogTest {
         SecurityAuditLog.aclChange("success", 0, new TreeSet<>(), new TreeSet<>());
 
         var line = singleAuditLine(err);
-        assertTrue(line.endsWith(" changes=0 kinds=- objectTypes=-"), line);
+        assertTrue(line.endsWith(" changes=0 kinds=- objectTypes=-"), "Empty sets must be written as missing values");
     }
 
     @Test
@@ -299,11 +313,13 @@ class SecurityAuditLogTest {
                 new TreeSet<>(List.of("sid")));
 
         var lines = auditLines(err);
-        assertEquals(1, lines.size(), String.join("\n", lines));
+        assertEquals(1, lines.size(), "Expected exactly one audit line");
         var line = lines.getFirst();
         assertLevel(line, "WARN");
-        assertTrue(line.contains("event=acl.change outcome=rolled-back user=\"system\""), line);
-        assertTrue(line.endsWith(" changes=1 kinds=updateSid objectTypes=sid"), line);
+        assertTrue(line.contains("event=acl.change outcome=rolled-back user=\"system\""),
+                "acl.change must carry the unknown outcome and the system user");
+        assertTrue(line.endsWith(" changes=1 kinds=updateSid objectTypes=sid"),
+                "acl.change must end with the count and the names");
     }
 
     // ---------------------------------------------------------------------------------------------------------
@@ -318,10 +334,10 @@ class SecurityAuditLogTest {
 
         SecurityAuditLog.authFailure(UsernamePasswordAuthenticationToken.unauthenticated(prefix + INJECTION, password));
 
+        assertNoLeak(err, password);
         var user = userOfTheOnlyEventLine(err);
         assertSanitized(user);
-        assertTrue(user.startsWith(prefix), user);
-        assertNoLeak(err, password);
+        assertTrue(user.startsWith(prefix), "The user value must keep the start of the name");
     }
 
     @Test
@@ -334,13 +350,13 @@ class SecurityAuditLogTest {
 
         SecurityAuditLog.authFailure(attempt);
 
-        var line = theOnlyEventLine(err);
-        assertTrue(LINE.matcher(line).matches(), line);
-        var ip = IP.matcher(line);
-        assertTrue(ip.find(), line);
-        assertSanitized(ip.group(1));
-        assertTrue(ip.group(1).startsWith(DETAILS_ADDRESS), line);
         assertNoLeak(err, password, sessionId);
+        var line = theOnlyEventLine(err);
+        assertTrue(LINE.matcher(line).matches(), "The event line does not have the audit line format");
+        var ip = IP.matcher(line);
+        assertTrue(ip.find(), "The event line carries no ip pair");
+        assertSanitized(ip.group(1));
+        assertTrue(ip.group(1).startsWith(DETAILS_ADDRESS), "The address value must keep the start of the address");
     }
 
     @Test
@@ -354,10 +370,10 @@ class SecurityAuditLogTest {
 
         SecurityAuditLog.authSuccess(request, prefix + INJECTION, publicId);
 
+        assertNoLeak(err, secret, pat(publicId, secret));
         var user = userOfTheOnlyEventLine(err);
         assertSanitized(user);
-        assertTrue(user.startsWith(prefix), user);
-        assertNoLeak(err, secret, pat(publicId, secret));
+        assertTrue(user.startsWith(prefix), "The user value must keep the start of the name");
     }
 
     @Test
@@ -369,11 +385,11 @@ class SecurityAuditLogTest {
         SecurityAuditLog.lockout(UsernamePasswordAuthenticationToken
                 .unauthenticated(prefix + "\u2028event=x\u2029event=y", password));
 
-        var user = userOfTheOnlyEventLine(err);
-        assertFalse(user.contains("\u2028"), user);
-        assertFalse(user.contains("\u2029"), user);
-        assertTrue(user.startsWith(prefix), user);
         assertNoLeak(err, password);
+        var user = userOfTheOnlyEventLine(err);
+        assertFalse(user.contains("\u2028"), "The user value must not hold the line separator U+2028");
+        assertFalse(user.contains("\u2029"), "The user value must not hold the paragraph separator U+2029");
+        assertTrue(user.startsWith(prefix), "The user value must keep the start of the name");
     }
 
     @Test
@@ -385,7 +401,8 @@ class SecurityAuditLogTest {
                 new TreeSet<>(List.of("Ro\"ot", "Pro\\ject")));
 
         var line = singleAuditLine(err);
-        assertTrue(line.endsWith(" changes=1 kinds=create_Acl objectTypes=Pro_ject,Ro_ot"), line);
+        assertTrue(line.endsWith(" changes=1 kinds=create_Acl objectTypes=Pro_ject,Ro_ot"),
+                "The kinds and object types must be sanitized");
     }
 
     @Test
@@ -398,10 +415,10 @@ class SecurityAuditLogTest {
 
         SecurityAuditLog.authFailure(attempt);
 
+        assertNoLeak(err, password, sessionId);
         var line = singleAuditLine(err);
         assertNoForgedPair(line);
         assertOneToken(ipOf(line), DETAILS_ADDRESS);
-        assertNoLeak(err, password, sessionId);
     }
 
     @Test
@@ -414,11 +431,11 @@ class SecurityAuditLogTest {
 
         SecurityAuditLog.authFailure(request, publicId);
 
+        assertNoLeak(err, secret, pat(publicId, secret));
         var line = singleAuditLine(err);
         assertNoForgedPair(line);
         assertOneToken(ipOf(line), PAT_REQUEST_ADDRESS);
-        assertTrue(line.endsWith(" method=pat pat=" + publicId), line);
-        assertNoLeak(err, secret, pat(publicId, secret));
+        assertTrue(line.endsWith(" method=pat pat=" + publicId), "PAT auth.failure must end with the public ID");
     }
 
     @Test
@@ -429,11 +446,11 @@ class SecurityAuditLogTest {
 
         SecurityAuditLog.authFailure(patRequest(pat(publicId, secret)), publicId + " " + FORGED_PAIRS);
 
+        assertNoLeak(err, secret, pat(publicId, secret));
         var line = singleAuditLine(err);
         assertNoForgedPair(line);
         assertTrue(line.endsWith(" method=pat pat=" + publicId + "_event_auth.success_outcome_success_user__root_"),
-                line);
-        assertNoLeak(err, secret, pat(publicId, secret));
+                "The public ID must be written as one sanitized token");
     }
 
     @Test
@@ -445,12 +462,14 @@ class SecurityAuditLogTest {
                 new TreeSet<>(List.of("Root\u00A0type=y", "Sid\u2003z")));
 
         var lines = auditLines(err);
-        assertEquals(1, lines.size(), String.join("\n", lines));
+        assertEquals(1, lines.size(), "Expected exactly one audit line");
         var line = lines.getFirst();
         assertLevel(line, "WARN");
         assertNoForgedPair(line);
-        assertTrue(line.contains("event=acl.change outcome=rolled_back_outcome_success user=\"system\" ip=- "), line);
-        assertTrue(line.endsWith(" changes=1 kinds=create_Acl_x objectTypes=Root_type_y,Sid_z"), line);
+        assertTrue(line.contains("event=acl.change outcome=rolled_back_outcome_success user=\"system\" ip=- "),
+                "The outcome must be written as one sanitized token");
+        assertTrue(line.endsWith(" changes=1 kinds=create_Acl_x objectTypes=Root_type_y,Sid_z"),
+                "The kinds and object types must be written as one sanitized token each");
     }
 
     // ---------------------------------------------------------------------------------------------------------
@@ -465,12 +484,15 @@ class SecurityAuditLogTest {
 
         SecurityAuditLog.authFailure(UsernamePasswordAuthenticationToken.unauthenticated(name, password));
 
+        assertNoLeak(err, password);
         var line = singleAuditLine(err);
         var user = userOfTheOnlyEventLine(err);
-        assertEquals(MAX_VALUE_LENGTH + TRUNCATION_MARKER.length(), user.length(), user);
-        assertEquals(name.substring(0, MAX_VALUE_LENGTH) + TRUNCATION_MARKER, user);
+        assertEquals(MAX_VALUE_LENGTH + TRUNCATION_MARKER.length(),
+                user.length(),
+                "The cut user value must hold the limit and the marker");
+        assertTrue((name.substring(0, MAX_VALUE_LENGTH) + TRUNCATION_MARKER).equals(user),
+                "The user value must be cut at the limit and marked");
         assertTrue(line.length() < 1024, () -> "Line of " + line.length() + " characters");
-        assertNoLeak(err, password);
     }
 
     @Test
@@ -481,8 +503,8 @@ class SecurityAuditLogTest {
 
         SecurityAuditLog.authFailure(UsernamePasswordAuthenticationToken.unauthenticated(name, password));
 
-        assertEquals(name, userOfTheOnlyEventLine(err));
         assertNoLeak(err, password);
+        assertTrue(name.equals(userOfTheOnlyEventLine(err)), "A user name of exactly the limit must be kept whole");
     }
 
     @Test
@@ -496,13 +518,13 @@ class SecurityAuditLogTest {
 
         SecurityAuditLog.authFailure(request, publicId);
 
+        assertNoLeak(err, secret, pat(publicId, secret));
         var line = singleAuditLine(err);
         assertNoForgedPair(line);
         var expected = address.substring(0, MAX_VALUE_LENGTH).replaceAll("[ =\"]", "_") + TRUNCATION_MARKER;
-        assertEquals(expected, ipOf(line));
-        assertTrue(line.endsWith(" method=pat pat=" + publicId), line);
+        assertTrue(expected.equals(ipOf(line)), "The address must be sanitized, cut at the limit and marked");
+        assertTrue(line.endsWith(" method=pat pat=" + publicId), "PAT auth.failure must end with the public ID");
         assertTrue(line.length() < 1024, () -> "Line of " + line.length() + " characters");
-        assertNoLeak(err, secret, pat(publicId, secret));
     }
 
     @Test
@@ -514,10 +536,11 @@ class SecurityAuditLogTest {
         SecurityAuditLog.authFailure(UsernamePasswordAuthenticationToken
                 .unauthenticated(prefix + SURROGATE_PAIR + randomValue(100), password));
 
-        var user = userOfTheOnlyEventLine(err);
-        assertEquals(prefix + TRUNCATION_MARKER, user);
-        assertTrue(user.chars().noneMatch(c -> Character.isSurrogate((char) c)), user);
         assertNoLeak(err, password);
+        var user = userOfTheOnlyEventLine(err);
+        assertTrue((prefix + TRUNCATION_MARKER).equals(user), "The cut must end before the surrogate pair");
+        assertTrue(user.chars().noneMatch(c -> Character.isSurrogate((char) c)),
+                "The cut user value must not hold a surrogate");
     }
 
     @Test
@@ -529,8 +552,9 @@ class SecurityAuditLogTest {
         SecurityAuditLog.authFailure(UsernamePasswordAuthenticationToken
                 .unauthenticated(prefix + SURROGATE_PAIR + randomValue(100), password));
 
-        assertEquals(prefix + SURROGATE_PAIR + TRUNCATION_MARKER, userOfTheOnlyEventLine(err));
         assertNoLeak(err, password);
+        assertTrue((prefix + SURROGATE_PAIR + TRUNCATION_MARKER).equals(userOfTheOnlyEventLine(err)),
+                "A surrogate pair that ends at the limit must be kept whole");
     }
 
     // ---------------------------------------------------------------------------------------------------------
@@ -548,8 +572,9 @@ class SecurityAuditLogTest {
 
         SecurityAuditLog.authFailure(attempt);
 
-        assertEquals(DETAILS_ADDRESS, ipOf(singleAuditLine(err)));
         assertNoLeak(err, password, sessionId);
+        assertTrue(DETAILS_ADDRESS.equals(ipOf(singleAuditLine(err))),
+                "The details address must win over the bound request");
     }
 
     @Test
@@ -560,8 +585,9 @@ class SecurityAuditLogTest {
 
         SecurityAuditLog.authFailure(UsernamePasswordAuthenticationToken.unauthenticated(USER_NAME, password));
 
-        assertEquals(CONTEXT_REQUEST_ADDRESS, ipOf(singleAuditLine(err)));
         assertNoLeak(err, password);
+        assertTrue(CONTEXT_REQUEST_ADDRESS.equals(ipOf(singleAuditLine(err))),
+                "The bound request address must be used without details");
     }
 
     @Test
@@ -574,8 +600,9 @@ class SecurityAuditLogTest {
 
         SecurityAuditLog.authFailure(attempt);
 
-        assertEquals(CONTEXT_REQUEST_ADDRESS, ipOf(singleAuditLine(err)));
         assertNoLeak(err, password);
+        assertTrue(CONTEXT_REQUEST_ADDRESS.equals(ipOf(singleAuditLine(err))),
+                "The bound request address must be used for details of another type");
     }
 
     @Test
@@ -585,8 +612,8 @@ class SecurityAuditLogTest {
 
         SecurityAuditLog.authFailure(UsernamePasswordAuthenticationToken.unauthenticated(USER_NAME, password));
 
-        assertEquals("-", ipOf(singleAuditLine(err)));
         assertNoLeak(err, password);
+        assertTrue("-".equals(ipOf(singleAuditLine(err))), "A missing address must be written as '-'");
     }
 
     @Test
@@ -600,8 +627,9 @@ class SecurityAuditLogTest {
 
         SecurityAuditLog.authSuccess(UsernamePasswordAuthenticationToken.unauthenticated(USER_NAME, password), result);
 
-        assertEquals(DETAILS_ADDRESS, ipOf(singleAuditLine(err)));
         assertNoLeak(err, password, sessionId);
+        assertTrue(DETAILS_ADDRESS.equals(ipOf(singleAuditLine(err))),
+                "The result details address must be used when the attempt has none");
     }
 
     @Test
@@ -616,8 +644,9 @@ class SecurityAuditLogTest {
 
         SecurityAuditLog.patRevoke(publicId);
 
-        assertEquals(DETAILS_ADDRESS, ipOf(singleAuditLine(err)));
         assertNoLeak(err, password, sessionId);
+        assertTrue(DETAILS_ADDRESS.equals(ipOf(singleAuditLine(err))),
+                "The details address of the context authentication must be used for token lifecycle events");
     }
 
     // ---------------------------------------------------------------------------------------------------------
@@ -631,10 +660,11 @@ class SecurityAuditLogTest {
 
         SecurityAuditLog.authFailure(new BearerTokenAuthenticationToken(bearer));
 
-        var line = singleAuditLine(err);
-        assertTrue(line.contains(" user=\"-\" "), line);
-        assertTrue(line.endsWith(" method=BearerTokenAuthenticationToken"), line);
         assertNoLeak(err, bearer);
+        var line = singleAuditLine(err);
+        assertTrue(line.contains(" user=\"-\" "), "A failed bearer attempt must name no user");
+        assertTrue(line.endsWith(" method=BearerTokenAuthenticationToken"),
+                "A failed bearer attempt must end with its method");
     }
 
     @Test
@@ -645,9 +675,9 @@ class SecurityAuditLogTest {
 
         SecurityAuditLog.authFailure(new TestingAuthenticationToken(principal, credential));
 
-        var line = singleAuditLine(err);
-        assertTrue(line.contains(" user=\"-\" "), line);
         assertNoLeak(err, principal, credential);
+        var line = singleAuditLine(err);
+        assertTrue(line.contains(" user=\"-\" "), "A failed attempt of another type must name no user");
     }
 
     @Test
@@ -657,10 +687,11 @@ class SecurityAuditLogTest {
 
         SecurityAuditLog.lockout(new BearerTokenAuthenticationToken(bearer));
 
+        assertNoLeak(err, bearer);
         var line = singleAuditLine(err);
         assertLevel(line, "WARN");
-        assertTrue(line.contains("event=auth.lockout outcome=locked user=\"-\" "), line);
-        assertNoLeak(err, bearer);
+        assertTrue(line.contains("event=auth.lockout outcome=locked user=\"-\" "),
+                "A lockout of another type must name no user");
     }
 
     @Test
@@ -671,10 +702,12 @@ class SecurityAuditLogTest {
 
         SecurityAuditLog.authSuccess(new BearerTokenAuthenticationToken(bearer), result);
 
-        var line = singleAuditLine(err);
-        assertTrue(line.contains("event=auth.success outcome=success user=\"jdoe\" "), line);
-        assertTrue(line.endsWith(" method=BearerTokenAuthenticationToken"), line);
         assertNoLeak(err, bearer);
+        var line = singleAuditLine(err);
+        assertTrue(line.contains("event=auth.success outcome=success user=\"jdoe\" "),
+                "A successful bearer attempt must be named after its result");
+        assertTrue(line.endsWith(" method=BearerTokenAuthenticationToken"),
+                "A successful bearer attempt must end with its method");
     }
 
     @Test
@@ -686,9 +719,9 @@ class SecurityAuditLogTest {
 
         SecurityAuditLog.authFailure(UsernamePasswordAuthenticationToken.unauthenticated(principal, password));
 
-        var line = singleAuditLine(err);
-        assertTrue(line.contains(" user=\"jdoe\" "), line);
         assertNoLeak(err, storedHash, password);
+        var line = singleAuditLine(err);
+        assertTrue(line.contains(" user=\"jdoe\" "), "A UserDetails principal must be named by its user name");
     }
 
     @Test
@@ -702,9 +735,9 @@ class SecurityAuditLogTest {
 
         SecurityAuditLog.aclChange("success", 1, new TreeSet<>(List.of("createAcl")), new TreeSet<>(List.of("Root")));
 
-        var line = singleAuditLine(err);
-        assertTrue(line.contains(" user=\"anonymousUser\" "), line);
         assertNoLeak(err, key);
+        var line = singleAuditLine(err);
+        assertTrue(line.contains(" user=\"anonymousUser\" "), "An anonymous context must be named by its principal");
     }
 
     // ---------------------------------------------------------------------------------------------------------
@@ -717,17 +750,19 @@ class SecurityAuditLogTest {
         var password = password();
         var attempt = UsernamePasswordAuthenticationToken.unauthenticated(USER_NAME, password);
 
-        assertAtMostOneLine(err, () -> SecurityAuditLog.authSuccess((Authentication) null, null));
-        assertAtMostOneLine(err, () -> SecurityAuditLog.authSuccess(attempt, null));
-        assertAtMostOneLine(err, () -> SecurityAuditLog.authFailure((Authentication) null));
-        assertAtMostOneLine(err, () -> SecurityAuditLog.lockout(null));
-        assertAtMostOneLine(err, () -> SecurityAuditLog.authSuccess((HttpServletRequest) null, null, null));
-        assertAtMostOneLine(err, () -> SecurityAuditLog.authFailure((HttpServletRequest) null, null));
-        assertAtMostOneLine(err, () -> SecurityAuditLog.patCreate(null));
-        assertAtMostOneLine(err, () -> SecurityAuditLog.patRevoke(null));
-        assertAtMostOneLine(err, () -> SecurityAuditLog.aclChange(null, 0, null, null));
-        assertAtMostOneLine(err, () -> SecurityAuditLog.aclChange("success", 0, new TreeSet<>(), new TreeSet<>()));
-        assertNoLeak(err, password);
+        // Each call checks the password right after it runs, before it counts the lines it added.
+        assertAtMostOneLine(err, () -> SecurityAuditLog.authSuccess((Authentication) null, null), password);
+        assertAtMostOneLine(err, () -> SecurityAuditLog.authSuccess(attempt, null), password);
+        assertAtMostOneLine(err, () -> SecurityAuditLog.authFailure((Authentication) null), password);
+        assertAtMostOneLine(err, () -> SecurityAuditLog.lockout(null), password);
+        assertAtMostOneLine(err, () -> SecurityAuditLog.authSuccess((HttpServletRequest) null, null, null), password);
+        assertAtMostOneLine(err, () -> SecurityAuditLog.authFailure((HttpServletRequest) null, null), password);
+        assertAtMostOneLine(err, () -> SecurityAuditLog.patCreate(null), password);
+        assertAtMostOneLine(err, () -> SecurityAuditLog.patRevoke(null), password);
+        assertAtMostOneLine(err, () -> SecurityAuditLog.aclChange(null, 0, null, null), password);
+        assertAtMostOneLine(err,
+                () -> SecurityAuditLog.aclChange("success", 0, new TreeSet<>(), new TreeSet<>()),
+                password);
     }
 
     @Test
@@ -740,9 +775,10 @@ class SecurityAuditLogTest {
 
         SecurityAuditLog.authSuccess(request, "", "");
 
-        var line = singleAuditLine(err);
-        assertTrue(line.endsWith("event=auth.success outcome=success user=\"-\" ip=- method=pat pat=-"), line);
         assertNoLeak(err, secret, pat(publicId, secret));
+        var line = singleAuditLine(err);
+        assertTrue(line.endsWith("event=auth.success outcome=success user=\"-\" ip=- method=pat pat=-"),
+                "Empty values must be written as '-'");
     }
 
     @Test
@@ -753,7 +789,8 @@ class SecurityAuditLogTest {
         SecurityAuditLog.patCreate(publicId);
 
         var line = singleAuditLine(err);
-        assertTrue(line.contains("event=pat.create outcome=success user=\"-\" ip=- pat=" + publicId), line);
+        assertTrue(line.contains("event=pat.create outcome=success user=\"-\" ip=- pat=" + publicId),
+                "pat.create without an authentication must name nobody and no address");
     }
 
     @Test
@@ -763,9 +800,9 @@ class SecurityAuditLogTest {
         var result = mock(Authentication.class);
         when(result.getName()).thenThrow(new IllegalStateException(secret));
 
-        assertDoesNotThrow(() -> SecurityAuditLog.authSuccess(new BearerTokenAuthenticationToken(secret), result));
+        var threw = callThrows(() -> SecurityAuditLog.authSuccess(new BearerTokenAuthenticationToken(secret), result));
 
-        assertWriteFailed(err, "auth.success", secret);
+        assertWriteFailed(err, "auth.success", secret, threw);
     }
 
     @Test
@@ -775,8 +812,8 @@ class SecurityAuditLogTest {
         var attempt = mock(Authentication.class);
         when(attempt.getDetails()).thenThrow(new IllegalStateException(secret));
 
-        assertDoesNotThrow(() -> SecurityAuditLog.authFailure(attempt));
-        assertWriteFailed(err, "auth.failure", secret);
+        var threw = callThrows(() -> SecurityAuditLog.authFailure(attempt));
+        assertWriteFailed(err, "auth.failure", secret, threw);
     }
 
     @Test
@@ -786,8 +823,8 @@ class SecurityAuditLogTest {
         var attempt = mock(Authentication.class);
         when(attempt.getDetails()).thenThrow(new IllegalStateException(secret));
 
-        assertDoesNotThrow(() -> SecurityAuditLog.lockout(attempt));
-        assertWriteFailed(err, "auth.lockout", secret);
+        var threw = callThrows(() -> SecurityAuditLog.lockout(attempt));
+        assertWriteFailed(err, "auth.lockout", secret, threw);
     }
 
     @Test
@@ -797,8 +834,8 @@ class SecurityAuditLogTest {
         var request = mock(HttpServletRequest.class);
         when(request.getRemoteAddr()).thenThrow(new IllegalStateException(secret));
 
-        assertDoesNotThrow(() -> SecurityAuditLog.authSuccess(request, USER_NAME, randomValue(16)));
-        assertWriteFailed(err, "auth.success", secret);
+        var threw = callThrows(() -> SecurityAuditLog.authSuccess(request, USER_NAME, randomValue(16)));
+        assertWriteFailed(err, "auth.success", secret, threw);
     }
 
     @Test
@@ -808,8 +845,8 @@ class SecurityAuditLogTest {
         var request = mock(HttpServletRequest.class);
         when(request.getRemoteAddr()).thenThrow(new IllegalStateException(secret));
 
-        assertDoesNotThrow(() -> SecurityAuditLog.authFailure(request, randomValue(16)));
-        assertWriteFailed(err, "auth.failure", secret);
+        var threw = callThrows(() -> SecurityAuditLog.authFailure(request, randomValue(16)));
+        assertWriteFailed(err, "auth.failure", secret, threw);
     }
 
     @Test
@@ -820,8 +857,8 @@ class SecurityAuditLogTest {
         when(authentication.getName()).thenThrow(new IllegalStateException(secret));
         SecurityContextHolder.getContext().setAuthentication(authentication);
 
-        assertDoesNotThrow(() -> SecurityAuditLog.patCreate(randomValue(16)));
-        assertWriteFailed(err, "pat.create", secret);
+        var threw = callThrows(() -> SecurityAuditLog.patCreate(randomValue(16)));
+        assertWriteFailed(err, "pat.create", secret, threw);
     }
 
     @Test
@@ -832,8 +869,8 @@ class SecurityAuditLogTest {
         when(authentication.getName()).thenThrow(new IllegalStateException(secret));
         SecurityContextHolder.getContext().setAuthentication(authentication);
 
-        assertDoesNotThrow(() -> SecurityAuditLog.aclChange("success", 1, null, null));
-        assertWriteFailed(err, "acl.change", secret);
+        var threw = callThrows(() -> SecurityAuditLog.aclChange("success", 1, null, null));
+        assertWriteFailed(err, "acl.change", secret, threw);
     }
 
     // ---------------------------------------------------------------------------------------------------------
@@ -846,40 +883,43 @@ class SecurityAuditLogTest {
         return err.capturedString().lines().filter(l -> l.contains(marker)).toList();
     }
 
-    /** Asserts that exactly one audit line was written and that it has the audit line format. */
+    /**
+     * Asserts that exactly one audit line was written and that it has the audit line format. Like every assertion
+     * here, its failure message is fixed and never quotes captured output, which could hold a leaked secret.
+     */
     private static String singleAuditLine(StdErr err) {
         var lines = auditLines(err);
-        assertEquals(1, lines.size(), () -> "Expected one audit line, got: " + String.join("\n", lines));
+        assertEquals(1, lines.size(), "Expected exactly one audit line");
         var line = lines.getFirst();
-        assertTrue(LINE.matcher(line).matches(), () -> "Not an audit line: " + line);
+        assertTrue(LINE.matcher(line).matches(), "The audit line does not have the audit line format");
         return line;
     }
 
     /** The only captured line that carries an {@code event=} pair, however the value tried to split it. */
     private static String theOnlyEventLine(StdErr err) {
         var lines = err.capturedString().lines().filter(l -> l.contains("event=")).toList();
-        assertEquals(1, lines.size(), () -> "Expected one event line, got: " + String.join("\n", lines));
+        assertEquals(1, lines.size(), "Expected exactly one captured line with an event pair");
         return lines.getFirst();
     }
 
     /** The user value of the only event line, which must have the audit line format. */
     private static String userOfTheOnlyEventLine(StdErr err) {
         var line = theOnlyEventLine(err);
-        assertTrue(LINE.matcher(line).matches(), () -> "Not an audit line: " + line);
+        assertTrue(LINE.matcher(line).matches(), "The event line does not have the audit line format");
         var user = USER.matcher(line);
-        assertTrue(user.find(), line);
+        assertTrue(user.find(), "The event line carries no quoted user value");
         return user.group(1);
     }
 
     private static String ipOf(String line) {
         var ip = IP.matcher(line);
-        assertTrue(ip.find(), line);
+        assertTrue(ip.find(), "The audit line carries no ip pair");
         return ip.group(1);
     }
 
     private static void assertLevel(String line, String level) {
         assertTrue(line.contains(level + " " + SecurityAuditLog.LOGGER_NAME + " - "),
-                () -> "Expected level " + level + ": " + line);
+                () -> "Expected the audit line at level " + level);
     }
 
     /** Asserts that none of the values occurs anywhere in the captured output. */
@@ -892,16 +932,18 @@ class SecurityAuditLogTest {
 
     /** Asserts that a sanitized value holds no control character, quote, backslash or line separator. */
     private static void assertSanitized(String value) {
-        assertFalse(value.chars().anyMatch(Character::isISOControl), value);
+        assertFalse(value.chars().anyMatch(Character::isISOControl), "A sanitized value holds a control character");
         for (var unsafe : List.of("\"", "\\", "\u2028", "\u2029")) {
-            assertFalse(value.contains(unsafe), value);
+            assertFalse(value.contains(unsafe), "A sanitized value holds a quote, a backslash or a line separator");
         }
     }
 
     /** Asserts that each of the fixed pairs occurs exactly once in the line, so no value added a forged one. */
     private static void assertNoForgedPair(String line) {
         for (var key : List.of("event=", " outcome=", " user=", " ip=")) {
-            assertEquals(1, Pattern.compile(Pattern.quote(key)).matcher(line).results().count(), line);
+            assertEquals(1,
+                    Pattern.compile(Pattern.quote(key)).matcher(line).results().count(),
+                    () -> "Expected the fixed pair '" + key.strip() + "' exactly once");
         }
     }
 
@@ -910,36 +952,60 @@ class SecurityAuditLogTest {
      * {@code =}, quote, backslash or control character, so it is one token that cannot add a pair.
      */
     private static void assertOneToken(String value, String prefix) {
-        assertTrue(value.startsWith(prefix), value);
+        assertTrue(value.startsWith(prefix), "The value must keep its expected prefix");
         assertSanitized(value);
         assertTrue(value.chars()
-                .noneMatch(c -> Character.isWhitespace(c) || Character.isSpaceChar(c) || c == '='), value);
+                .noneMatch(c -> Character.isWhitespace(c) || Character.isSpaceChar(c) || c == '='),
+                "The value must be one token without whitespace, a space character or '='");
     }
 
     /** A token lifecycle line carries no method pair other than {@code method=pat}. */
     private static void assertNoMethodOtherThanPat(String line) {
         var method = Pattern.compile(" method=(\\S*)").matcher(line);
         while (method.find()) {
-            assertEquals("pat", method.group(1), line);
+            assertTrue("pat".equals(method.group(1)), "A token lifecycle line may carry only method=pat");
         }
     }
 
-    /** Runs the call, which must not throw, and asserts that it added at most one audit line. */
-    private static void assertAtMostOneLine(StdErr err, Executable call) {
+    /**
+     * Runs the call, checks that none of the secrets reached the output, then asserts that the call did not throw
+     * and added at most one audit line. Like {@link #callThrows}, it never formats an exception the call throws.
+     */
+    private static void assertAtMostOneLine(StdErr err, Runnable call, String... secrets) {
         var before = auditLines(err).size();
-        assertDoesNotThrow(call);
+        var threw = callThrows(call);
+        assertNoLeak(err, secrets);
+        assertFalse(threw, "Writing an event with missing values must never throw");
         var added = auditLines(err).size() - before;
         assertTrue(added <= 1, () -> "Expected at most one audit line, got " + added);
     }
 
-    /** Asserts the fixed WARN message for an event that could not be built, which never quotes the cause. */
-    private static void assertWriteFailed(StdErr err, String event, String secret) {
+    /**
+     * Asserts that a failure while building the event was swallowed and reported with the fixed WARN message,
+     * which never quotes the cause. The secret, the message of that cause, is checked first.
+     */
+    private static void assertWriteFailed(StdErr err, String event, String secret, boolean threw) {
+        assertNoLeak(err, secret);
+        assertFalse(threw, () -> "A failure while writing " + event + " must be swallowed");
         var lines = auditLines(err);
-        assertEquals(1, lines.size(), () -> String.join("\n", lines));
+        assertEquals(1, lines.size(), () -> "Expected exactly one audit line for " + event);
         var line = lines.getFirst();
         assertLevel(line, "WARN");
-        assertTrue(line.endsWith(" - " + WRITE_FAILED + event + "' (IllegalStateException)."), line);
-        assertNoLeak(err, secret);
+        assertTrue(line.endsWith(" - " + WRITE_FAILED + event + "' (IllegalStateException)."),
+                () -> "Expected the fixed write-failure message for " + event);
+    }
+
+    /**
+     * Runs the call and answers whether it threw. Unlike {@code assertDoesNotThrow}, an assertion on the answer
+     * never formats the exception, whose message here is a generated secret.
+     */
+    private static boolean callThrows(Runnable call) {
+        try {
+            call.run();
+            return false;
+        } catch (RuntimeException e) {
+            return true;
+        }
     }
 
     /** Puts an authenticated user name and password authentication of {@code jdoe} into the security context. */

@@ -9,6 +9,8 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.SecureRandom;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.Base64;
 import java.util.HashMap;
 import java.util.List;
@@ -35,7 +37,7 @@ class WebStudioTest {
         Map<String, String> generated = new HashMap<>();
         Throwable failure = null;
         try (var client = JettyServer.get().start()) {
-            putAdminCredentials(client);
+            putAdminCredentials(client, generated); // V1: the derived administrator header is scanned for too
             putPasswordPolicyValues(client, generated); // V7: generated local-user passwords
             putLockoutValues(client, generated); // V9: generated lockout-scenario credentials
             client.test("test-resources");
@@ -73,6 +75,19 @@ class WebStudioTest {
         // AdminUsers seeds each configured administrator with its user name as the password.
         client.localEnv.put("ADMIN_PASSWORD", name);
         client.localEnv.put("ADMIN_AUTH_TOCKEN", basic(name, name));
+    }
+
+    // V1: as above, and registers the derived administrator header for the saved-response scan, which searches for
+    // its Base64 part only. ADMIN_PASSWORD is not registered: it equals the administrator name, which responses show.
+    static void putAdminCredentials(HttpClient client, Map<String, String> generated) {
+        putAdminCredentials(client);
+        generated.put("ADMIN_AUTH_TOCKEN", client.localEnv.get("ADMIN_AUTH_TOCKEN"));
+    }
+
+    // V8: an expiresAt 400 days ahead, beyond the 365-day maximum. Only PatExpiryITest sends the request that reads
+    // it, never the generic runner, because an unexpected 201 would carry a token; so repos() does not call this.
+    static void putPatExpiryValues(HttpClient client) {
+        client.localEnv.put("PAT_EXPIRES_TOO_FAR", Instant.now().plus(Duration.ofDays(400)).toString());
     }
 
     // V7: generated passwords of the local users the fixtures create, and the password-policy boundary values

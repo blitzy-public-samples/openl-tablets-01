@@ -1,7 +1,8 @@
 package org.openl.studio.repositories.service;
 
-// V1: LinkOption, RepositoryDelegate, FileSystemRepository, NameChecker, FolderMapper and BadRequestException
-// serve the upload destination guard; the import block itself cannot hold a comment, as Spotless rewrites it.
+// V1: LinkOption, PathCheckedRepository, RepositoryDelegate, FileSystemRepository, NameChecker, FolderMapper and
+// BadRequestException serve the upload destination guard; the import block itself cannot hold a comment, as
+// Spotless rewrites it.
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
@@ -25,6 +26,7 @@ import org.springframework.stereotype.Component;
 
 import org.openl.rules.project.model.Module;
 import org.openl.rules.project.model.ProjectDescriptor;
+import org.openl.rules.repository.PathCheckedRepository;
 import org.openl.rules.repository.api.AdditionalData;
 import org.openl.rules.repository.api.ChangesetType;
 import org.openl.rules.repository.api.FileData;
@@ -221,7 +223,8 @@ public class ZipProjectSaveStrategy {
             var folder = mapped
                     ? StringUtils.trimToEmpty(model.getFullPath())
                     : designTimeRepository.getRulesLocation() + model.getProjectName();
-            var anchor = realPathOf(root.toAbsolutePath().normalize());
+            // V1: resolved before it is normalized, so a '<link>/..' in the root leads where the repository writes
+            var anchor = realPathOf(root.toAbsolutePath()).normalize();
             var boundary = anchor.resolve(folder).normalize();
             // Lexically inside the root, and no link between the root and the project folder.
             if (!boundary.startsWith(anchor) || !realPathOf(boundary).startsWith(boundary)) {
@@ -239,8 +242,10 @@ public class ZipProjectSaveStrategy {
      * Returns the root folder of the file-system repository the given repository writes to.
      *
      * <p>The secured wrappers are unwrapped through {@link RepositoryDelegate}, then a {@link FolderMapper} through
-     * its delegate. The unwrapped repository is only asked for its root: every write still goes through the
-     * wrapper the caller passed, so no access check is bypassed.
+     * its delegate. A repository built from its settings ends there in a {@link PathCheckedRepository}, which is
+     * not a delegate and reveals only the root of a file repository it wraps. The unwrapped repository is only
+     * asked for its root: every write still goes through the wrapper the caller passed, so no access check is
+     * bypassed.
      *
      * @return the root folder, or {@code null} when the repository does not store its files in a local folder
      */
@@ -251,6 +256,10 @@ public class ZipProjectSaveStrategy {
         }
         if (current instanceof FolderMapper mapper) {
             current = mapper.getDelegate();
+        }
+        // V1: a repository built from its settings is path-checked, and that wrapper reveals only a file root
+        if (current instanceof PathCheckedRepository pathChecked) {
+            return pathChecked.getLocalRoot();
         }
         return current instanceof FileSystemRepository fileSystem ? fileSystem.getRoot() : null;
     }

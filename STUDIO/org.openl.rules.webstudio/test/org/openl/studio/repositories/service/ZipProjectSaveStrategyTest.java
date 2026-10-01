@@ -3,7 +3,9 @@ package org.openl.studio.repositories.service;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentCaptor.forClass;
 import static org.mockito.ArgumentMatchers.any;
@@ -23,6 +25,7 @@ import java.nio.file.FileSystem;
 import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -32,13 +35,19 @@ import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 import java.util.zip.ZipOutputStream;
 
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.DisabledOnOs;
+import org.junit.jupiter.api.condition.OS;
 import org.junit.jupiter.api.io.TempDir;
 import org.mockito.ArgumentCaptor;
+import org.mockito.Mockito;
 
 import org.openl.rules.project.model.Module;
 import org.openl.rules.project.model.ProjectDescriptor;
+import org.openl.rules.repository.PathCheckedRepository;
+import org.openl.rules.repository.RepositoryInstatiator;
 import org.openl.rules.repository.api.ChangesetType;
 import org.openl.rules.repository.api.FeaturesBuilder;
 import org.openl.rules.repository.api.FileData;
@@ -51,6 +60,9 @@ import org.openl.rules.workspace.dtr.DesignTimeRepository;
 import org.openl.rules.workspace.dtr.impl.FileMappingData;
 import org.openl.rules.workspace.dtr.impl.MappedRepository;
 import org.openl.rules.workspace.filter.PathFilter;
+import org.openl.security.acl.repository.SecuredRepositoryFactory;
+import org.openl.security.acl.repository.SimpleRepositoryAclService;
+import org.openl.studio.common.exception.BadRequestException;
 import org.openl.studio.repositories.model.CreateUpdateProjectModel;
 import org.openl.util.IOUtils;
 import org.openl.util.ZipUtils;
@@ -58,11 +70,19 @@ import org.openl.util.ZipUtils;
 class ZipProjectSaveStrategyTest {
 
     private static final String BASE_RULES_LOCATION = "DESIGN/";
+    // V1: the archive and the rejection the upload destination guard tests share
+    private static final Path PROJECT_ARCHIVE = Path.of("test-resources/upload/zip/project.zip");
+    private static final String INVALID_PATH = "openl.error.400.file.path.invalid.message";
 
     private ZipProjectSaveStrategy saveStrategy;
     private DesignTimeRepository designTimeRepositoryMock;
     private UserManagementService userManagementService;
     private ArgumentCaptor<FileData> fileDataCaptor;
+    // V1: the repositories a test opens over real folders, closed after it
+    private final List<AutoCloseable> closeables = new ArrayList<>();
+
+    @TempDir
+    Path tmp;
 
     @BeforeEach
     void setUp() {
@@ -86,6 +106,12 @@ class ZipProjectSaveStrategyTest {
                 zipFilterMock,
                 zipCharsetDetectorMock,
                 userManagementService);
+    }
+
+    // V1: releases the file repositories a test opened
+    @AfterEach
+    void closeRepositories() {
+        closeables.forEach(IOUtils::closeQuietly);
     }
 
     @Test
@@ -290,6 +316,122 @@ class ZipProjectSaveStrategyTest {
         assertEquals("custom-name", actualAddData.getInternalPath());
     }
 
+    // ---------------------------------------------------------------------------------------------
+    // V1: the upload destination guard over a file repository built from its settings, as the
+    // application builds it, and so behind PathCheckedRepository and the secured wrapper
+    // ---------------------------------------------------------------------------------------------
+
+    @Test
+    @DisabledOnOs(OS.WINDOWS)
+    void saveIntoAConfiguredFileRepositoryRejectsAProjectFolderLinkedOutside() throws IOException {
+        var root = tmp.resolve("design");
+        var outside = Files.createDirectories(tmp.resolve("outside"));
+        Files.createSymbolicLink(Files.createDirectories(root.resolve(BASE_RULES_LOCATION)).resolve("Linked"),
+                outside);
+        var repository = secured(configuredFileRepository(root));
+        var model = new CreateUpdateProjectModel("design", "jsmith", "Linked", null, null, false);
+
+        var e = assertThrows(BadRequestException.class, () -> saveStrategy.save(repository, model, PROJECT_ARCHIVE));
+
+        assertEquals(INVALID_PATH, e.getErrorCode());
+        assertEmpty(outside, "Nothing is written through a project folder linked outside");
+    }
+
+    @Test
+    @DisabledOnOs(OS.WINDOWS)
+    void saveIntoAMappedConfiguredFileRepositoryRejectsAProjectFolderLinkedOutside() throws IOException {
+        var root = Files.createDirectories(tmp.resolve("design"));
+        var outside = Files.createDirectories(tmp.resolve("outside"));
+        Files.createSymbolicLink(root.resolve("linked"), outside);
+        var repository = secured(mapped(configuredFileRepository(root)));
+        var model = new CreateUpdateProjectModel("design", "jsmith", "Linked", "linked", null, false);
+
+        var e = assertThrows(BadRequestException.class, () -> saveStrategy.save(repository, model, PROJECT_ARCHIVE));
+
+        assertEquals(INVALID_PATH, e.getErrorCode());
+        assertEmpty(outside, "Nothing is written through a mapped project folder linked outside");
+    }
+
+    @Test
+    @DisabledOnOs(OS.WINDOWS)
+    void overwritingAProjectOfAConfiguredFileRepositoryRejectsAnEntryThroughAnOutsideLink() throws IOException {
+        var root = tmp.resolve("design");
+        var project = Files.createDirectories(root.resolve(BASE_RULES_LOCATION + "Existing"));
+        var outside = Files.createDirectories(tmp.resolve("outside"));
+        // The archive holds rules/Project2-Main.xlsx, so the save would write it through this link.
+        var link = Files.createSymbolicLink(project.resolve("rules"), outside);
+        var repository = secured(configuredFileRepository(root));
+        var model = new CreateUpdateProjectModel("design", "jsmith", "Existing", null, null, true);
+
+        var e = assertThrows(BadRequestException.class, () -> saveStrategy.save(repository, model, PROJECT_ARCHIVE));
+
+        assertEquals(INVALID_PATH, e.getErrorCode());
+        assertEmpty(outside, "No entry is written through a link the existing project folder holds");
+        assertTrue(Files.isSymbolicLink(link), "The existing project folder is left as it was");
+    }
+
+    @Test
+    @DisabledOnOs(OS.WINDOWS)
+    void saveRejectsAProjectFolderLinkedOutsideUnderAConfiguredRootThatClimbsOutOfALink() throws IOException {
+        // base/link points to physical/child, so the file system writes base/link/../design at physical/design,
+        // while the lexically normalized base/design does not exist.
+        var physical = Files.createDirectories(tmp.resolve("physical/design"));
+        var child = Files.createDirectories(tmp.resolve("physical/child"));
+        var link = Files.createSymbolicLink(Files.createDirectories(tmp.resolve("base")).resolve("link"), child);
+        var outside = Files.createDirectories(tmp.resolve("outside"));
+        Files.createSymbolicLink(Files.createDirectories(physical.resolve(BASE_RULES_LOCATION)).resolve("Linked"),
+                outside);
+        var repository = secured(configuredFileRepository(link.resolve("..").resolve("design")));
+        var model = new CreateUpdateProjectModel("design", "jsmith", "Linked", null, null, false);
+
+        assertFalse(Files.exists(tmp.resolve("base/design")), "Fixture: the lexical root does not exist");
+        var e = assertThrows(BadRequestException.class, () -> saveStrategy.save(repository, model, PROJECT_ARCHIVE));
+
+        assertEquals(INVALID_PATH, e.getErrorCode());
+        assertEmpty(outside, "Nothing is written through a project folder linked outside a root that climbs out");
+    }
+
+    @Test
+    void anOrdinaryUploadIntoAConfiguredFileRepositorySucceeds() throws IOException {
+        var root = tmp.resolve("design");
+        var repository = secured(configuredFileRepository(root));
+        var model = new CreateUpdateProjectModel("design", "jsmith", "Fresh", null, null, false);
+
+        assertNotNull(saveStrategy.save(repository, model, PROJECT_ARCHIVE), "The saved project folder is reported");
+
+        var project = root.resolve(BASE_RULES_LOCATION + "Fresh");
+        assertTrue(Files.isRegularFile(project.resolve(ProjectDescriptor.FILE_NAME)), "The descriptor is saved");
+        assertTrue(Files.isRegularFile(project.resolve("rules/Project2-Main.xlsx")), "A nested entry is saved");
+    }
+
+    @Test
+    void anOrdinaryUploadIntoAMappedConfiguredFileRepositorySucceeds() throws IOException {
+        var root = Files.createDirectories(tmp.resolve("design"));
+        var repository = secured(mapped(configuredFileRepository(root)));
+        var model = new CreateUpdateProjectModel("design", "jsmith", "Fresh", "catalog/Fresh", null, false);
+
+        assertNotNull(saveStrategy.save(repository, model, PROJECT_ARCHIVE), "The saved project folder is reported");
+
+        var project = root.resolve("catalog/Fresh");
+        assertTrue(Files.isRegularFile(project.resolve(ProjectDescriptor.FILE_NAME)), "The descriptor is saved");
+        assertTrue(Files.isRegularFile(project.resolve("rules/Project2-Main.xlsx")), "A nested entry is saved");
+    }
+
+    @Test
+    void overwritingAnOrdinaryProjectOfAConfiguredFileRepositorySucceeds() throws IOException {
+        var root = tmp.resolve("design");
+        var project = root.resolve(BASE_RULES_LOCATION + "Existing");
+        var stale = Files.createDirectories(project.resolve("rules")).resolve("Stale.xlsx");
+        Files.write(stale, new byte[] { 1 });
+        var repository = secured(configuredFileRepository(root));
+        var model = new CreateUpdateProjectModel("design", "jsmith", "Existing", null, null, true);
+
+        assertNotNull(saveStrategy.save(repository, model, PROJECT_ARCHIVE), "The saved project folder is reported");
+
+        assertTrue(Files.isRegularFile(project.resolve("rules/Project2-Main.xlsx")), "The new entry is saved");
+        assertFalse(Files.exists(stale), "A file the archive does not hold is removed by the full save");
+    }
+
     private ProjectDescriptor assertProjectDescriptor(String expectedRootFolder,
                                                       String expectedName,
                                                       FileItem descriptor) {
@@ -439,5 +581,41 @@ class ZipProjectSaveStrategyTest {
         when(mockedRepo.supports()).thenReturn(featuresBuilder.build());
 
         return mockedRepo;
+    }
+
+    // V1: the application instantiates its design repositories from their settings, path-checked
+    /**
+     * A {@code repo-file} design repository over the folder, built from its settings the way the application
+     * builds it, and therefore behind {@link PathCheckedRepository}. It is closed after the test.
+     */
+    private Repository configuredFileRepository(Path root) {
+        var settings = Map.of("repository.design.factory", "repo-file", "repository.design.uri", root.toString());
+        var configured = RepositoryInstatiator.newRepository("repository.design", settings::get);
+        closeables.add(configured);
+        assertInstanceOf(PathCheckedRepository.class, configured, "Fixture: the settings build a path-checked wrapper");
+        return configured;
+    }
+
+    // V1: the mapped layout of a design repository, whose projects sit where their file mapping places them
+    private Repository mapped(Repository delegate) throws IOException {
+        var mapped = MappedRepository.create(delegate, BASE_RULES_LOCATION);
+        closeables.add(mapped);
+        return mapped;
+    }
+
+    // V1: the secured wrapper the REST route receives, for a user granted every repository permission
+    private static Repository secured(Repository repository) {
+        var acl = mock(SimpleRepositoryAclService.class,
+                invocation -> invocation.getMethod().getReturnType() == boolean.class
+                        ? Boolean.TRUE
+                        : Mockito.RETURNS_DEFAULTS.answer(invocation));
+        return SecuredRepositoryFactory.wrapToSecureRepo(repository, acl);
+    }
+
+    // V1: a folder nothing was written to
+    private static void assertEmpty(Path folder, String message) throws IOException {
+        try (var entries = Files.list(folder)) {
+            assertEquals(0, entries.count(), message);
+        }
     }
 }

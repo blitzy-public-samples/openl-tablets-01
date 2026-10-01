@@ -194,7 +194,8 @@ class PatGeneratorServiceImplTest {
 
         // Verify raw secret from response is NOT the same as stored hash
         var rawSecret = response.token().substring(PatToken.PREFIX.length()).split("\\.")[1];
-        assertNotEquals(rawSecret, savedToken.getSecretHash(), "Secret should be hashed before storage");
+        // V8: a boolean comparison, so a failure never prints the raw secret
+        assertFalse(rawSecret.equals(savedToken.getSecretHash()), "Secret should be hashed before storage");
 
         // Verify BCrypt can validate the secret
         assertTrue(passwordEncoder.matches(rawSecret, savedToken.getSecretHash()),
@@ -234,7 +235,8 @@ class PatGeneratorServiceImplTest {
 
         // Assert
         assertNotEquals(response1.publicId(), response2.publicId(), "PublicIds should be different");
-        assertNotEquals(response1.token(), response2.token(), "Full tokens should be different");
+        // V8: a boolean comparison, so a failure never prints a token
+        assertFalse(response1.token().equals(response2.token()), "Full tokens should be different");
 
         verify(crudService, times(2)).save(any(PersonalAccessToken.class));
     }
@@ -309,7 +311,8 @@ class PatGeneratorServiceImplTest {
         assertEquals("jdoe", response1.loginName());
         assertEquals("jsmith", response2.loginName());
         assertNotEquals(response1.publicId(), response2.publicId());
-        assertNotEquals(response1.token(), response2.token());
+        // V8: a boolean comparison, so a failure never prints a token
+        assertFalse(response1.token().equals(response2.token()), "Full tokens of different users should differ");
 
         verify(crudService, times(2)).save(any(PersonalAccessToken.class));
     }

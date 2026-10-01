@@ -17,7 +17,6 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.concurrent.TimeUnit;
 
 import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.AfterEach;
@@ -37,9 +36,11 @@ import org.openl.util.PropertiesUtils;
  *
  * <p>A setting whose name ends in {@code password}, {@code secret} or {@code token}, except {@code secret.key}, must be
  * stored as {@code ENC(v2:...)}, with a fresh ciphertext per value, whether {@code secret.key} is configured or keeps
- * its blank default. Legacy {@code ENC(...)} values must keep decrypting and must be re-encrypted on the next save; a
- * legacy value that cannot be decrypted is kept with a WARN, and a value whose key is lost reads as {@code ""} with one
- * ERROR.
+ * its blank default. Legacy {@code ENC(...)} values must keep decrypting, and they and stored plain-text values must be
+ * re-encrypted on the next save, also one that does not touch them; a legacy value that cannot be decrypted is kept
+ * with a WARN, and a value whose key is lost reads as {@code ""} with one ERROR. A value written with the instance key
+ * must keep decrypting once {@code secret.key} is configured, and a value equal to its default must not be stored,
+ * also when the default is encrypted.
  *
  * <p>The class compiles against the source as it was before V6, so it reproduces the finding there: it uses only the
  * public settings API, the legacy {@link PassCoder#encode} and the package-private constructors and
@@ -239,6 +240,12 @@ class DynamicPropertySourceTest {
         assertNoneLogged(log, List.of(inner(legacy), plain, key));
     }
 
+    /**
+     * Once the key file is deleted, the settings are read from a copy in a folder without a key file that no read has
+     * looked at. A read may answer for up to a second from the last check of a key file at the same path, so a read in
+     * the original folder could still decrypt; the key file of the new folder was never checked, so its first read
+     * looks at the disk and finds no key, without any wait.
+     */
     @Test
     @StdIo
     void lostInstanceKeyYieldsEmptyWithOneError(StdErr err) throws Exception {
@@ -250,10 +257,13 @@ class DynamicPropertySourceTest {
         var instanceKey = Files.readString(keyFile()).trim();
 
         Files.delete(keyFile());
+        var restored = Files.createDirectories(home.resolve("restored"));
+        Files.copy(settingsFile(), restored.resolve(APP + ".properties"));
+        var lost = open(restored, Map.of("secret.key", "")).source();
         var mark = err.capturedString().length();
 
-        var first = readUntilEmpty(source, "repo.password");
-        var second = source.getProperty("repo.password");
+        var first = lost.getProperty("repo.password");
+        var second = lost.getProperty("repo.password");
 
         assertTrue("".equals(first), "A value whose key file is lost must read as empty");
         assertTrue("".equals(second), "A value whose key file is lost must keep reading as empty");
@@ -310,6 +320,97 @@ class DynamicPropertySourceTest {
         assertSecret(newPlain, source.getProperty("repo.password"), "The new value must decrypt");
     }
 
+    @Test
+    @StdIo
+    void storedPlainTextSecretsAreEncryptedOnSaveWithKey(StdErr err) throws IOException {
+        var key = random();
+
+        var logged = assertStoredPlainTextSecretsEncrypted(key);
+
+        assertFalse(Files.exists(keyFile()), "A configured secret.key must not create the instance key file");
+        logged.add(key);
+        assertNoneLogged(err.capturedString(), logged);
+    }
+
+    @Test
+    @StdIo
+    void storedPlainTextSecretsAreEncryptedOnSaveWithBlankKey(StdErr err) throws IOException {
+        var logged = assertStoredPlainTextSecretsEncrypted("");
+
+        assertTrue(Files.isRegularFile(keyFile()), "A blank secret.key must create the instance key file");
+        logged.add(Files.readString(keyFile()).trim());
+        assertNoneLogged(err.capturedString(), logged);
+    }
+
+    @Test
+    @StdIo
+    void instanceKeyValueDecryptsOnceSecretKeyIsConfigured(StdErr err) throws IOException {
+        var plain = random();
+        open(Map.of("secret.key", "")).source().save(Map.of("repo.password", plain));
+        var written = assertV2(stored().get("repo.password"), plain, "repo.password");
+        var instanceKey = Files.readString(keyFile()).trim();
+        var key = random();
+        var source = open(Map.of("secret.key", key)).source();
+
+        assertSecret(plain,
+                source.getProperty("repo.password"),
+                "A value of the instance key must decrypt when secret.key does not");
+
+        source.save(Map.of("other.name", random()));
+
+        var stored = stored();
+        assertTrue(stored.containsKey("other.name"), "The unrelated setting must be stored");
+        assertTrue(written.equals(stored.get("repo.password")),
+                "An unrelated save must keep the ciphertext of the instance key");
+        assertSecret(plain, source.getProperty("repo.password"), "The kept ciphertext must decrypt");
+        assertSecret(plain,
+                open(Map.of("secret.key", key)).source().getProperty("repo.password"),
+                "The kept ciphertext must decrypt from the file");
+        assertTrue(Files.isRegularFile(keyFile()), "The instance key file must be kept");
+        var log = err.capturedString();
+        assertFalse(log.lines().anyMatch(line -> line.contains(" ERROR ")),
+                "A value the instance key decrypts must log no ERROR");
+        assertNoneLogged(log, List.of(plain, inner(written), instanceKey, key));
+    }
+
+    @Test
+    @StdIo
+    void valueEqualToEncryptedDefaultIsRemoved(StdErr err) throws Exception {
+        var key = random();
+        var v2Plain = random();
+        var legacyPlain = random();
+        // A genuine ENC(v2:...) default: what a save with the same secret.key writes into another folder.
+        var seed = open(home.resolve("seed"), Map.of("secret.key", key)).source();
+        seed.save(Map.of("seed.password", v2Plain));
+        var v2Default = assertV2(seed.getProperties().get("seed.password"), v2Plain, "seed.password");
+        var legacyDefault = legacy(legacyPlain, key);
+        // Stored overrides equal to their encrypted defaults, which a save that does not touch them must remove too.
+        writeSettings(Map.of("c.token", v2Plain, "d.password", legacyPlain));
+        var source = open(Map.of("secret.key",
+                key,
+                "a.password",
+                v2Default,
+                "b.secret",
+                legacyDefault,
+                "c.token",
+                v2Default,
+                "d.password",
+                legacyDefault)).source();
+        var other = random();
+
+        source.save(Map.of("a.password", v2Plain, "b.secret", legacyPlain, "other.name", other));
+
+        var stored = stored();
+        for (var name : List.of("a.password", "b.secret", "c.token", "d.password")) {
+            assertFalse(source.getProperties().containsKey(name),
+                    "A value equal to its encrypted default must be removed: " + name);
+            assertFalse(stored.containsKey(name), "A value equal to its encrypted default must not be stored: " + name);
+        }
+        assertEquals(other, stored.get("other.name"), "The other property must stay stored");
+        assertNoneLogged(err.capturedString(),
+                List.of(v2Plain, legacyPlain, inner(v2Default), inner(legacyDefault), key));
+    }
+
 
     /**
      * Saves one generated value under a {@code password}, a {@code secret} and a {@code token} name with the given
@@ -345,14 +446,62 @@ class DynamicPropertySourceTest {
     }
 
     /**
-     * Opens the settings in {@code home} as the application does: this source first, then the defaults, and registers
-     * it as the source that decodes {@code ENC(...)} values.
+     * Stores one generated plain-text value under a {@code password}, a {@code secret} and a {@code token} name, as a
+     * settings file written while {@code secret.key} was blank holds them, saves only an unrelated setting with the
+     * given {@code secret.key}, and asserts that each untouched value is now stored as {@code ENC(v2:...)}, that the
+     * file holds none of the plain values, and that each reads back as it was, also from the file.
      *
-     * @param extra defaults beside {@code openl.home.shared} and {@code secret.cipher}, such as {@code secret.key}
+     * @return the plain values and the stored ciphertexts, which the log must never hold
+     */
+    private List<String> assertStoredPlainTextSecretsEncrypted(String key) throws IOException {
+        var values = new LinkedHashMap<String, String>();
+        values.put("repo.password", random());
+        values.put("security.oauth2.client-secret", random());
+        values.put("api.token", random());
+        writeSettings(values);
+        var source = open(Map.of("secret.key", key)).source();
+
+        source.save(Map.of("other.name", random()));
+
+        var stored = stored();
+        var file = raw();
+        // Checked for every name before the format checks, so a value kept in plain text fails here whatever the others
+        // hold.
+        values.forEach((name, plain) -> assertFalse(file.contains(plain),
+                "The settings file must not keep the plain value of " + name));
+        var logged = new ArrayList<String>();
+        for (var entry : values.entrySet()) {
+            var name = entry.getKey();
+            var plain = entry.getValue();
+            var value = assertV2(stored.get(name), plain, name);
+            assertSecret(plain, source.getProperty(name), "The encrypted value must decrypt: " + name);
+            logged.add(plain);
+            logged.add(inner(value));
+        }
+        var reopened = open(Map.of("secret.key", key)).source();
+        values.forEach((name, plain) -> assertSecret(plain,
+                reopened.getProperty(name),
+                "The encrypted value must decrypt from the file: " + name));
+        return logged;
+    }
+
+    /**
+     * Opens the settings in {@code home}, as {@link #open(Path, Map)} does.
      */
     private Fixture open(Map<String, String> extra) {
+        return open(home, extra);
+    }
+
+    /**
+     * Opens the settings in {@code shared} as the application does: this source first, then the defaults, and
+     * registers it as the source that decodes {@code ENC(...)} values.
+     *
+     * @param shared the folder of the settings file and the instance key file, {@code openl.home.shared}
+     * @param extra defaults beside {@code openl.home.shared} and {@code secret.cipher}, such as {@code secret.key}
+     */
+    private Fixture open(Path shared, Map<String, String> extra) {
         var defaults = new HashMap<String, Object>();
-        defaults.put("openl.home.shared", home.toString());
+        defaults.put("openl.home.shared", shared.toString());
         defaults.put("secret.cipher", CIPHER);
         defaults.putAll(extra);
         var sources = new MutablePropertySources();
@@ -362,21 +511,6 @@ class DynamicPropertySourceTest {
         sources.addFirst(source);
         DynamicPropertySource.register(source);
         return new Fixture(source, resolver);
-    }
-
-    /**
-     * Reads the property until it reads as {@code ""}, for ten seconds at most, and returns the last value read. Reads
-     * may answer from the last check of the instance key file for up to a second, so its deletion reaches them only
-     * after that.
-     */
-    private static String readUntilEmpty(DynamicPropertySource source, String name) throws InterruptedException {
-        var deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
-        var value = source.getProperty(name);
-        while (!"".equals(value) && System.nanoTime() - deadline < 0) {
-            TimeUnit.MILLISECONDS.sleep(50);
-            value = source.getProperty(name);
-        }
-        return value;
     }
 
     private Path settingsFile() {

@@ -2,7 +2,6 @@ package org.openl.studio.users.rest.controller;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -87,14 +86,15 @@ class PersonalAccessTokenControllerTest {
         // Act
         var response = controller.createToken(new CreatePersonalAccessTokenRequest(TOKEN_NAME, null));
 
-        // Assert
-        assertSame(created, response);
-        var line = singleAuditLine(err);
-        assertTrue(line.contains("event=pat.create outcome=success "), line);
-        assertTrue(line.endsWith(" pat=" + publicId), line);
+        // Assert - the secret and the token first, so no later failure can stop that check
         var output = err.capturedString();
         assertFalse(output.contains(secret), "The token secret reached the log output.");
         assertFalse(output.contains(tokenValue), "The token reached the log output.");
+        // An identity check that never formats the response, whose token() is the full PAT
+        assertTrue(created == response, "The generated response must be returned as it is");
+        var line = singleAuditLine(err);
+        assertTrue(line.contains("event=pat.create outcome=success "), "pat.create must carry outcome=success");
+        assertTrue(line.endsWith(" pat=" + publicId), "pat.create must end with the generated public ID");
     }
 
     @Test
@@ -111,9 +111,9 @@ class PersonalAccessTokenControllerTest {
         // Assert - the deletion is unchanged, and the audit line names the token as pat.create did
         verify(crudService).deleteByPublicId(pathValue);
         var line = singleAuditLine(err);
-        assertTrue(line.contains("event=pat.revoke outcome=success "), line);
-        assertTrue(line.endsWith(" pat=" + storedId), line);
-        assertFalse(line.contains(pathValue), line);
+        assertTrue(line.contains("event=pat.revoke outcome=success "), "pat.revoke must carry outcome=success");
+        assertTrue(line.endsWith(" pat=" + storedId), "pat.revoke must end with the stored public ID");
+        assertFalse(line.contains(pathValue), "pat.revoke must not carry the path value");
     }
 
     @Test
@@ -128,8 +128,8 @@ class PersonalAccessTokenControllerTest {
 
         assertEquals("openl.error.404.pat.not.found.message", ex.getErrorCode());
         verify(crudService, never()).deleteByPublicId(anyString());
-        assertTrue(auditLines(err).isEmpty(), () -> String.join("\n", auditLines(err)));
-        assertFalse(err.capturedString().contains("event=pat.revoke"), err.capturedString());
+        assertTrue(auditLines(err).isEmpty(), "An unknown public ID must write no audit line");
+        assertFalse(err.capturedString().contains("event=pat.revoke"), "An unknown public ID must write no pat.revoke");
     }
 
     /** A stored token as the CRUD service returns it, without any secret. */
@@ -154,10 +154,10 @@ class PersonalAccessTokenControllerTest {
         return err.capturedString().lines().filter(l -> l.contains(marker)).toList();
     }
 
-    /** Asserts that exactly one audit line was written and returns it. */
+    /** Asserts that exactly one audit line was written and returns it; the failure message never quotes a line. */
     private static String singleAuditLine(StdErr err) {
         var lines = auditLines(err);
-        assertEquals(1, lines.size(), () -> "Expected one audit line, got: " + String.join("\n", lines));
+        assertEquals(1, lines.size(), "Expected exactly one audit line");
         return lines.getFirst();
     }
 }

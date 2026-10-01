@@ -28,6 +28,7 @@ import org.openl.rules.project.abstraction.AProject;
 import org.openl.rules.project.abstraction.ProjectStatus;
 import org.openl.rules.project.abstraction.ProjectTags;
 import org.openl.rules.project.abstraction.RulesProject;
+import org.openl.rules.repository.PathCheckedRepository;
 import org.openl.rules.repository.api.BranchRepository;
 import org.openl.rules.repository.api.FileData;
 import org.openl.rules.repository.api.Repository;
@@ -169,6 +170,10 @@ public class ProjectCreationService {
         if (current instanceof FolderMapper mapper) {
             current = mapper.getDelegate();
         }
+        // V1: a configured repository is path-checked, and that wrapper reveals only the root of a file repository
+        if (current instanceof PathCheckedRepository pathChecked) {
+            return pathChecked.getLocalRoot();
+        }
         return current instanceof FileSystemRepository fileSystem ? fileSystem.getRoot() : null;
     }
 
@@ -180,7 +185,8 @@ public class ProjectCreationService {
      * refused. A dangling link fails to resolve and is refused by the caller.
      */
     private static boolean isContained(Path root, String physicalFolder) throws IOException {
-        var anchorReal = realPathOf(root.toAbsolutePath().normalize());
+        // V1: resolved before it is normalized, so a '<link>/..' in the root is followed as the repository follows it
+        var anchorReal = realPathOf(root.toAbsolutePath()).normalize();
         var boundary = anchorReal.resolve(physicalFolder).normalize();
         if (!boundary.startsWith(anchorReal)) {
             return false;
@@ -541,6 +547,8 @@ public class ProjectCreationService {
             var designPath = designTimeRepository.getRulesLocation() + newName;
             // V1: contain the copy's folder inside the target repository root; the 400 is never mapped to a conflict
             requireContainedProjectFolder(targetRepository, newName, path);
+            // V1: contain the source project and every file the copy reads; the 400 is never mapped to a conflict
+            requireContainedSource(sourceCopy);
             var designData = new FileData();
             designData.setName(designPath);
             designData.setComment(comment);
@@ -587,6 +595,62 @@ public class ProjectCreationService {
             log.debug("Revision '{}' cannot be read from the repository.", version, e);
         }
         throw new NotFoundException("project.revision.message", version);
+    }
+
+    /**
+     * V1: keeps the source of a copy inside its own project folder before anything is read from it.
+     *
+     * <p>When the source repository keeps its content in a local directory (a file design repository, flat or
+     * mapped, or the user's working copy of an opened project), the copy reads every file the repository lists
+     * under the project, and a file repository lists a link to a regular file and follows it on read. So the
+     * physical project folder ({@link AProject#getRealPath()} under the real repository root) must sit at its
+     * own lexical place, and every listed file must resolve inside that folder: a link to a sibling project, to
+     * a place outside the root, or to nothing is refused. Links that stay inside the project folder are
+     * accepted. The listing is the one the copy reads, taken through the secured wrapper; the unwrapped
+     * repository is only asked for its root. A file repository keeps no history, so its current state is the
+     * one copied. Other backends (Git, JDBC, S3, Azure Blob) never follow a working-tree link and get no check.
+     *
+     * <p>Every rejection is a 400 {@code file.path.invalid.message}, raised before anything is read from the
+     * source or written to the target, so it is never mapped to a copy conflict.
+     *
+     * <p>The check is private to this class: each V1 surface guards its own inputs, and no component is
+     * shared with the file, workspace or upload surfaces. This departs from the Minimal Change Rule's clause
+     * to isolate new code in dedicated files, which the V1 instruction overrides.
+     */
+    private static void requireContainedSource(AProject sourceCopy) {
+        var repository = sourceCopy.getRepository();
+        var root = localRoot(repository);
+        if (root == null) {
+            return;
+        }
+        try {
+            // Resolved before it is normalized, so a '<link>/..' in the root is followed as the repository follows it.
+            var anchorReal = realPathOf(root.toAbsolutePath()).normalize();
+            var boundary = anchorReal.resolve(sourceCopy.getRealPath().replaceAll("^/+|/+$", "")).normalize();
+            if (!boundary.startsWith(anchorReal) || !realPathOf(boundary).startsWith(boundary)) {
+                log.debug("A source project folder resolves outside its place in the repository.");
+                throw new BadRequestException("file.path.invalid.message");
+            }
+            if (!sourceCopy.isFolder()) {
+                return;
+            }
+            var prefix = sourceCopy.getFolderPath() + "/";
+            for (var file : repository.list(prefix)) {
+                var name = file.getName();
+                // A listed name outside the project cannot be placed under its folder, so it fails closed.
+                var target = name.startsWith(prefix)
+                        ? boundary.resolve(name.substring(prefix.length())).normalize()
+                        : null;
+                if (target == null || !target.startsWith(boundary) || !realPathOf(target).startsWith(boundary)) {
+                    log.debug("A file of the source project resolves outside the project folder.");
+                    throw new BadRequestException("file.path.invalid.message");
+                }
+            }
+        } catch (IOException | IllegalArgumentException e) {
+            // IllegalArgumentException covers InvalidPathException; IOException covers a link that resolves nowhere.
+            log.debug("A source project is rejected: {}", e.getClass().getSimpleName());
+            throw new BadRequestException("file.path.invalid.message");
+        }
     }
 
 }

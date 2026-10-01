@@ -128,15 +128,15 @@ class GetUserPrivilegesTest {
         var result = new GetUserPrivileges(userManagementService, groupManagementService, NO_DEFAULT_GROUP)
                 .apply(USER, external);
 
+        assertNoPasswordLogged(err);
         var warnings = adminMatchWarnings(err);
         assertEquals(1, warnings.size(), "Expected exactly one ADMIN name-match warning");
         var warning = warnings.get(0);
-        assertTrue(warning.contains("WARN"), warning);
-        assertTrue(warning.contains("'" + USER + "'"), warning);
-        assertTrue(warning.contains("'openl-admin'"), warning);
+        assertTrue(warning.contains("WARN"), "The ADMIN name-match warning must be logged at WARN");
+        assertTrue(warning.contains("'" + USER + "'"), "The ADMIN name-match warning must name the user");
+        assertTrue(warning.contains("'openl-admin'"), "The ADMIN name-match warning must name the matched group");
         assertEquals(List.of(adminGroup, dbPrivilege), List.copyOf(result));
         assertEquals(expectedPreChange(null, external, dbAuthorities), List.copyOf(result));
-        assertNoPasswordLogged(err);
     }
 
     @Test
@@ -147,12 +147,13 @@ class GetUserPrivilegesTest {
         var result = new GetUserPrivileges(userManagementService, groupManagementService, NO_DEFAULT_GROUP)
                 .apply(USER, external);
 
+        assertNoPasswordLogged(err);
         var warnings = adminMatchWarnings(err);
         assertEquals(1, warnings.size(), "A group holding ADMIN through a nested group must warn too");
-        assertTrue(warnings.get(0).contains("'openl-nested-admin'"), warnings.get(0));
+        assertTrue(warnings.get(0).contains("'openl-nested-admin'"),
+                "The ADMIN name-match warning must name the nested group");
         assertEquals(List.of(nestedAdminGroup, dbPrivilege), List.copyOf(result));
         assertEquals(expectedPreChange(null, external, dbAuthorities), List.copyOf(result));
-        assertNoPasswordLogged(err);
     }
 
     @Test
@@ -163,10 +164,10 @@ class GetUserPrivilegesTest {
         var result = new GetUserPrivileges(userManagementService, groupManagementService, NO_DEFAULT_GROUP)
                 .apply(USER, external);
 
-        assertEquals(List.of(), adminMatchWarnings(err));
+        assertNoPasswordLogged(err);
+        assertEquals(0, adminMatchWarnings(err).size(), "A group without ADMIN must not warn");
         assertEquals(List.of(baGroup, dbPrivilege), List.copyOf(result));
         assertEquals(expectedPreChange(null, external, dbAuthorities), List.copyOf(result));
-        assertNoPasswordLogged(err);
     }
 
     @Test
@@ -177,12 +178,12 @@ class GetUserPrivilegesTest {
         var result = List.copyOf(new GetUserPrivileges(userManagementService, groupManagementService,
                 NO_DEFAULT_GROUP).apply(USER, external));
 
-        assertEquals(List.of(), adminMatchWarnings(err));
+        assertNoPasswordLogged(err);
+        assertEquals(0, adminMatchWarnings(err).size(), "An unmatched authority must not warn");
         assertEquals(2, result.size());
         assertSame(external.get(0), result.get(0), "An unmatched external authority is kept as it is");
         assertSame(dbPrivilege, result.get(1));
         assertEquals(expectedPreChange(null, external, dbAuthorities), result);
-        assertNoPasswordLogged(err);
     }
 
     @Test
@@ -193,16 +194,17 @@ class GetUserPrivilegesTest {
         var result = List.copyOf(new GetUserPrivileges(userManagementService, groupManagementService,
                 NO_DEFAULT_GROUP).apply(USER, external));
 
+        assertNoPasswordLogged(err);
         var warnings = adminMatchWarnings(err);
         assertEquals(1, warnings.size(), "Only the ADMIN-holding match warns");
-        assertTrue(warnings.get(0).contains("'openl-admin'"), warnings.get(0));
+        assertTrue(warnings.get(0).contains("'openl-admin'"),
+                "The ADMIN name-match warning must name the matched group");
         assertEquals(4, result.size());
         assertSame(adminGroup, result.get(0));
         assertSame(baGroup, result.get(1));
         assertSame(external.get(2), result.get(2));
         assertSame(dbPrivilege, result.get(3));
         assertEquals(expectedPreChange(null, external, dbAuthorities), result);
-        assertNoPasswordLogged(err);
     }
 
     @Test
@@ -284,15 +286,18 @@ class GetUserPrivilegesTest {
         var result = List.copyOf(new GetUserPrivileges(userManagementService, groupManagementService,
                 NO_DEFAULT_GROUP).apply(CRAFTED_USER, external));
 
+        assertNoPasswordLogged(err);
         var forged = Stream.of(err.capturedLines()).filter(line -> line.contains(FORGED_LINE)).toList();
         assertEquals(1, forged.size(), "The forged text must stay inside the one warning line");
         var warning = forged.get(0);
-        assertTrue(warning.contains("WARN"), warning);
-        assertTrue(warning.contains(ADMIN_MATCH_MARKER), warning);
+        assertTrue(warning.contains("WARN"), "The ADMIN name-match warning must be logged at WARN");
+        assertTrue(warning.contains(ADMIN_MATCH_MARKER), "The forged text must stay inside the ADMIN warning");
         assertTrue(warning.endsWith("External group '" + CRAFTED_GROUP_LOGGED + "' of user '" + CRAFTED_USER_LOGGED
                 + "' matches OpenL group '" + CRAFTED_GROUP_LOGGED + "', which holds ADMIN; "
-                + "the user gains administrator rights through this name match."), warning);
-        assertEquals(List.of(warning), List.of(err.capturedLines()), "The warning is the only line written");
+                + "the user gains administrator rights through this name match."),
+                "The warning must name the sanitized group, user and matched group");
+        // The warning is one of the captured lines, so a single captured line is the warning itself.
+        assertEquals(1, err.capturedLines().length, "The warning is the only line written");
         assertTrue(Stream.of(err.capturedLines()).noneMatch(line -> line.startsWith(FORGED_LINE)),
                 "No captured line may start with the forged text");
         // The mapping looks up and returns the names as the IdP sent them; only the logged copies change.
@@ -301,7 +306,6 @@ class GetUserPrivilegesTest {
         assertSame(craftedAdminGroup, result.get(0));
         assertEquals(List.of(craftedAdminGroup), result);
         assertEquals(expectedPreChange(null, external, null), result);
-        assertNoPasswordLogged(err);
     }
 
     // ---------------------------------------------------------------------------------------------------------
@@ -316,9 +320,9 @@ class GetUserPrivilegesTest {
         var result = List.copyOf(new GetUserPrivileges(userManagementService, groupManagementService,
                 NO_DEFAULT_GROUP).withoutAdminMatchWarning().apply(USER, external));
 
-        assertEquals(List.of(), adminMatchWarnings(err));
-        assertEquals(expectedPreChange(null, external, dbAuthorities), result);
         assertNoPasswordLogged(err);
+        assertEquals(0, adminMatchWarnings(err).size(), "withoutAdminMatchWarning() must not warn");
+        assertEquals(expectedPreChange(null, external, dbAuthorities), result);
     }
 
     @Test
@@ -329,10 +333,10 @@ class GetUserPrivilegesTest {
         var result = List.copyOf(new GetUserPrivileges(userManagementService, groupManagementService,
                 NO_DEFAULT_GROUP).withoutAdminMatchWarning().apply(CRAFTED_USER, external));
 
-        assertEquals(List.of(), List.of(err.capturedLines()), "withoutAdminMatchWarning() must log nothing");
+        assertNoPasswordLogged(err);
+        assertEquals(0, err.capturedLines().length, "withoutAdminMatchWarning() must log nothing");
         assertSame(craftedAdminGroup, result.get(0));
         assertEquals(expectedPreChange(null, external, null), result);
-        assertNoPasswordLogged(err);
     }
 
     @ParameterizedTest
@@ -345,8 +349,10 @@ class GetUserPrivilegesTest {
         var privileges = new GetUserPrivileges(userManagementService, groupManagementService, defaultGroupName);
 
         var silent = List.copyOf(privileges.withoutAdminMatchWarning().apply(USER, external));
-        assertEquals(List.of(), adminMatchWarnings(err), "withoutAdminMatchWarning() must not warn");
+        assertNoPasswordLogged(err);
+        assertEquals(0, adminMatchWarnings(err).size(), "withoutAdminMatchWarning() must not warn");
         var warned = List.copyOf(privileges.apply(USER, external));
+        assertNoPasswordLogged(err);
 
         var expected = expectedPreChange(
                 NO_DEFAULT_GROUP.equals(defaultGroupName) ? null : defaultGroup,
@@ -355,7 +361,6 @@ class GetUserPrivilegesTest {
         assertEquals(expected, silent);
         assertEquals(expected, warned);
         assertEquals(warned, silent);
-        assertNoPasswordLogged(err);
     }
 
     static Stream<Arguments> mappingScenarios() {

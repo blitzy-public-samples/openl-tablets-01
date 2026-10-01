@@ -171,6 +171,7 @@ public class ProjectFilesServiceImpl implements ProjectFilesService {
             requireContained(root, sourcePath);
             requirePermission(source, BasePermission.READ);
             requireNotPlacedIntoItself(source, sourcePath, destinationPath, "file.copy.into.itself.message");
+            requireContainedCopy(root, source, destinationPath); // V1: every descendant, before anything is copied
             lockForEditing(root, destinationPath);
             var targetFolder = resolveOrCreateFolders(root.writeFolder(), destinationPath,
                     true, "file.copy.path.conflict.message");
@@ -197,6 +198,7 @@ public class ProjectFilesServiceImpl implements ProjectFilesService {
             requirePermission(source, BasePermission.READ);
             requirePermission(source, BasePermission.DELETE);
             requireNotPlacedIntoItself(source, sourcePath, destinationPath, "file.move.into.itself.message");
+            requireContainedCopy(root, source, destinationPath); // V1: every descendant, before anything is moved
             lockForEditing(root, sourcePath, destinationPath);
             var targetFolder = resolveOrCreateFolders(root.writeFolder(), destinationPath,
                     true, "file.move.path.conflict.message");
@@ -775,6 +777,58 @@ public class ProjectFilesServiceImpl implements ProjectFilesService {
                 }
                 if (artefact.isFolder()) {
                     queue.add((AProjectFolder) artefact);
+                }
+            }
+        }
+    }
+
+    // V1: the copy and move guard; no descendant is read, or written, through a link that leaves the mount.
+    /**
+     * Verifies that every entry a copy or move replicates stays inside the mount's boundary on disk,
+     * both where it is read from and where it is written to.
+     *
+     * <p>The caller has already checked the source and the destination path themselves, so a file
+     * source needs nothing more. For a folder source the walk visits every descendant once,
+     * iteratively like the listings: the descendant must be contained, so no content is read through
+     * a link that leaves the mount, and so must the path it is copied to, its parent's destination
+     * extended by its name, so nothing is created through an existing link under the destination. The
+     * names of existing descendants are only checked for containment, not against {@link NameChecker}.
+     *
+     * <p>The destination paths checked are the ones the copy writes. A destination that ends in a slash
+     * has an empty name, so the copy places the descendants in the folder above its last named segment
+     * (the mount root for {@code dest/}); the walk starts from that folder, and such a transfer keeps
+     * working wherever it stays inside the mount.
+     *
+     * <p>It runs before the mount is reserved and before anything is created or read, so a rejected
+     * copy or move leaves no partial copy behind.
+     *
+     * @throws BadRequestException with {@code file.path.invalid.message} if a descendant, or the path it
+     *                             is copied to, resolves outside the mount
+     */
+    private void requireContainedCopy(FileRoot root, AProjectArtefact source, String destinationPath) {
+        if (!source.isFolder()) {
+            return;
+        }
+        record Pending(AProjectFolder folder, String destinationPath) {}
+
+        // V1: the folder copyArtefact fills; an empty name, after a trailing slash, leaves the folder above.
+        String filled = FilePaths.name(destinationPath).isEmpty()
+                ? FilePaths.parent(destinationPath.substring(0, destinationPath.length() - 1))
+                : destinationPath;
+        Deque<Pending> queue = new ArrayDeque<>();
+        queue.add(new Pending((AProjectFolder) source, filled));
+        while (!queue.isEmpty()) {
+            var pending = queue.poll();
+            for (AProjectArtefact artefact : pending.folder().getArtefacts()) {
+                if (!root.contains(artefact.getInternalPath())) {
+                    throw new BadRequestException("file.path.invalid.message");
+                }
+                String destination = pending.destinationPath().isEmpty()
+                        ? artefact.getName()
+                        : pending.destinationPath() + "/" + artefact.getName();
+                requireContained(root, destination);
+                if (artefact.isFolder()) {
+                    queue.add(new Pending((AProjectFolder) artefact, destination));
                 }
             }
         }

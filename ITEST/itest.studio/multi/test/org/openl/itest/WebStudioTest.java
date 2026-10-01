@@ -37,6 +37,9 @@ class WebStudioTest {
         // Every EPBDS-12819 request is rejected for its user name, so it only needs a compliant password
         secrets.put("EPBDS_12819_PASSWORD", password());
         var adminAuth = adminAuthorization();
+        // V7: the scan also covers the derived administrator header, matched by its value and its Base64 part
+        var scanned = new LinkedHashMap<String, String>(secrets);
+        scanned.put("ADMIN_AUTH_TOCKEN", adminAuth);
 
         // V7: the suite runs with the runtime credentials, then the saved responses are scanned for them
         Throwable failure = null;
@@ -49,7 +52,7 @@ class WebStudioTest {
             failure = e;
             throw e;
         } finally {
-            assertNotSaved(secrets, failure);
+            assertNotSaved(scanned, failure);
         }
     }
 

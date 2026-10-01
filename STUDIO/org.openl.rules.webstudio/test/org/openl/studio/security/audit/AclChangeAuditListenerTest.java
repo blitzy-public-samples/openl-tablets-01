@@ -90,15 +90,16 @@ class AclChangeAuditListenerTest {
                 sortedSet("updateAcl", "createAcl"),
                 sortedSet("ProjectArtifact"));
 
+        assertNoLeak(err, password, sessionId);
         var line = singleAuditLine(err);
         assertLevel(line, "INFO");
-        assertTrue(line.contains("event=acl.change"), line);
-        assertTrue(line.contains("outcome=success"), line);
-        assertTrue(line.contains("user=\"" + USER_NAME + "\""), line);
-        assertTrue(line.contains("ip=" + REQUEST_ADDRESS), line);
-        assertTrue(line.endsWith(" changes=2 kinds=createAcl,updateAcl objectTypes=ProjectArtifact"), line);
-        assertEquals(ACL_CHANGE_KEYS, keys(line), line);
-        assertNoLeak(err, password, sessionId);
+        assertTrue(line.contains("event=acl.change"), "The line must carry event=acl.change");
+        assertTrue(line.contains("outcome=success"), "The line must carry outcome=success");
+        assertTrue(line.contains("user=\"" + USER_NAME + "\""), "The line must carry the user of the context");
+        assertTrue(line.contains("ip=" + REQUEST_ADDRESS), "The line must carry the request address");
+        assertTrue(line.endsWith(" changes=2 kinds=createAcl,updateAcl objectTypes=ProjectArtifact"),
+                "The line must end with the count, the sorted kinds and the object type");
+        assertTrue(ACL_CHANGE_KEYS.equals(keys(line)), "The line must carry exactly the pairs " + ACL_CHANGE_KEYS);
     }
 
     @Test
@@ -113,14 +114,15 @@ class AclChangeAuditListenerTest {
                 sortedSet("deleteAcl", "updateAcl"),
                 sortedSet("ProjectArtifact", "RepositoryObjectIdentity"));
 
+        assertNoLeak(err, password);
         var lines = auditLines(err);
-        assertEquals(2, lines.size(), () -> "Expected two audit lines, got: " + String.join("\n", lines));
+        assertEquals(2, lines.size(), "Expected two audit lines");
         assertEquals(2, lines.stream().filter(l -> l.contains("event=acl.change")).count());
-        assertTrue(lines.get(0).endsWith(" changes=1 kinds=createAcl objectTypes=Root"), lines.get(0));
+        assertTrue(lines.get(0).endsWith(" changes=1 kinds=createAcl objectTypes=Root"),
+                "The first line must end with the counts and names of the first notification");
         assertTrue(lines.get(1)
                 .endsWith(" changes=3 kinds=deleteAcl,updateAcl objectTypes=ProjectArtifact,RepositoryObjectIdentity"),
-                lines.get(1));
-        assertNoLeak(err, password);
+                "The second line must end with the counts and names of the second notification");
     }
 
     @Test
@@ -134,8 +136,9 @@ class AclChangeAuditListenerTest {
 
         var line = singleAuditLine(err);
         assertLevel(line, "INFO");
-        assertTrue(line.contains("event=acl.change outcome=success user=\"system\" ip=- changes=1"), line);
-        assertEquals(ACL_CHANGE_KEYS, keys(line), line);
+        assertTrue(line.contains("event=acl.change outcome=success user=\"system\" ip=- changes=1"),
+                "The line must name the system user and no address");
+        assertTrue(ACL_CHANGE_KEYS.equals(keys(line)), "The line must carry exactly the pairs " + ACL_CHANGE_KEYS);
     }
 
     @Test
@@ -148,12 +151,14 @@ class AclChangeAuditListenerTest {
 
         listener.aclChanged(AclChangeListener.FAILURE, 4, sortedSet("deleteAcl"), sortedSet("ProjectArtifact"));
 
+        assertNoLeak(err, password, sessionId);
         var line = singleAuditLine(err);
         assertLevel(line, "WARN");
-        assertTrue(line.contains("event=acl.change outcome=failure user=\"" + USER_NAME + "\""), line);
-        assertTrue(line.endsWith(" changes=4 kinds=deleteAcl objectTypes=ProjectArtifact"), line);
-        assertEquals(ACL_CHANGE_KEYS, keys(line), line);
-        assertNoLeak(err, password, sessionId);
+        assertTrue(line.contains("event=acl.change outcome=failure user=\"" + USER_NAME + "\""),
+                "The line must carry outcome=failure and the user of the context");
+        assertTrue(line.endsWith(" changes=4 kinds=deleteAcl objectTypes=ProjectArtifact"),
+                "The line must end with the count, the kind and the object type");
+        assertTrue(ACL_CHANGE_KEYS.equals(keys(line)), "The line must carry exactly the pairs " + ACL_CHANGE_KEYS);
     }
 
     @Test
@@ -169,13 +174,14 @@ class AclChangeAuditListenerTest {
                 sortedSet("deleteSid", "updateSid"),
                 sortedSet("sid", "Root", "RepositoryObjectIdentity"));
 
-        var line = singleAuditLine(err);
-        assertTrue(line.contains(" kinds=deleteSid,updateSid"), line);
-        assertTrue(line.contains(" objectTypes=RepositoryObjectIdentity,Root,sid"), line);
-        assertFalse(line.contains("method="), line);
-        assertFalse(line.contains("pat="), line);
-        assertEquals(ACL_CHANGE_KEYS, keys(line), line);
         assertNoLeak(err, password, sessionId);
+        var line = singleAuditLine(err);
+        assertTrue(line.contains(" kinds=deleteSid,updateSid"), "The line must carry the sorted SID kinds");
+        assertTrue(line.contains(" objectTypes=RepositoryObjectIdentity,Root,sid"),
+                "The line must carry the sorted object types");
+        assertFalse(line.contains("method="), "The line must not carry a method pair");
+        assertFalse(line.contains("pat="), "The line must not carry a pat pair");
+        assertTrue(ACL_CHANGE_KEYS.equals(keys(line)), "The line must carry exactly the pairs " + ACL_CHANGE_KEYS);
     }
 
     @Test
@@ -189,16 +195,19 @@ class AclChangeAuditListenerTest {
                 Collections.emptySortedSet()));
 
         var lines = auditLines(err);
-        assertEquals(3, lines.size(), () -> "Expected three audit lines, got: " + String.join("\n", lines));
+        assertEquals(3, lines.size(), "Expected three audit lines");
         // A missing value is written as '-', and an outcome other than success is written at WARN.
-        assertTrue(lines.get(0).endsWith(" changes=-1 kinds=- objectTypes=-"), lines.get(0));
+        assertTrue(lines.get(0).endsWith(" changes=-1 kinds=- objectTypes=-"),
+                "The first line must write the negative count and the missing sets");
         assertLevel(lines.get(0), "INFO");
-        assertTrue(lines.get(1).contains("event=acl.change outcome=- "), lines.get(1));
-        assertTrue(lines.get(1).endsWith(" changes=0 kinds=- objectTypes=-"), lines.get(1));
+        assertTrue(lines.get(1).contains("event=acl.change outcome=- "), "The second line must write outcome=-");
+        assertTrue(lines.get(1).endsWith(" changes=0 kinds=- objectTypes=-"),
+                "The second line must write the zero count and the missing sets");
         assertLevel(lines.get(1), "WARN");
-        assertTrue(lines.get(2).endsWith(" changes=0 kinds=- objectTypes=-"), lines.get(2));
+        assertTrue(lines.get(2).endsWith(" changes=0 kinds=- objectTypes=-"),
+                "The third line must write the zero count and the empty sets as missing");
         for (var line : lines) {
-            assertEquals(ACL_CHANGE_KEYS, keys(line), line);
+            assertTrue(ACL_CHANGE_KEYS.equals(keys(line)), "Each line must carry exactly the pairs " + ACL_CHANGE_KEYS);
         }
     }
 
@@ -212,8 +221,11 @@ class AclChangeAuditListenerTest {
             audit.when(() -> SecurityAuditLog.aclChange(any(), anyInt(), any(), any()))
                     .thenThrow(new IllegalStateException(message));
 
-            assertDoesNotThrow(() -> listener.aclChanged(AclChangeListener.SUCCESS, 1, kinds, objectTypes));
+            var threw = callThrows(() -> listener.aclChanged(AclChangeListener.SUCCESS, 1, kinds, objectTypes));
 
+            // The exception message is a generated sentinel: it must never reach the output.
+            assertNoLeak(err, message);
+            assertFalse(threw, "A failing audit write must be swallowed");
             audit.verify(() -> SecurityAuditLog.aclChange(AclChangeListener.SUCCESS, 1, kinds, objectTypes),
                     times(1));
         }
@@ -224,25 +236,32 @@ class AclChangeAuditListenerTest {
                 .filter(l -> l.contains("WARN" + marker))
                 .filter(l -> l.contains(marker + LISTENER_WRITE_FAILED))
                 .toList();
-        assertEquals(1,
-                warnings.size(),
-                () -> "Expected one listener warning, got: " + err.capturedString());
+        assertEquals(1, warnings.size(), "Expected exactly one listener warning with the fixed message");
     }
 
     @Test
     @StdIo
     void keepsWritingAfterAFailedAuditWrite(StdErr err) {
+        var message = randomValue(24);
+        boolean threw;
         try (MockedStatic<SecurityAuditLog> audit = Mockito.mockStatic(SecurityAuditLog.class)) {
             audit.when(() -> SecurityAuditLog.aclChange(any(), anyInt(), any(), any()))
-                    .thenThrow(new IllegalStateException(randomValue(24)));
-            listener.aclChanged(AclChangeListener.SUCCESS, 1, sortedSet("createAcl"), sortedSet("Root"));
+                    .thenThrow(new IllegalStateException(message));
+            threw = callThrows(() -> listener.aclChanged(AclChangeListener.SUCCESS,
+                    1,
+                    sortedSet("createAcl"),
+                    sortedSet("Root")));
         }
 
         // The listener is stateless: the next notification is written as usual.
         listener.aclChanged(AclChangeListener.SUCCESS, 2, sortedSet("createAcl"), sortedSet("Root"));
 
+        // The exception message is a generated sentinel: it must never reach the output.
+        assertNoLeak(err, message);
+        assertFalse(threw, "A failing audit write must be swallowed");
         var line = singleAuditLine(err);
-        assertTrue(line.endsWith(" changes=2 kinds=createAcl objectTypes=Root"), line);
+        assertTrue(line.endsWith(" changes=2 kinds=createAcl objectTypes=Root"),
+                "The next notification must be written with its own counts and names");
     }
 
     // ---------------------------------------------------------------------------------------------------------
@@ -255,10 +274,10 @@ class AclChangeAuditListenerTest {
         return err.capturedString().lines().filter(l -> l.contains(marker)).toList();
     }
 
-    /** Asserts that exactly one audit line was written, and returns it. */
+    /** Asserts that exactly one audit line was written, and returns it. The message never quotes a line. */
     private static String singleAuditLine(StdErr err) {
         var lines = auditLines(err);
-        assertEquals(1, lines.size(), () -> "Expected one audit line, got: " + String.join("\n", lines));
+        assertEquals(1, lines.size(), "Expected exactly one audit line");
         return lines.getFirst();
     }
 
@@ -275,7 +294,7 @@ class AclChangeAuditListenerTest {
 
     private static void assertLevel(String line, String level) {
         assertTrue(line.contains(level + " " + SecurityAuditLog.LOGGER_NAME + " - "),
-                () -> "Expected level " + level + ": " + line);
+                () -> "Expected the audit line at level " + level);
     }
 
     /** Asserts that none of the values occurs anywhere in the captured output. */
@@ -283,6 +302,19 @@ class AclChangeAuditListenerTest {
         var output = err.capturedString();
         for (var secret : secrets) {
             assertFalse(output.contains(secret), "A generated secret reached the log output.");
+        }
+    }
+
+    /**
+     * Runs the call and answers whether it threw. Unlike {@code assertDoesNotThrow}, an assertion on the answer
+     * never formats the exception, whose message here is a generated sentinel.
+     */
+    private static boolean callThrows(Runnable call) {
+        try {
+            call.run();
+            return false;
+        } catch (RuntimeException e) {
+            return true;
         }
     }
 

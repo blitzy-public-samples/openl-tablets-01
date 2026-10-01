@@ -29,7 +29,12 @@ import org.springframework.security.authentication.UsernamePasswordAuthenticatio
 import org.springframework.security.core.Authentication;
 
 /**
- * Unit tests for {@link OpenLAuthenticationProviderWrapper}.
+ * Coverage-only unit tests for {@link OpenLAuthenticationProviderWrapper}.
+ *
+ * <p><b>Evidence class.</b> These are coverage tests of the audit lines the V11 fix adds to the wrapper, written with
+ * the fix, and are not baseline reproduction evidence. The baseline-compatible V11 reproduction is
+ * {@code ITEST/itest.studio/repos/test/org/openl/itest/SecurityAuditLogITest.java}, which runs the HTTP flows of
+ * {@code ITEST/itest.studio/repos/test-resources-audit} against the baseline and the fix alike.
  *
  * <p>They cover the V11 security audit lines the wrapper writes for every attempt its delegate handles
  * ({@code event=auth.success} for an authenticated result, {@code event=auth.failure} for a rejected attempt, and no
@@ -45,10 +50,18 @@ import org.springframework.security.core.Authentication;
 class OpenLAuthenticationProviderWrapperTest {
 
     private static final String USER_NAME = "jdoe";
+
+    /**
+     * The name of the authenticated result, as a directory may return it for the attempted name. It differs from
+     * {@link #USER_NAME}, and neither contains the other, so a line can name only one of them.
+     */
+    private static final String AUTHENTICATED_NAME = "john.doe";
+
     private static final String SUCCESS_EVENT = "event=auth.success";
     private static final String FAILURE_EVENT = "event=auth.failure";
     private static final String ANY_EVENT = "event=";
     private static final String USER_PAIR = "user=\"" + USER_NAME + "\"";
+    private static final String AUTHENTICATED_USER_PAIR = "user=\"" + AUTHENTICATED_NAME + "\"";
 
     @Mock
     private AuthenticationProvider delegate;
@@ -65,7 +78,7 @@ class OpenLAuthenticationProviderWrapperTest {
     @StdIo
     void logsSuccessAndExposesAttemptDuringDelegation(StdErr err) {
         var attempt = attempt();
-        var result = UsernamePasswordAuthenticationToken.authenticated(USER_NAME, null, List.of());
+        var result = UsernamePasswordAuthenticationToken.authenticated(AUTHENTICATED_NAME, null, List.of());
         var seen = new AtomicReference<Authentication>();
         when(delegate.supports(any())).thenReturn(true);
         when(delegate.authenticate(any())).thenAnswer(invocation -> {
@@ -80,7 +93,9 @@ class OpenLAuthenticationProviderWrapperTest {
         assertNull(AuthenticationHolder.getAuthentication(), "The holder must be cleared after a success.");
         var successLines = linesContaining(err, SUCCESS_EVENT);
         assertEquals(1, successLines.size(), "Exactly one success line is expected.");
-        assertTrue(successLines.get(0).contains(USER_PAIR), "The success line must name the authenticated user.");
+        assertTrue(successLines.get(0).contains(AUTHENTICATED_USER_PAIR),
+                "The success line must name the authenticated user.");
+        assertFalse(successLines.get(0).contains(USER_PAIR), "The success line must not name the attempted user.");
         assertTrue(linesContaining(err, FAILURE_EVENT).isEmpty(), "No failure line is expected after a success.");
         assertNoPasswordLeak(err);
     }

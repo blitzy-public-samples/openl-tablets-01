@@ -15,6 +15,7 @@ import org.slf4j.LoggerFactory;
 import org.openl.rules.project.abstraction.AProject;
 import org.openl.rules.project.abstraction.AProjectFolder;
 import org.openl.rules.project.abstraction.RulesProject;
+import org.openl.rules.repository.PathCheckedRepository;
 import org.openl.rules.repository.api.ChangesetType;
 import org.openl.rules.repository.api.FileItem;
 import org.openl.rules.repository.api.Repository;
@@ -107,7 +108,10 @@ public interface FileRoot {
      * then through one {@link FolderMapper}. That covers {@code SecureMappedRepository}, which
      * extends {@code SecureBranchRepository} and implements {@code FolderMapper}, and whose
      * {@code getOriginal()} leads to a {@code MappedRepository} whose {@code getDelegate()} is the
-     * file repository. The {@code repo-file} design repository
+     * file repository. A repository built from its settings is wrapped in a
+     * {@link PathCheckedRepository}, which is not a delegate and reveals only the root of the file
+     * repository it wraps, through {@link PathCheckedRepository#getLocalRoot()}; when the unwrapping
+     * ends at that wrapper, its root is used. The {@code repo-file} design repository
      * ({@code org.openl.rules.repository.file.LocalRepository}) and the user's working copy
      * ({@code org.openl.rules.project.impl.local.LocalRepository}) both extend
      * {@link FileSystemRepository}.
@@ -116,12 +120,13 @@ public interface FileRoot {
      * through the (secured) wrapper the caller holds, so no ACL check is bypassed.
      *
      * <p>The configured root is the anchor: links in its own path are trusted and followed, so the
-     * real location is returned. A root that does not exist yet is resolved through its deepest
-     * existing ancestor.
+     * real location is returned. The root is resolved before it is normalized, so a parent segment
+     * after a link in it, as in {@code <link>/..}, leads where the repository reads. A root that does
+     * not exist yet is resolved through its deepest existing ancestor.
      *
-     * <p>Any other backend yields empty, including the Git branch wrapper {@code AuthoringRepository},
-     * which implements neither interface: Git reads blobs from its object database, never through
-     * working-tree links.
+     * <p>Any other backend yields empty, including a {@link PathCheckedRepository} over a backend that
+     * is not file-backed and the Git branch wrapper {@code AuthoringRepository}, which implements
+     * neither interface: Git reads blobs from its object database, never through working-tree links.
      *
      * @param repo the repository as the caller holds it, possibly wrapped; may be {@code null}
      * @return the real root directory, or empty when the repository is not file-backed
@@ -133,6 +138,10 @@ public interface FileRoot {
         }
         if (current instanceof FolderMapper mapper) {
             current = mapper.getDelegate();
+        }
+        // V1: a repository built from its settings is path-checked, and that wrapper reveals only a file root
+        if (current instanceof PathCheckedRepository pathChecked) {
+            return Optional.ofNullable(pathChecked.getLocalRoot()).map(FileRoot::realLocation);
         }
         if (current instanceof FileSystemRepository fileSystem && fileSystem.getRoot() != null) {
             return Optional.of(realLocation(fileSystem.getRoot()));
@@ -177,11 +186,14 @@ public interface FileRoot {
     /**
      * Tells whether the input, resolved under the boundary, stays inside the boundary on disk.
      *
-     * <p>The input is resolved lexically first, which rejects absolute input and parent segments that
-     * leave the boundary. The deepest existing entry of the result, a dangling link included, is then
-     * resolved to its real location and the part still to be created is appended to it. That part
-     * contains no links, because only existing entries can be links. The result must lie under the
-     * boundary.
+     * <p>The input is first resolved under the boundary and normalized, and a normalized target outside
+     * the boundary is rejected: parent segments that leave it, or an absolute input elsewhere. An
+     * absolute input that already lies inside the boundary passes this step, so the callers validate a
+     * requested path lexically beforehand with {@link Repository#validatePath(String)}, which rejects
+     * absolute and non-normalized paths. The deepest existing entry of the result, a dangling link
+     * included, is then resolved to its real location and the part still to be created is appended to
+     * it. That part contains no links, because only existing entries can be links. The result must lie
+     * under the boundary.
      *
      * <p>The boundary itself is compared lexically, so a boundary that is itself a link, or that sits
      * under a link, is rejected. With an empty input the check therefore means that the boundary sits
@@ -236,18 +248,20 @@ public interface FileRoot {
 
     // V1: the anchor's real location; an unresolvable anchor stays lexical so later checks fail closed.
     /**
-     * Real location of the path, resolved through its deepest existing ancestor. When nothing can be
-     * resolved, the absolute normalized path is returned, and the containment checks against it then
-     * fail closed.
+     * Real location of the path, resolved through its deepest existing ancestor before it is
+     * normalized, so a parent segment after a link is taken from the link's target, as the file
+     * system takes it. When nothing can be resolved, the absolute normalized path is returned, and the
+     * containment checks against it then fail closed.
      */
     private static Path realLocation(Path path) {
-        var absolute = path.toAbsolutePath().normalize();
+        // V1: normalizing first would drop '<link>/..' lexically and anchor a tree the repository never reads
+        var absolute = path.toAbsolutePath();
         try {
-            return resolveThroughDeepestExisting(absolute).orElse(absolute);
+            return resolveThroughDeepestExisting(absolute).orElse(absolute).normalize();
         } catch (IOException | SecurityException e) {
             // V1: an unresolvable link or a denied lookup keeps the lexical location; others propagate.
             debugFailure("Real location not resolved, the lexical location is kept", e);
-            return absolute;
+            return absolute.normalize();
         }
     }
 

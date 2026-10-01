@@ -122,7 +122,8 @@ public class ExceptionMappingService {
                         .map(fieldError -> org.openl.studio.common.model.FieldError.builder()
                                 .code(buildErrorCode(fieldError.getCode()))
                                 .field(fieldError.getField())
-                                .rejectedValue(fieldError.getRejectedValue())
+                                // V7: a rejected password, or a model carrying one, is never echoed back
+                                .rejectedValue(rejectedValueOf(fieldError.getField(), fieldError.getRejectedValue()))
                                 .message(resolveLocalMessage(fieldError))
                                 .build())
                         .forEach(builder::addField);
@@ -153,7 +154,9 @@ public class ExceptionMappingService {
                 .map(violation -> org.openl.studio.common.model.FieldError.builder()
                         .code(buildErrorCode(violation.getMessageTemplate()))
                         .field(violation.getPropertyPath().toString())
-                        .rejectedValue(violation.getInvalidValue())
+                        // V7: a rejected password, or a model carrying one, is never echoed back
+                        .rejectedValue(rejectedValueOf(violation.getPropertyPath().toString(),
+                                violation.getInvalidValue()))
                         .message(violation.getMessage())
                         .build())
                 .forEach(builder::addField);
@@ -169,6 +172,14 @@ public class ExceptionMappingService {
                 .forEach(builder::addError);
 
         return builder.build();
+    }
+
+    // V7: a field whose name contains "password" gets no rejected value, so no password is echoed back
+    private static Object rejectedValueOf(String field, Object rejectedValue) {
+        if (field != null && field.toLowerCase(Locale.ROOT).contains("password")) {
+            return null;
+        }
+        return rejectedValue;
     }
 
     private boolean isFieldError(Path propertyPath) {

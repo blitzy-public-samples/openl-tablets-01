@@ -2,28 +2,54 @@ package org.openl.studio.repositories.service;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyIterable;
 import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.endsWith;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
+import java.io.ByteArrayInputStream;
+import java.io.Closeable;
+import java.io.IOException;
+import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.LinkOption;
+import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipOutputStream;
 
+import org.apache.commons.lang3.RandomStringUtils;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.DisabledOnOs;
+import org.junit.jupiter.api.condition.OS;
+import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 import org.junit.jupiter.params.provider.NullAndEmptySource;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.mockito.Mockito;
 
 import org.openl.rules.common.ProjectException;
 import org.openl.rules.project.abstraction.AProject;
@@ -31,20 +57,29 @@ import org.openl.rules.project.abstraction.LockEngine;
 import org.openl.rules.project.abstraction.ProjectStatus;
 import org.openl.rules.project.abstraction.RulesProject;
 import org.openl.rules.project.impl.local.LocalRepository;
+import org.openl.rules.project.impl.local.MetainfoRegistry;
+import org.openl.rules.project.impl.local.ProjectMetainfo;
+import org.openl.rules.repository.RepositoryInstatiator;
 import org.openl.rules.repository.api.BranchRepository;
+import org.openl.rules.repository.api.ChangesetType;
 import org.openl.rules.repository.api.FeaturesBuilder;
 import org.openl.rules.repository.api.FileData;
+import org.openl.rules.repository.api.FileItem;
 import org.openl.rules.repository.api.Repository;
+import org.openl.rules.repository.file.FileSystemRepository;
 import org.openl.rules.rest.acl.service.AclProjectsHelper;
 import org.openl.rules.webstudio.web.repository.project.ProjectFile;
 import org.openl.rules.webstudio.web.repository.upload.zip.ZipCharsetDetector;
 import org.openl.rules.workspace.WorkspaceUser;
 import org.openl.rules.workspace.dtr.DesignTimeRepository;
+import org.openl.rules.workspace.dtr.impl.MappedRepository;
 import org.openl.rules.workspace.filter.PathFilter;
 import org.openl.rules.workspace.lw.LocalWorkspace;
 import org.openl.rules.workspace.uw.UserWorkspace;
 import org.openl.security.acl.repository.RepositoryAclService;
 import org.openl.security.acl.repository.RepositoryAclServiceProvider;
+import org.openl.security.acl.repository.SecuredRepositoryFactory;
+import org.openl.security.acl.repository.SimpleRepositoryAclService;
 import org.openl.studio.common.exception.BadRequestException;
 import org.openl.studio.common.exception.ConflictException;
 import org.openl.studio.common.exception.ForbiddenException;
@@ -53,10 +88,37 @@ import org.openl.studio.tags.service.TagAssignmentValidator;
 
 class ProjectCreationServiceTest {
 
+    /**
+     * V1: where the source project of a copy lives on disk, each reached the way the copy route receives it.
+     */
+    private enum SourceLayout {
+        /** A flat file design repository behind {@code SecureRepository}; the project is {@code DESIGN/rules/Src}. */
+        FLAT,
+        /** A mapped file design repository behind {@code SecureMappedRepository}; the project is in {@code catalog}. */
+        MAPPED,
+        /** The user's working copy of an opened project; the project is {@code Src}. */
+        WORKING_COPY
+    }
+
+    /**
+     * V1: the source project {@code Src} of a copy.
+     *
+     * @param repository the repository the copy reads the source through
+     * @param files      the file repository underneath it, spied so reads can be verified
+     * @param folderPath the path of the project in {@code repository}
+     * @param listing    the folder of the project in {@code files}, as the copy lists it
+     */
+    private record CopySource(Repository repository, FileSystemRepository files, String folderPath, String listing) {
+    }
+
     private AclProjectsHelper aclProjectsHelper;
     private RepositoryAclServiceProvider aclServiceProvider;
     private TagAssignmentValidator tagAssignmentValidator;
     private ProjectCreationService service;
+    // V1: the real directories and repositories of the source-containment cases
+    @TempDir
+    Path tmp;
+    private final List<Closeable> closeables = new ArrayList<>();
 
     @BeforeEach
     void setUp() {
@@ -65,6 +127,14 @@ class ProjectCreationServiceTest {
         tagAssignmentValidator = mock(TagAssignmentValidator.class);
         service = new ProjectCreationService(aclProjectsHelper, aclServiceProvider,
                 tagAssignmentValidator, mock(PathFilter.class), mock(ZipCharsetDetector.class), "");
+    }
+
+    // V1: releases the mapped repositories the source-containment cases open
+    @AfterEach
+    void closeRepositories() throws IOException {
+        for (var closeable : closeables) {
+            closeable.close();
+        }
     }
 
     @Test
@@ -488,6 +558,431 @@ class ProjectCreationServiceTest {
         service = serviceWithWorkspace(workspace);
         assertThrows(ConflictException.class,
                 () -> service.awaitProjectVisibility(repository));
+    }
+
+    // V1: the source project of a copy and every file the copy reads from it stay inside the project folder
+
+    @ParameterizedTest
+    @EnumSource(SourceLayout.class)
+    @DisabledOnOs(OS.WINDOWS)
+    void copy_project_rejects_a_source_file_linked_outside_the_project(SourceLayout layout) throws IOException {
+        var project = layOutSource(layout);
+        var secret = tmp.resolve("outside/secret.txt");
+        write(secret, marker());
+        Files.createSymbolicLink(project.resolve("leak.txt"), secret);
+        var source = source(layout);
+        var target = targetRepositoryMock();
+
+        var e = assertThrows(BadRequestException.class, () -> copy(source, target));
+
+        assertEquals("openl.error.400.file.path.invalid.message", e.getErrorCode());
+        verify(source.files(), never()).read(endsWith("/leak.txt"));
+        verifyNothingSaved(target);
+    }
+
+    @ParameterizedTest
+    @EnumSource(SourceLayout.class)
+    @DisabledOnOs(OS.WINDOWS)
+    void copy_project_rejects_a_source_file_linked_into_a_sibling_project(SourceLayout layout) throws IOException {
+        var project = layOutSource(layout);
+        Files.createSymbolicLink(project.resolve("sibling.xml"), project.resolveSibling("Sib").resolve("rules.xml"));
+        var source = source(layout);
+        var target = targetRepositoryMock();
+
+        var e = assertThrows(BadRequestException.class, () -> copy(source, target));
+
+        assertEquals("openl.error.400.file.path.invalid.message", e.getErrorCode());
+        verify(source.files(), never()).read(endsWith("/sibling.xml"));
+        verifyNothingSaved(target);
+    }
+
+    @ParameterizedTest
+    @EnumSource(SourceLayout.class)
+    @DisabledOnOs(OS.WINDOWS)
+    void copy_project_rejects_a_listed_source_link_that_resolves_nowhere(SourceLayout layout) throws IOException {
+        var project = layOutSource(layout);
+        var inside = project.resolve("sub/inside.txt");
+        Files.createSymbolicLink(project.resolve("alias.txt"), inside);
+        var source = source(layout);
+        // The file the link points to disappears right after the listing, so the listed link dangles when checked.
+        doAnswer(invocation -> {
+            var listed = invocation.callRealMethod();
+            Files.deleteIfExists(inside);
+            return listed;
+        }).when(source.files()).list(source.listing());
+        var target = targetRepositoryMock();
+
+        var e = assertThrows(BadRequestException.class, () -> copy(source, target));
+
+        assertEquals("openl.error.400.file.path.invalid.message", e.getErrorCode());
+        verify(source.files(), never()).read(endsWith("/alias.txt"));
+        verifyNothingSaved(target);
+    }
+
+    @ParameterizedTest
+    @EnumSource(value = SourceLayout.class, names = {"FLAT", "WORKING_COPY"})
+    @DisabledOnOs(OS.WINDOWS)
+    void copy_project_rejects_a_source_project_folder_that_is_a_dangling_link(SourceLayout layout)
+            throws IOException {
+        var project = layOutSource(layout);
+        deleteTree(project);
+        Files.createSymbolicLink(project, tmp.resolve("outside/missing"));
+        var source = source(layout);
+        var target = targetRepositoryMock();
+
+        var e = assertThrows(BadRequestException.class, () -> copy(source, target));
+
+        assertEquals("openl.error.400.file.path.invalid.message", e.getErrorCode());
+        verify(source.files(), never()).list(source.listing());
+        verifyNothingSaved(target);
+    }
+
+    @ParameterizedTest
+    @EnumSource(SourceLayout.class)
+    @DisabledOnOs(OS.WINDOWS)
+    void copy_project_rejects_a_source_project_folder_that_is_a_link(SourceLayout layout) throws IOException {
+        var project = layOutSource(layout);
+        var elsewhere = tmp.resolve("outside/Src");
+        Files.createDirectories(elsewhere.getParent());
+        Files.move(project, elsewhere);
+        Files.createSymbolicLink(project, elsewhere);
+        var source = source(layout);
+        var target = targetRepositoryMock();
+
+        var e = assertThrows(BadRequestException.class, () -> copy(source, target));
+
+        assertEquals("openl.error.400.file.path.invalid.message", e.getErrorCode());
+        verify(source.files(), never()).list(source.listing());
+        verifyNothingSaved(target);
+    }
+
+    @ParameterizedTest
+    @EnumSource(SourceLayout.class)
+    @DisabledOnOs(OS.WINDOWS)
+    void copy_project_copies_a_source_whose_links_stay_inside_the_project(SourceLayout layout) throws IOException {
+        var project = layOutSource(layout);
+        Files.createSymbolicLink(project.resolve("alias.txt"), project.resolve("sub/inside.txt"));
+        var targetRoot = tmp.resolve("target");
+
+        assertNotNull(copy(source(layout), fileRepository(targetRoot)));
+
+        var copied = targetRoot.resolve("DESIGN/rules/Copy");
+        assertEquals(Files.readString(project.resolve("sub/inside.txt")),
+                Files.readString(copied.resolve("alias.txt")));
+        assertFalse(Files.isSymbolicLink(copied.resolve("alias.txt")), "The copy holds the content, not the link");
+        assertEquals(Files.readString(project.resolve("src.txt")), Files.readString(copied.resolve("src.txt")));
+    }
+
+    @ParameterizedTest
+    @EnumSource(SourceLayout.class)
+    void copy_project_copies_an_ordinary_file_backed_source(SourceLayout layout) throws IOException {
+        var project = layOutSource(layout);
+        var targetRoot = tmp.resolve("target");
+
+        assertNotNull(copy(source(layout), fileRepository(targetRoot)));
+
+        var copied = targetRoot.resolve("DESIGN/rules/Copy");
+        assertEquals(Files.readString(project.resolve("src.txt")), Files.readString(copied.resolve("src.txt")));
+        assertEquals(Files.readString(project.resolve("sub/inside.txt")),
+                Files.readString(copied.resolve("sub/inside.txt")));
+        assertTrue(Files.isRegularFile(copied.resolve("rules.xml")), "The descriptor is copied");
+    }
+
+    @Test
+    void copy_project_adds_no_repository_call_for_a_source_that_is_not_file_backed() throws IOException {
+        var repository = mock(Repository.class);
+        when(repository.getId()).thenReturn("design");
+        when(repository.supports())
+                .thenReturn(new FeaturesBuilder(repository).setVersions(false).setFolders(true).build());
+        when(repository.check("DESIGN/Source")).thenReturn(fileData(null));
+        var file = new FileData();
+        file.setName("DESIGN/Source/data.txt");
+        when(repository.list("DESIGN/Source/")).thenReturn(List.of(file));
+        var content = marker();
+        when(repository.read("DESIGN/Source/data.txt"))
+                .thenReturn(new FileItem(file, new ByteArrayInputStream(content.getBytes(StandardCharsets.UTF_8))));
+        var targetRoot = tmp.resolve("target");
+
+        assertNotNull(copy(secured(repository), "DESIGN/Source", fileRepository(targetRoot)));
+
+        // The only listing is the one the copy reads; the containment check makes no call on such a backend.
+        verify(repository, times(1)).list("DESIGN/Source/");
+        assertEquals(content, Files.readString(targetRoot.resolve("DESIGN/rules/Copy/data.txt")));
+    }
+
+
+    // V1: the application builds its design repositories path-checked; the source is contained behind that wrapper too
+    @Test
+    @DisabledOnOs(OS.WINDOWS)
+    void copy_project_rejects_a_source_file_linked_outside_a_configured_file_repository() throws IOException {
+        var project = layOutSource(SourceLayout.MAPPED);
+        var secret = tmp.resolve("outside/secret.txt");
+        write(secret, marker());
+        Files.createSymbolicLink(project.resolve("leak.txt"), secret);
+        var source = configuredFileRepository();
+        var targetRoot = tmp.resolve("target");
+        var target = fileRepository(targetRoot);
+
+        var e = assertThrows(BadRequestException.class, () -> copy(source, mappedName(source, "Src"), target));
+
+        assertEquals("openl.error.400.file.path.invalid.message", e.getErrorCode());
+        assertFalse(Files.exists(targetRoot.resolve("DESIGN/rules/Copy")), "Nothing is written to the target");
+    }
+
+    @Test
+    void copy_project_copies_an_ordinary_source_of_a_configured_file_repository() throws IOException {
+        var project = layOutSource(SourceLayout.MAPPED);
+        var source = configuredFileRepository();
+        var targetRoot = tmp.resolve("target");
+
+        assertNotNull(copy(source, mappedName(source, "Src"), fileRepository(targetRoot)));
+
+        assertEquals(Files.readString(project.resolve("sub/inside.txt")),
+                Files.readString(targetRoot.resolve("DESIGN/rules/Copy/sub/inside.txt")));
+    }
+
+    /**
+     * V1: the file design repository in {@code tmp/design} as the application configures it: instantiated from its
+     * settings (and so path-checked), mapped, and secured.
+     */
+    private Repository configuredFileRepository() throws IOException {
+        var settings = Map.of("repository.design.factory", "repo-file",
+                "repository.design.uri", tmp.resolve("design").toString());
+        var configured = RepositoryInstatiator.newRepository("repository.design", settings::get);
+        var mapped = MappedRepository.create(configured, "DESIGN/");
+        closeables.add((Closeable) mapped);
+        return secured(mapped);
+    }
+
+    // V1: a configured root holding '<link>/..' is resolved the way the repository resolves it, not lexically
+    @Test
+    @DisabledOnOs(OS.WINDOWS)
+    void copy_project_rejects_a_source_link_under_a_root_that_climbs_out_of_a_link() throws IOException {
+        var root = rootThroughLinkAndParent("design");
+        var project = root.toRealPath().resolve("DESIGN/rules/Src");
+        write(project.resolve("rules.xml"), descriptor("Src"));
+        var secret = tmp.resolve("outside/secret.txt");
+        write(secret, marker());
+        Files.createSymbolicLink(project.resolve("leak.txt"), secret);
+        var files = spy(fileRepository(root));
+        var target = targetRepositoryMock();
+
+        var e = assertThrows(BadRequestException.class, () -> copy(secured(files), "DESIGN/rules/Src", target));
+
+        assertEquals("openl.error.400.file.path.invalid.message", e.getErrorCode());
+        verify(files, never()).read(endsWith("/leak.txt"));
+        verifyNothingSaved(target);
+    }
+
+    @Test
+    @DisabledOnOs(OS.WINDOWS)
+    void copy_project_rejects_a_target_link_under_a_root_that_climbs_out_of_a_link() throws IOException {
+        layOutSource(SourceLayout.FLAT);
+        var targetRoot = rootThroughLinkAndParent("target");
+        var outside = Files.createDirectories(tmp.resolve("outside/target"));
+        var rules = Files.createDirectories(targetRoot.toRealPath().resolve("DESIGN/rules"));
+        Files.createSymbolicLink(rules.resolve("Copy"), outside);
+        var source = source(SourceLayout.FLAT);
+        var target = fileRepository(targetRoot);
+
+        var e = assertThrows(BadRequestException.class, () -> copy(source, target));
+
+        assertEquals("openl.error.400.file.path.invalid.message", e.getErrorCode());
+        try (var written = Files.list(outside)) {
+            assertEquals(0, written.count(), "Nothing is written through the link");
+        }
+    }
+
+    // V1: a listed name the copy could not place under the project folder fails closed
+    @Test
+    void copy_project_rejects_a_listed_source_file_outside_the_project_folder() throws IOException {
+        layOutSource(SourceLayout.FLAT);
+        var source = source(SourceLayout.FLAT);
+        var stray = new FileData();
+        stray.setName("DESIGN/rules/Sib/rules.xml");
+        doReturn(List.of(stray)).when(source.files()).list(source.listing());
+        var target = targetRepositoryMock();
+
+        var e = assertThrows(BadRequestException.class, () -> copy(source, target));
+
+        assertEquals("openl.error.400.file.path.invalid.message", e.getErrorCode());
+        verify(source.files(), never()).read(anyString());
+        verifyNothingSaved(target);
+    }
+
+    // V1: a project kept as one archive file is read as that file, so only its own place is checked
+    @Test
+    void copy_project_checks_only_the_project_entry_of_an_archived_source() throws IOException {
+        var archive = tmp.resolve("design/DESIGN/rules/Src");
+        Files.createDirectories(archive.getParent());
+        try (var zip = new ZipOutputStream(Files.newOutputStream(archive))) {
+            zip.putNextEntry(new ZipEntry("rules.xml"));
+            zip.write(descriptor("Src").getBytes(StandardCharsets.UTF_8));
+            zip.closeEntry();
+        }
+        var files = spy(fileRepository(tmp.resolve("design")));
+        doReturn(new FeaturesBuilder(files).setVersions(false).build()).when(files).supports();
+        var targetRoot = tmp.resolve("target");
+
+        assertNotNull(copy(secured(files), "DESIGN/rules/Src", fileRepository(targetRoot)));
+
+        verify(files, never()).list(anyString());
+        assertTrue(Files.isRegularFile(targetRoot.resolve("DESIGN/rules/Copy/rules.xml")), "The archive is unpacked");
+    }
+
+    /**
+     * V1: a root configured as {@code base/link/../<name>}, where {@code base/link} points to {@code physical/child}.
+     * The repository reaches {@code physical/<name>} through the link, while the lexically normalized root
+     * {@code base/<name>} does not exist.
+     */
+    private Path rootThroughLinkAndParent(String name) throws IOException {
+        var physical = Files.createDirectories(tmp.resolve("physical"));
+        Files.createDirectories(physical.resolve("child"));
+        Files.createDirectories(physical.resolve(name));
+        var link = Files.createDirectories(tmp.resolve("base")).resolve("link");
+        if (!Files.exists(link, LinkOption.NOFOLLOW_LINKS)) {
+            Files.createSymbolicLink(link, physical.resolve("child"));
+        }
+        return link.resolve("..").resolve(name);
+    }
+
+
+    /**
+     * V1: lays out the source project {@code Src} (a descriptor, {@code src.txt} and {@code sub/inside.txt}) and
+     * its sibling project {@code Sib} where the layout keeps them, and returns the folder of {@code Src}.
+     */
+    private Path layOutSource(SourceLayout layout) throws IOException {
+        var parent = switch (layout) {
+            case FLAT -> tmp.resolve("design/DESIGN/rules");
+            case MAPPED -> tmp.resolve("design/catalog");
+            case WORKING_COPY -> tmp.resolve("workspace");
+        };
+        write(parent.resolve("Src/rules.xml"), descriptor("Src"));
+        write(parent.resolve("Src/src.txt"), marker());
+        write(parent.resolve("Src/sub/inside.txt"), marker());
+        write(parent.resolve("Sib/rules.xml"), descriptor("Sib"));
+        return parent.resolve("Src");
+    }
+
+    /** V1: the source project {@code Src}, reached the way the copy route receives it in that layout. */
+    private CopySource source(SourceLayout layout) throws IOException {
+        return switch (layout) {
+            case FLAT -> {
+                var files = spy(fileRepository(tmp.resolve("design")));
+                yield new CopySource(secured(files), files, "DESIGN/rules/Src", "DESIGN/rules/Src/");
+            }
+            case MAPPED -> {
+                var files = spy(fileRepository(tmp.resolve("design")));
+                var mapped = MappedRepository.create(files, "DESIGN/");
+                closeables.add((Closeable) mapped);
+                var secured = secured(mapped);
+                yield new CopySource(secured, files, mappedName(secured, "Src"), "catalog/Src/");
+            }
+            case WORKING_COPY -> {
+                var workspace = tmp.resolve("workspace");
+                // Opening the registry deletes every project folder without a record, as a leftover.
+                for (var projectName : List.of("Src", "Sib")) {
+                    MetainfoRegistry.store(workspace, projectName,
+                            new ProjectMetainfo("design", null, null, null, null, null, null, null, Map.of()));
+                }
+                var files = spy(new LocalRepository(workspace, MetainfoRegistry.open(workspace)));
+                yield new CopySource(files, files, "Src", "Src/");
+            }
+        };
+    }
+
+    private FileData copy(CopySource source, Repository target) {
+        return copy(source.repository(), source.folderPath(), target);
+    }
+
+    /**
+     * V1: copies the source project into the target repository as {@code Copy}, for a user who may read the
+     * source and create projects in the target, whose design repository keeps projects in {@code DESIGN/rules/}.
+     */
+    private FileData copy(Repository sourceRepository, String folderPath, Repository target) {
+        when(aclProjectsHelper.hasCreateProjectPermission("design")).thenReturn(true);
+        var acl = mock(RepositoryAclService.class);
+        when(acl.isGranted(any(RulesProject.class), anyList())).thenReturn(true);
+        when(aclServiceProvider.getDesignRepoAclService()).thenReturn(acl);
+        var source = mock(RulesProject.class);
+        when(source.getRepository()).thenReturn(sourceRepository);
+        when(source.getFolderPath()).thenReturn(folderPath);
+
+        var designTimeRepository = mock(DesignTimeRepository.class);
+        when(designTimeRepository.getRulesLocation()).thenReturn("DESIGN/rules/");
+        var localWorkspace = mock(LocalWorkspace.class);
+        when(localWorkspace.getRepository("design")).thenReturn(mock(LocalRepository.class));
+        var workspace = mock(UserWorkspace.class);
+        when(workspace.getDesignTimeRepository()).thenReturn(designTimeRepository);
+        when(workspace.getUser()).thenReturn(mock(WorkspaceUser.class));
+        when(workspace.getLocalWorkspace()).thenReturn(localWorkspace);
+        when(workspace.getProjectsLockEngine()).thenReturn(mock(LockEngine.class));
+
+        return serviceWithWorkspace(workspace).copyProject(target, "Copy", null, source, "comment", null);
+    }
+
+    private static Repository targetRepositoryMock() {
+        var target = mock(Repository.class);
+        when(target.getId()).thenReturn("design");
+        when(target.supports()).thenReturn(new FeaturesBuilder(target).setVersions(false).setFolders(true).build());
+        return target;
+    }
+
+    private static void verifyNothingSaved(Repository target) throws IOException {
+        verify(target, never()).save(any(FileData.class), any(InputStream.class));
+        verify(target, never()).save(anyList());
+        verify(target, never()).save(any(FileData.class), anyIterable(), any(ChangesetType.class));
+    }
+
+    private static String mappedName(Repository repository, String businessName) throws IOException {
+        return repository.listFolders("DESIGN/")
+                .stream()
+                .map(FileData::getName)
+                .filter(name -> name.startsWith("DESIGN/" + businessName + ":"))
+                .findFirst()
+                .orElseThrow(() -> new IllegalStateException("Fixture: " + businessName + " is not mapped"));
+    }
+
+    private static Repository secured(Repository repository) {
+        return SecuredRepositoryFactory.wrapToSecureRepo(repository, grantAllRepoAcl());
+    }
+
+    /** Grants every repository permission, so the secured wrappers behave as for a user who may do anything. */
+    private static SimpleRepositoryAclService grantAllRepoAcl() {
+        return mock(SimpleRepositoryAclService.class,
+                invocation -> invocation.getMethod().getReturnType() == boolean.class
+                        ? Boolean.TRUE
+                        : Mockito.RETURNS_DEFAULTS.answer(invocation));
+    }
+
+    private static FileSystemRepository fileRepository(Path root) {
+        var repository = new FileSystemRepository();
+        repository.setRoot(root);
+        repository.setId("design");
+        repository.setName("Design");
+        repository.initialize();
+        return repository;
+    }
+
+    private static void deleteTree(Path folder) throws IOException {
+        try (var paths = Files.walk(folder)) {
+            for (var path : paths.sorted((a, b) -> b.compareTo(a)).toList()) {
+                Files.delete(path);
+            }
+        }
+    }
+
+    private static String descriptor(String name) {
+        return "<project><name>" + name + "</name></project>";
+    }
+
+    private static String marker() {
+        return RandomStringUtils.secure().nextAlphanumeric(24);
+    }
+
+    private static void write(Path file, String content) throws IOException {
+        Files.createDirectories(file.getParent());
+        Files.writeString(file, content, StandardCharsets.UTF_8);
     }
 
     private ProjectCreationService serviceWithWorkspace(UserWorkspace workspace) {

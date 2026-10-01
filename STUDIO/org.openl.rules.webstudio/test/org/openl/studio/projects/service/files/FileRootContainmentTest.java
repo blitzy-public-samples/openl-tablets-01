@@ -45,6 +45,8 @@ import org.openl.rules.project.abstraction.RulesProject;
 import org.openl.rules.project.impl.local.LocalRepository;
 import org.openl.rules.project.impl.local.MetainfoRegistry;
 import org.openl.rules.project.impl.local.ProjectMetainfo;
+import org.openl.rules.repository.PathCheckedRepository;
+import org.openl.rules.repository.RepositoryInstatiator;
 import org.openl.rules.repository.api.BranchRepository;
 import org.openl.rules.repository.api.FileData;
 import org.openl.rules.repository.api.Repository;
@@ -62,6 +64,7 @@ import org.openl.security.acl.repository.SecureRepository;
 import org.openl.security.acl.repository.SecuredRepositoryFactory;
 import org.openl.security.acl.repository.SimpleRepositoryAclService;
 import org.openl.studio.projects.validator.ProjectStateValidator;
+import org.openl.util.IOUtils;
 
 /**
  * Covers V1-B, the new-file surface of the files API: the real-path containment of
@@ -77,6 +80,10 @@ import org.openl.studio.projects.validator.ProjectStateValidator;
  * accepts links that stay inside its project folder; the repository mount authorizes each repository
  * path separately, so it refuses every link at or above a path. Backends that are not file-backed
  * (Git, JDBC, S3, Azure Blob, mocks) accept every path without any filesystem or repository call.
+ *
+ * <p>The closed-project and repository mounts are also built over a {@code repo-file} repository
+ * instantiated from its settings, as the application instantiates it, so behind
+ * {@code PathCheckedRepository}.
  *
  * <p>The tests call API that exists only with the fix, so they are coverage of it, not evidence that
  * the finding reproduces. Only the cases that create links are disabled on Windows.
@@ -100,6 +107,20 @@ class FileRootContainmentTest {
         /** A closed project in a mapped file design repository behind {@code SecureMappedRepository}. */
         CLOSED_MAPPED,
         /** A repository mount over a file repository behind {@code SecureRepository}. */
+        REPO
+    }
+
+    // V1: the application builds every repository from its settings, which puts it behind PathCheckedRepository
+    /**
+     * The mounts over a file design repository built from its settings, each reached through the secured
+     * wrapper the REST routes receive.
+     */
+    enum ConfiguredKind {
+        /** A closed project in the flat configured repository, behind {@code SecureBranchRepository}. */
+        CLOSED_FLAT,
+        /** A closed project in the mapped configured repository, behind {@code SecureMappedRepository}. */
+        CLOSED_MAPPED,
+        /** A repository mount over the flat configured repository, behind {@code SecureBranchRepository}. */
         REPO
     }
 
@@ -334,10 +355,12 @@ class FileRootContainmentTest {
 
     @Test
     void projectMountOverNonFileBackendAcceptsEveryPathWithoutReadingItsPath() {
+        var openedBackend = mock(Repository.class);
+        var closedBackend = mock(Repository.class);
         var opened = mock(RulesProject.class);
         when(opened.isOpened()).thenReturn(true);
-        when(opened.getRepository()).thenReturn(mock(Repository.class));
-        var closed = stubbedClosedProject(mock(Repository.class), "P1");
+        when(opened.getRepository()).thenReturn(openedBackend);
+        var closed = stubbedClosedProject(closedBackend, "P1");
         var openedRoot = projectMount(opened);
         var closedRoot = projectMount(closed);
 
@@ -348,6 +371,8 @@ class FileRootContainmentTest {
         // The project path is read only once the anchor is known to be file-backed.
         verify(opened, never()).getFolderPath();
         verify(closed, never()).getRealPath();
+        // A backend that is not file-backed is only unwrapped by type, never called.
+        verifyNoInteractions(openedBackend, closedBackend);
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -607,6 +632,68 @@ class FileRootContainmentTest {
     }
 
     // ---------------------------------------------------------------------------------------------
+    // V1: file repositories built from their settings, as the application builds them
+    // ---------------------------------------------------------------------------------------------
+
+    @Test
+    void localRootReturnsTheRealRootOfAConfiguredFileRepository() throws IOException {
+        var root = layOutProjects(tmp.resolve("design-configured"));
+        var expected = Optional.of(root.toRealPath());
+        var configured = configuredFileRepository(root);
+        var flat = secured(configuredFileRepository(root));
+        var securedMapped = secured(mapped(configuredFileRepository(root)));
+
+        assertInstanceOf(PathCheckedRepository.class, configured, "Fixture: the settings build a path-checked wrapper");
+        assertInstanceOf(SecureBranchRepository.class, flat, "Fixture: the flat secured wrapper");
+        assertInstanceOf(SecureMappedRepository.class, securedMapped, "Fixture: the mapped secured wrapper");
+        assertEquals(expected, FileRoot.localRoot(configured), "A configured file repository");
+        assertEquals(expected, FileRoot.localRoot(flat), "A configured file repository behind its secured wrapper");
+        assertEquals(expected, FileRoot.localRoot(securedMapped),
+                "A configured file repository behind SecureMappedRepository");
+    }
+
+    @ParameterizedTest
+    @EnumSource(ConfiguredKind.class)
+    @DisabledOnOs(OS.WINDOWS)
+    void configuredFileRepositoryMountsRejectLinksThatLeaveTheProject(ConfiguredKind kind) throws IOException {
+        var mount = configuredMount(kind);
+        Files.createSymbolicLink(mount.project().resolve("leak.txt"), outsideFile);
+        Files.createSymbolicLink(mount.project().resolve("sib"), mount.sibling());
+        Files.createSymbolicLink(mount.project().resolve("inner"), mount.project().resolve("sub"));
+
+        assertTrue(mount.contains("rules.xml"), "A regular file of a configured repository on " + kind);
+        assertTrue(mount.contains("sub/inside.txt"), "A regular nested file of a configured repository on " + kind);
+        assertFalse(mount.contains("leak.txt"), "A link to a file outside the project on " + kind);
+        assertFalse(mount.contains("sib/rules.xml"), "A file of the sibling project through a link on " + kind);
+        assertFalse(mount.contains("sib/x.txt"), "A new file in the sibling project through a link on " + kind);
+        // The repository mount authorizes each repository path, so even a link inside the project is refused.
+        assertEquals(kind != ConfiguredKind.REPO, mount.contains("inner/inside.txt"),
+                "A link inside the project on " + kind);
+    }
+
+    @Test
+    @DisabledOnOs(OS.WINDOWS)
+    void localRootFollowsAConfiguredRootThatClimbsOutOfALink() throws IOException {
+        // base/link points to physical/child, so the file system reads base/link/../design at physical/design,
+        // while the lexically normalized base/design does not exist.
+        var physical = layOutProjects(tmp.resolve("physical/design"));
+        var child = Files.createDirectories(tmp.resolve("physical/child"));
+        var link = Files.createSymbolicLink(Files.createDirectories(tmp.resolve("base")).resolve("link"), child);
+        Files.createSymbolicLink(physical.resolve("P1/leak.txt"), outsideFile);
+        var repository = secured(configuredFileRepository(link.resolve("..").resolve("design")));
+
+        assertFalse(Files.exists(tmp.resolve("base/design")), "Fixture: the lexical root does not exist");
+        assertEquals(Optional.of(physical.toRealPath()), FileRoot.localRoot(repository),
+                "The configured root is resolved where the repository reads");
+        var project = projectMount(closedProject(repository, "P1"));
+        assertTrue(project.contains("rules.xml"), "A regular file under a root that climbs out of a link");
+        assertFalse(project.contains("leak.txt"), "A link outside the project under a root that climbs out of a link");
+        var root = repoMount(repository);
+        assertTrue(root.contains("P1/rules.xml"), "A regular path under a root that climbs out of a link");
+        assertFalse(root.contains("P1/leak.txt"), "A link outside under a root that climbs out of a link");
+    }
+
+    // ---------------------------------------------------------------------------------------------
     // FileRoot.projectBoundary
     // ---------------------------------------------------------------------------------------------
 
@@ -698,6 +785,48 @@ class FileRootContainmentTest {
         var design = layOutProjects(tmp.resolve("design-repo"));
         var root = repoMount(secured(fileRepository(design)));
         return new Mount(root, design.resolve("P1"), design.resolve("P2"), "P1/");
+    }
+
+    // V1: the mounts over a repository built from its settings, which the application wraps in PathCheckedRepository
+    /**
+     * A mount over a file design repository built from its settings: a closed project {@code P1} in the flat
+     * {@code design-configured-flat} or in the mapped {@code design-configured-mapped}, whose projects sit in
+     * {@code catalog}, or a repository mount over {@code design-configured-repo}.
+     */
+    private Mount configuredMount(ConfiguredKind kind) throws IOException {
+        return switch (kind) {
+            case CLOSED_FLAT -> {
+                var design = layOutProjects(tmp.resolve("design-configured-flat"));
+                var secured = secured(configuredFileRepository(design));
+                var project = closedProject(secured, "P1");
+                yield new Mount(projectMount(project), design.resolve("P1"), design.resolve("P2"), "");
+            }
+            case CLOSED_MAPPED -> {
+                var design = tmp.resolve("design-configured-mapped");
+                layOutProjects(design.resolve("catalog"));
+                var secured = secured(mapped(configuredFileRepository(design)));
+                assertInstanceOf(SecureMappedRepository.class, secured, "Fixture: the mapped secured wrapper");
+                var project = closedProject(secured, mappedName(secured, "P1"));
+                yield new Mount(projectMount(project), design.resolve("catalog/P1"), design.resolve("catalog/P2"), "");
+            }
+            case REPO -> {
+                var design = layOutProjects(tmp.resolve("design-configured-repo"));
+                var root = repoMount(secured(configuredFileRepository(design)));
+                yield new Mount(root, design.resolve("P1"), design.resolve("P2"), "P1/");
+            }
+        };
+    }
+
+    // V1: the application instantiates its design repositories from their settings, path-checked
+    /**
+     * A {@code repo-file} design repository over the folder, built from its settings the way the application
+     * builds it, and therefore behind {@link PathCheckedRepository}. It is closed after the test.
+     */
+    private Repository configuredFileRepository(Path root) {
+        var settings = Map.of("repository.design.factory", "repo-file", "repository.design.uri", root.toString());
+        var configured = RepositoryInstatiator.newRepository("repository.design", settings::get);
+        closeables.add(() -> IOUtils.closeQuietly(configured));
+        return configured;
     }
 
     /**

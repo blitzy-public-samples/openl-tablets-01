@@ -15,6 +15,7 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.TreeSet;
 import java.util.concurrent.TimeUnit;
@@ -48,9 +49,10 @@ import org.openl.itest.core.JettyServer;
  * <li>one slice per fixture folder, from {@code 010-setup} to {@code 120-group-delete}.</li>
  * </ol>
  * After each step the test polls the open slice until the minimal lines of that step appear, and fails fast when
- * they do not, as on a build without V11. Exact counts are checked on the fixed slices once the server has stopped.
- * Then the whole captured output is checked: every audit line carries {@code user=}, {@code ip=} and
- * {@code outcome=}, no line holds a generated secret, and no line names the credential-looking project or group.
+ * they do not, as on a build without V11. Once the server has stopped, exact counts are checked on the fixed slices,
+ * and every audit line must carry {@code user=}, {@code ip=} and an {@code outcome=} its event is written with.
+ * Whatever failed before, the whole captured output and the saved responses are then checked for leaks: no line
+ * holds a generated secret, and no line names the credential-looking project or group.
  *
  * <p><b>Streams.</b> The webapp's slf4j loggers, the audit logger included, print through the test JVM's
  * slf4j-simple to standard error, and its log4j-API loggers print through {@code log4j2-test.properties} to standard
@@ -116,9 +118,33 @@ class SecurityAuditLogITest {
     private static final String PAT_REVOKE = "pat.revoke";
     private static final String ACL_CHANGE = "acl.change";
     private static final String SUCCESS = "success";
+    private static final String FAILURE = "failure"; // V11: the outcomes SecurityAuditLog writes besides success
+    private static final String LOCKED = "locked";
     private static final String PAT_METHOD = "pat";
     /** The user value of a rejected token, whose owner is never logged. */
     private static final String NO_USER = "-";
+
+    /** V11: the outcomes each event is written with; any other event is unknown. */
+    private static final Map<String, Set<String>> OUTCOMES = Map.of(
+            AUTH_SUCCESS, Set.of(SUCCESS),
+            AUTH_FAILURE, Set.of(FAILURE),
+            AUTH_LOCKOUT, Set.of(LOCKED),
+            PAT_CREATE, Set.of(SUCCESS),
+            PAT_REVOKE, Set.of(SUCCESS),
+            ACL_CHANGE, Set.of(SUCCESS, FAILURE));
+
+    /** V11: the authentication events, counted per slice apart from the administrator's setup logins. */
+    private static final Set<String> AUTH_EVENTS = Set.of(AUTH_SUCCESS, AUTH_FAILURE, AUTH_LOCKOUT);
+
+    /**
+     * V11: the exact number of counted authentication events per segment: two attempts each of the form and the
+     * Basic user; five failures and the lockout; two valid-token successes and one rejected token. Any other segment,
+     * and the token creation, writes none.
+     */
+    private static final Map<String, Integer> AUTH_TOTALS = Map.of(
+            "020-login", 4,
+            "030-lockout", 6,
+            "040-pat-use", 3);
 
     private static final String FORM_USER = "audit_form";
     private static final String BASIC_USER = "audit_basic";
@@ -154,18 +180,23 @@ class SecurityAuditLogITest {
         int bulkMinChanges = bulkMinChanges();
 
         // The secret set: every generated credential, searched for in the captured output and in saved responses.
-        // The administrator values are derived from the configured administrator name, so they are not part of it.
+        // V11: the derived ADMIN_AUTH_TOCKEN is part of it, searched for by its Base64 part only. ADMIN_PASSWORD is
+        // not, because it equals the administrator name, which the audit lines must carry.
         Map<String, String> generated = new HashMap<>();
         // Generated names that look like credentials; they are not secrets, but no log line may name them.
         Map<String, String> lookalikes = new LinkedHashMap<>();
         List<Mark> marks = new ArrayList<>();
         String patPublicId;
         String invalidPublicId;
+        String adminName; // V11: the administrator, whose setup logins are separated from the counted events
         Throwable failure = null;
         try {
             try (var client = JettyServer.get().start()) {
-                WebStudioTest.putAdminCredentials(client);
-                var admin = client.localEnv.get("ADMIN_AUTH_TOCKEN");
+                WebStudioTest.putAdminCredentials(client, generated); // V11: registers ADMIN_AUTH_TOCKEN for the scans
+                // V11: the messages name only the variable, never its value
+                var admin = Objects.requireNonNull(client.localEnv.get("ADMIN_AUTH_TOCKEN"), "ADMIN_AUTH_TOCKEN");
+                // V11: AdminUsers seeds each administrator with its name as the password, so ADMIN_PASSWORD is the name
+                adminName = Objects.requireNonNull(client.localEnv.get("ADMIN_PASSWORD"), "ADMIN_PASSWORD");
                 putUserCredentials(client.localEnv, generated);
                 putLookalikeNames(client.localEnv, lookalikes);
 
@@ -178,11 +209,12 @@ class SecurityAuditLogITest {
                         "Authorization",
                         admin);
                 String patToken = text(created, "token");
+                // V11: the token joins the secret set before the public id is required
+                generated.put("PAT_TOKEN", patToken);
+                generated.put("PAT_SECRET", patToken.substring(patToken.indexOf('.') + 1));
                 patPublicId = text(created, "publicId");
                 client.localEnv.put("PAT_TOKEN", patToken);
                 client.localEnv.put("PAT_PUBLIC_ID", patPublicId);
-                generated.put("PAT_TOKEN", patToken);
-                generated.put("PAT_SECRET", patToken.substring(patToken.indexOf('.') + 1));
                 invalidPublicId = putInvalidToken(client.localEnv, generated, patPublicId);
                 awaitLines("the PAT creation", out, err, marks.getLast(),
                         lines -> count(lines, event(PAT_CREATE)) >= 1);
@@ -196,18 +228,18 @@ class SecurityAuditLogITest {
                 marks.add(mark(out, err));
             }
             // The server has stopped, so the captured output is complete.
-            verify(new Run(marks, patPublicId, invalidPublicId, bulkMinChanges),
+            // V11: verify checks the events only; the leak checks run in finally
+            verify(new Run(marks, patPublicId, invalidPublicId, bulkMinChanges, adminName),
                     out.capturedString(),
-                    err.capturedString(),
-                    generated,
-                    lookalikes);
+                    err.capturedString());
         } catch (Throwable t) {
             failure = t;
             throw t;
         } finally {
             // A scan error is suppressed onto the test failure instead of replacing it.
+            // V11: both leak checks run here, whatever failed before: extraction, fixtures, polling, shutdown or verify
             try {
-                WebStudioTest.assertNoSecretsSaved(generated);
+                assertNoLeaks(out.capturedString(), err.capturedString(), generated, lookalikes);
             } catch (AssertionError | RuntimeException scan) {
                 if (failure != null) {
                     failure.addSuppressed(scan);
@@ -367,24 +399,45 @@ class SecurityAuditLogITest {
         }
     }
 
-    /** Checks the fixed slices and the whole captured output of the finished run. */
-    private static void verify(Run run,
-                               String outText,
-                               String errText,
-                               Map<String, String> generated,
-                               Map<String, String> lookalikes) {
+    /** Checks the fixed slices and every audit line of the finished run; the leak checks are made by the caller. */
+    private static void verify(Run run, String outText, String errText) { // V11: the leak inventories moved out
         List<String> allLines = new ArrayList<>(auditLines(outText));
         allLines.addAll(auditLines(errText));
-        for (AuditLine line : parse(allLines)) {
+        var parsed = parse(allLines); // V11: parsed once, for the line checks and the whole-run counts
+        for (AuditLine line : parsed) {
+            // V11: the outcome must be one its event is written with. An unknown event is not named: it is any text.
+            String event = line.event();
+            Set<String> outcomes = event == null ? Set.of() : OUTCOMES.getOrDefault(event, Set.of());
+            String named = outcomes.isEmpty() ? "an unknown event" : "event " + event; // V11: known names only
             assertTrue(line.user() != null && line.ip() != null && line.outcome() != null,
-                    () -> "An audit line of event " + line.event() + " lacks user=, ip= or outcome=");
+                    () -> "An audit line of " + named + " lacks user=, ip= or outcome=");
+            assertTrue(!outcomes.isEmpty(), "An audit line of an unknown event");
+            assertTrue(outcomes.contains(line.outcome()),
+                    () -> "An audit line of event " + event + " has an outcome other than " + new TreeSet<>(outcomes));
         }
+        // V11: no success for the invalid token and no failure for the valid one, anywhere in the run
+        assertEquals(0, count(parsed, event(AUTH_SUCCESS).and(pat(run.invalidPublicId()))),
+                "The run: auth.success with the public id of INVALID_PAT_TOKEN");
+        assertEquals(0, count(parsed, event(AUTH_FAILURE).and(pat(run.patPublicId()))),
+                "The run: auth.failure with PAT_PUBLIC_ID");
 
         List<List<AuditLine>> slices = new ArrayList<>();
         for (int i = 0; i + 1 < run.marks().size(); i++) {
             slices.add(parse(slice(outText, errText, run.marks().get(i), run.marks().get(i + 1))));
         }
         assertEquals(SEGMENTS.size() + 1, slices.size(), "Slices of the run");
+
+        // V11: exact authentication totals per slice. The administrator's setup logins drive the fixtures and vary in
+        // number, so they are separated; its token successes carry method=pat, so they are counted.
+        var counted = authEvent().and(setupLogin(run.adminName()).negate());
+        for (int i = 0; i < slices.size(); i++) {
+            String step = i == 0 ? "PAT creation" : SEGMENTS.get(i - 1);
+            long expected = i == 0 ? 0 : AUTH_TOTALS.getOrDefault(step, 0);
+            long actual = count(slices.get(i), counted);
+            assertEquals(expected,
+                    actual,
+                    step + ": authentication events other than the administrator's setup logins");
+        }
 
         // The token creation is the first slice; segment i is slice i + 1.
         assertEquals(1, count(slices.getFirst(), event(PAT_CREATE).and(pat(run.patPublicId()))),
@@ -411,15 +464,16 @@ class SecurityAuditLogITest {
                 "030-lockout: auth.failure of " + LOCK_USER);
         assertEquals(1, count(lockout, event(AUTH_LOCKOUT)), "030-lockout: auth.lockout lines");
         assertEquals(1,
-                count(lockout, event(AUTH_LOCKOUT).and(user(LOCK_USER))),
-                "030-lockout: auth.lockout of " + LOCK_USER);
+                count(lockout, event(AUTH_LOCKOUT).and(user(LOCK_USER)).and(outcome(LOCKED))), // V11: outcome=locked
+                "030-lockout: auth.lockout outcome=locked of " + LOCK_USER);
 
         // One valid token without a session, one on the administrator's own session, which it does not replace.
         var patUse = slices.get(1 + SEGMENTS.indexOf("040-pat-use"));
         assertEquals(2, count(patUse, patSuccess(run.patPublicId())), "040-pat-use: auth.success with PAT_PUBLIC_ID");
         assertEquals(1,
-                count(patUse, event(AUTH_FAILURE).and(user(NO_USER)).and(pat(run.invalidPublicId()))),
-                "040-pat-use: auth.failure with the public id of INVALID_PAT_TOKEN");
+                count(patUse, event(AUTH_FAILURE).and(user(NO_USER)).and(method(PAT_METHOD)) // V11: method=pat
+                        .and(pat(run.invalidPublicId()))),
+                "040-pat-use: auth.failure method=pat with the public id of INVALID_PAT_TOKEN");
 
         var revoke = slices.get(1 + SEGMENTS.indexOf("050-pat-revoke"));
         assertEquals(1,
@@ -445,6 +499,39 @@ class SecurityAuditLogITest {
         assertEquals(1,
                 count(bulk, committedAclChange(run.bulkMinChanges())),
                 "090-bulk-acl: acl.change outcome=success with changes >= " + run.bulkMinChanges());
+    }
+
+    /**
+     * V11: runs the captured-output check, then the saved-response scan whatever the first one did. A scan failure is
+     * attached to a captured-output failure, which is thrown.
+     */
+    private static void assertNoLeaks(String outText,
+                                      String errText,
+                                      Map<String, String> generated,
+                                      Map<String, String> lookalikes) {
+        try {
+            assertNoLeakInOutput(outText, errText, generated, lookalikes);
+        } catch (AssertionError | RuntimeException leak) {
+            try {
+                WebStudioTest.assertNoSecretsSaved(generated);
+            } catch (AssertionError | RuntimeException scan) {
+                leak.addSuppressed(scan);
+            }
+            throw leak;
+        }
+        WebStudioTest.assertNoSecretsSaved(generated);
+    }
+
+    /**
+     * V11: fails, naming only keys, when a generated secret appears anywhere in the captured output, or when a
+     * credential-looking name appears in an audit line or anywhere in the captured output.
+     */
+    private static void assertNoLeakInOutput(String outText,
+                                             String errText,
+                                             Map<String, String> generated,
+                                             Map<String, String> lookalikes) {
+        List<String> allLines = new ArrayList<>(auditLines(outText));
+        allLines.addAll(auditLines(errText));
 
         Set<String> leaked = new TreeSet<>();
         for (var entry : generated.entrySet()) {
@@ -516,9 +603,29 @@ class SecurityAuditLogITest {
         return line -> publicId.equals(line.pat());
     }
 
+    // V11: the method and outcome predicates of the exact outcome and method checks
+    private static Predicate<AuditLine> method(String name) {
+        return line -> name.equals(line.method());
+    }
+
+    private static Predicate<AuditLine> outcome(String name) {
+        return line -> name.equals(line.outcome());
+    }
+
+    /** V11: an authentication event: a success, a failure or a lockout. */
+    private static Predicate<AuditLine> authEvent() {
+        return line -> line.event() != null && AUTH_EVENTS.contains(line.event());
+    }
+
+    /** V11: a setup login: a success of the administrator by any method but a token. */
+    private static Predicate<AuditLine> setupLogin(String adminName) {
+        return event(AUTH_SUCCESS).and(user(adminName)).and(method(PAT_METHOD).negate());
+    }
+
     /** A successful authentication by the personal access token with the given public id. */
     private static Predicate<AuditLine> patSuccess(String publicId) {
-        return event(AUTH_SUCCESS).and(line -> PAT_METHOD.equals(line.method())).and(pat(publicId));
+        return event(AUTH_SUCCESS).and(line -> PAT_METHOD.equals(line.method())).and(outcome(SUCCESS)) // V11: success
+                .and(pat(publicId));
     }
 
     /** A committed ACL change of at least the given number of mutations. */
@@ -531,7 +638,12 @@ class SecurityAuditLogITest {
     }
 
     /** What the test learnt while it drove the server, which the checks of the finished run need. */
-    private record Run(List<Mark> marks, String patPublicId, String invalidPublicId, int bulkMinChanges) {
+    // V11: adminName is the administrator, whose setup logins the authentication totals separate
+    private record Run(List<Mark> marks,
+                       String patPublicId,
+                       String invalidPublicId,
+                       int bulkMinChanges,
+                       String adminName) {
     }
 
     /**

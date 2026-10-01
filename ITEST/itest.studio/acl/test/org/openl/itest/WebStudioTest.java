@@ -101,12 +101,16 @@ class WebStudioTest {
         }
     }
 
-    /** The secret part of a generated variable, or {@code null} for a variable that holds none. */
+    /**
+     * The secret part of a generated or derived credential variable, or {@code null} for a variable that holds none.
+     * Basic header values, the administrator's included, are reduced to their Base64 credential.
+     */
     private static @Nullable String secretOf(String key, String value) {
-        if (ADMIN_ENV.equals(key) || value == null || value.isEmpty()) {
+        if (value == null || value.isEmpty()) {
             return null;
         }
-        if (key.endsWith("_BASIC")) {
+        // V7: the derived administrator header is scanned too, by its Base64 part; its bare user name is not a secret
+        if (ADMIN_ENV.equals(key) || key.endsWith("_BASIC")) {
             var encoded = value.startsWith(BASIC_PREFIX) ? value.substring(BASIC_PREFIX.length()) : value;
             return encoded.isEmpty() ? null : encoded;
         }
