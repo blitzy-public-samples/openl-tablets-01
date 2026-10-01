@@ -1,0 +1,11 @@
+PUT /rest/repos/design-flat/projects/SecV1D10Rest HTTP/1.1
+Authorization: ${ADMIN_AUTH_TOCKEN}
+Content-Type: multipart/form-data; boundary=WebKitFormBoundary7MA4YWxkTrZu0gW
+
+--WebKitFormBoundary7MA4YWxkTrZu0gW
+Content-Disposition: form-data; name="template"; filename="d10-control.zip"
+Content-Transfer-Encoding: binary
+Content-Type: application/zip
+
+&d10-control.zip
+--WebKitFormBoundary7MA4YWxkTrZu0gW--
