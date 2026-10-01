@@ -1,0 +1,2 @@
+GET /deployed-rules/openapi.json HTTP/1.1
+

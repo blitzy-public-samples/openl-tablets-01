@@ -105,7 +105,7 @@ public class PersonalAccessTokenController {
             throw new NotFoundException("pat.not.found.message");
         }
         crudService.deleteByPublicId(publicId);
-        // V11: audit PAT revocation (public ID only)
-        SecurityAuditLog.patRevoke(publicId);
+        // V11: audit PAT revocation with the stored public ID only
+        SecurityAuditLog.patRevoke(token.publicId());
     }
 }

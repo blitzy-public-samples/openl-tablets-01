@@ -1,6 +1,7 @@
 package org.openl.itest;
 
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -11,6 +12,7 @@ import java.util.Map;
 import java.util.Properties;
 import java.util.TreeSet;
 
+import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.Test;
 
 import org.openl.itest.core.JettyServer;
@@ -42,7 +44,8 @@ class WebStudioTest {
             client.localEnv.put("ADMIN_AUTH_TOCKEN", adminAuth);
             client.localEnv.putAll(secrets);
             client.test("test-resources");
-        } catch (Exception | AssertionError e) {
+        } catch (Throwable e) {
+            // V7: every failure, an Error included, is recorded so that a scan error cannot replace it
             failure = e;
             throw e;
         } finally {
@@ -87,13 +90,15 @@ class WebStudioTest {
         return basic(name, name);
     }
 
-    // V7: fails, naming the variables only, when a generated credential reached a saved mismatching response
-    private static void assertNotSaved(Map<String, String> secrets, Throwable failure) throws IOException {
+    // V7: fails, naming the variables only, when a generated credential reached a saved mismatching response.
+    // A scan error is suppressed onto the suite failure, and thrown only when the suite itself passed.
+    private static void assertNotSaved(Map<String, String> secrets, @Nullable Throwable failure) throws IOException {
         var root = Path.of(System.getProperty("server.responses", "target/responses"));
         if (!Files.exists(root)) {
             return;
         }
         var names = new TreeSet<String>();
+        IOException readError = null;
         try (var walk = Files.walk(root)) {
             for (var file : walk.filter(Files::isRegularFile).toList()) {
                 // ISO-8859-1 maps every byte to one character, so any saved body can be searched
@@ -106,13 +111,25 @@ class WebStudioTest {
                     }
                 }
             }
+        } catch (UncheckedIOException e) {
+            // The directory stream reports a failed traversal step unchecked
+            readError = e.getCause();
+        } catch (IOException e) {
+            readError = e;
+        }
+        if (readError != null) {
+            if (failure == null) {
+                throw readError;
+            }
+            failure.addSuppressed(readError);
+            return;
         }
         if (!names.isEmpty()) {
             var error = new AssertionError("Generated credentials found under " + root + ": " + names);
-            if (failure != null) {
-                error.addSuppressed(failure);
+            if (failure == null) {
+                throw error;
             }
-            throw error;
+            failure.addSuppressed(error);
         }
     }
 }

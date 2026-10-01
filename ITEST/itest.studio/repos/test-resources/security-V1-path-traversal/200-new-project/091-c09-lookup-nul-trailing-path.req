@@ -1,3 +1,0 @@
-GET /rest/projects?repository=design-non-flat&name=SecV1C09Trail&fields=id,name,path HTTP/1.1
-Authorization: ${ADMIN_AUTH_TOCKEN}
-

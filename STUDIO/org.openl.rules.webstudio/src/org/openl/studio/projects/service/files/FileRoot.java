@@ -1,11 +1,16 @@
 package org.openl.studio.projects.service.files;
 
 import java.io.IOException;
+import java.nio.file.FileSystemException;
 import java.nio.file.Files;
+import java.nio.file.InvalidPathException;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Optional;
+
+import org.jspecify.annotations.Nullable;
+import org.slf4j.LoggerFactory;
 
 import org.openl.rules.project.abstraction.AProject;
 import org.openl.rules.project.abstraction.AProjectFolder;
@@ -121,7 +126,7 @@ public interface FileRoot {
      * @param repo the repository as the caller holds it, possibly wrapped; may be {@code null}
      * @return the real root directory, or empty when the repository is not file-backed
      */
-    static Optional<Path> localRoot(Repository repo) {
+    static Optional<Path> localRoot(@Nullable Repository repo) { // V1: a null repository is not file-backed
         var current = repo;
         while (current instanceof RepositoryDelegate delegate) {
             current = delegate.getOriginal();
@@ -153,7 +158,7 @@ public interface FileRoot {
      * @param project the project the mount serves; may be {@code null}
      * @return the project folder, or empty when the project is not stored in a local directory
      */
-    static Optional<Path> projectBoundary(AProject project) {
+    static Optional<Path> projectBoundary(@Nullable AProject project) { // V1: a null project has no boundary
         if (project == null) {
             return Optional.empty();
         }
@@ -172,10 +177,11 @@ public interface FileRoot {
     /**
      * Tells whether the input, resolved under the boundary, stays inside the boundary on disk.
      *
-     * <p>The input is resolved lexically first, which rejects absolute input and parent segments.
-     * The deepest existing entry of the result, a dangling link included, is then resolved to its
-     * real location and the part still to be created is appended to it. That part contains no links,
-     * because only existing entries can be links. The result must lie under the boundary.
+     * <p>The input is resolved lexically first, which rejects absolute input and parent segments that
+     * leave the boundary. The deepest existing entry of the result, a dangling link included, is then
+     * resolved to its real location and the part still to be created is appended to it. That part
+     * contains no links, because only existing entries can be links. The result must lie under the
+     * boundary.
      *
      * <p>The boundary itself is compared lexically, so a boundary that is itself a link, or that sits
      * under a link, is rejected. With an empty input the check therefore means that the boundary sits
@@ -186,16 +192,46 @@ public interface FileRoot {
      * @param input    path relative to the boundary; {@code null} or empty for the boundary itself
      * @return {@code true} only when the real location of the input lies under the boundary
      */
-    static boolean resolvesInside(Path boundary, String input) {
+    static boolean resolvesInside(Path boundary, @Nullable String input) {
         try {
             var target = input == null || input.isEmpty() ? boundary : boundary.resolve(input).normalize();
             if (!target.startsWith(boundary)) {
                 return false;
             }
             return resolveThroughDeepestExisting(target).map(real -> real.startsWith(boundary)).orElse(false);
-        } catch (IOException | RuntimeException e) {
+        } catch (IOException | IllegalArgumentException | SecurityException e) {
+            // V1: an unparsable input, an unresolvable entry or a denied lookup fails closed; others propagate.
+            debugFailure("Path rejected by the containment check", e);
             return false;
         }
+    }
+
+    // V1: the per-path check of the repository mount and the ancestor search; no link leads to the path.
+    /**
+     * Tells whether the path under the root sits at its own lexical place on disk: neither the entry
+     * nor any directory between {@code root} and it is a link, even one that stays under the root.
+     *
+     * <p>Links in the root's own path are trusted, because the root is a real location. A path that
+     * does not exist yet is accepted when its deepest existing ancestor sits at its own place. A path
+     * that leaves the root lexically, or that cannot be resolved (a dangling link, a loop, an
+     * unparsable name), does not. The lexical guard is defensive: callers validate the path first, but
+     * {@link #resolvesInside(Path, String) resolvesInside(target, "")} alone would accept a lexically
+     * escaping target that is not a link.
+     *
+     * @param root     real directory the path is read from or written to
+     * @param relative slash-separated path relative to the root; empty for the root itself
+     * @return {@code true} only when no link lies between the root and the path, the path included
+     */
+    static boolean atOwnPath(Path root, String relative) {
+        Path target;
+        try {
+            target = root.resolve(FilePaths.trimSlashes(relative)).normalize();
+        } catch (IllegalArgumentException e) {
+            // V1: an unparsable path, such as one holding a NUL byte, fails closed.
+            debugFailure("Path rejected as unparsable", e);
+            return false;
+        }
+        return target.startsWith(root) && resolvesInside(target, "");
     }
 
     // V1: the anchor's real location; an unresolvable anchor stays lexical so later checks fail closed.
@@ -208,7 +244,9 @@ public interface FileRoot {
         var absolute = path.toAbsolutePath().normalize();
         try {
             return resolveThroughDeepestExisting(absolute).orElse(absolute);
-        } catch (IOException | RuntimeException e) {
+        } catch (IOException | SecurityException e) {
+            // V1: an unresolvable link or a denied lookup keeps the lexical location; others propagate.
+            debugFailure("Real location not resolved, the lexical location is kept", e);
             return absolute;
         }
     }
@@ -236,5 +274,23 @@ public interface FileRoot {
     // V1: a slash-separated relative path resolved lexically under an anchor.
     private static Path under(Path anchor, String relative) {
         return anchor.resolve(FilePaths.trimSlashes(relative)).normalize();
+    }
+
+    // V1: the trace of a containment step that failed closed.
+    /**
+     * Logs at DEBUG that a containment step failed closed, naming the exception class and, for a path
+     * or filesystem failure, its reason. The message, the stack trace and the path are left out,
+     * because they repeat the raw input.
+     */
+    private static void debugFailure(String event, Exception e) {
+        var log = LoggerFactory.getLogger(FileRoot.class);
+        if (log.isDebugEnabled()) {
+            String reason = switch (e) {
+                case InvalidPathException invalid -> invalid.getReason();
+                case FileSystemException fileSystem -> fileSystem.getReason();
+                default -> null;
+            };
+            log.debug("{}: {}{}", event, e.getClass().getName(), reason == null ? "" : " (" + reason + ")");
+        }
     }
 }

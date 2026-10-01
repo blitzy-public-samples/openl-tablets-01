@@ -2,6 +2,9 @@ package org.openl.studio.security.pat.filter;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
@@ -16,9 +19,12 @@ import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletResponse;
 
+import org.apache.commons.lang3.RandomStringUtils;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junitpioneer.jupiter.StdErr;
+import org.junitpioneer.jupiter.StdIo;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -34,7 +40,9 @@ import org.springframework.security.core.context.SecurityContext;
 import org.springframework.security.core.context.SecurityContextHolderStrategy;
 import org.springframework.security.core.userdetails.User;
 import org.springframework.security.core.userdetails.UserDetails;
+import org.springframework.security.core.userdetails.UsernameNotFoundException;
 
+import org.openl.studio.security.audit.SecurityAuditLog;
 import org.openl.studio.security.pat.model.PatAuthResolution;
 import org.openl.studio.security.pat.model.PatAuthenticationToken;
 import org.openl.studio.security.pat.model.PatToken;
@@ -50,8 +58,10 @@ class PatAuthenticationFilterTest {
 
     // Valid test tokens matching PatToken format requirements (16 char publicId, 32 char secret)
     private static final String TEST_PUBLIC_ID = "abc123DEF4567890"; // 16 Base62 chars
-    private static final String TEST_SECRET = "secret456ABCDEF78901234567890ABA"; // 32 Base62 chars
-    private static final String TEST_TOKEN_VALUE = "openl_pat_" + TEST_PUBLIC_ID + "." + TEST_SECRET;
+    // V11: every credential in this test (token secret, anonymous key, password) is generated per run
+    private static final String TEST_SECRET = RandomStringUtils.secure().nextAlphanumeric(PatToken.SECRET_LENGTH);
+    private static final String TEST_TOKEN_VALUE = new PatToken(TEST_PUBLIC_ID, TEST_SECRET).asTokenValue();
+    private static final String ANONYMOUS_KEY = RandomStringUtils.secure().nextAlphanumeric(16);
 
     @Mock
     private PatAuthService patAuthService;
@@ -128,7 +138,7 @@ class PatAuthenticationFilterTest {
     @Test
     void testDoFilter_AuthorizationHeaderWithoutTokenPrefix() throws ServletException, IOException {
         // Arrange
-        request.addHeader(HttpHeaders.AUTHORIZATION, "Bearer some-bearer-token");
+        request.addHeader(HttpHeaders.AUTHORIZATION, "Bearer " + RandomStringUtils.secure().nextAlphanumeric(24));
 
         // Act
         filter.doFilterInternal(request, response, filterChain);
@@ -308,7 +318,7 @@ class PatAuthenticationFilterTest {
 
         // Existing anonymous authentication
         var anonymousAuth = new AnonymousAuthenticationToken(
-                "key",
+                ANONYMOUS_KEY,
                 "anonymousUser",
                 java.util.List.of(new SimpleGrantedAuthority("ROLE_ANONYMOUS"))
         );
@@ -405,7 +415,7 @@ class PatAuthenticationFilterTest {
     void testAuthenticationIsRequired_AnonymousAuth() {
         // Arrange
         var anonymousAuth = new AnonymousAuthenticationToken(
-                "key",
+                ANONYMOUS_KEY,
                 "anonymousUser",
                 java.util.List.of(new SimpleGrantedAuthority("ROLE_ANONYMOUS"))
         );
@@ -482,13 +492,46 @@ class PatAuthenticationFilterTest {
         assertEquals(TEST_SECRET, capturedToken.secret());
     }
 
+    // V11: a token whose resolution throws (its user deleted meanwhile, a database failure) still gets one audit line
+    @Test
+    @StdIo
+    void testDoFilter_ResolutionThrows_AuditsFailureAndRethrows(StdErr err) throws ServletException, IOException {
+        // Arrange
+        request.addHeader(HttpHeaders.AUTHORIZATION, "Token " + TEST_TOKEN_VALUE);
+        var failure = new UsernameNotFoundException("gone");
+        when(patAuthService.resolveAuthentication(any(PatToken.class))).thenThrow(failure);
+
+        // Act
+        var thrown = assertThrows(UsernameNotFoundException.class,
+                () -> filter.doFilterInternal(request, response, filterChain));
+
+        // Assert - the same exception propagates; the filter neither answers, continues nor changes the context
+        assertSame(failure, thrown);
+        verify(filterChain, never()).doFilter(any(), any());
+        verify(securityContextHolderStrategy, never()).setContext(any());
+        assertEquals(200, response.getStatus());
+        assertNull(response.getErrorMessage());
+
+        // Assert - exactly one failure line, with the public ID and never the secret or the token
+        var marker = " " + SecurityAuditLog.LOGGER_NAME + " - ";
+        var lines = err.capturedString().lines().filter(l -> l.contains(marker)).toList();
+        assertEquals(1, lines.size(), () -> "Expected one audit line, got: " + String.join("\n", lines));
+        var line = lines.getFirst();
+        assertTrue(line.contains("event=auth.failure outcome=failure user=\"-\""), line);
+        assertTrue(line.contains(" method=pat"), line);
+        assertTrue(line.endsWith(" pat=" + TEST_PUBLIC_ID), line);
+        var output = err.capturedString();
+        assertFalse(output.contains(TEST_SECRET), "The token secret reached the log output.");
+        assertFalse(output.contains(TEST_TOKEN_VALUE), "The token reached the log output.");
+    }
+
     /**
      * Helper method to create UserDetails with authorities.
      */
     private UserDetails createUserDetails(String username, String... authorities) {
         return new User(
                 username,
-                "password",
+                RandomStringUtils.secure().nextAlphanumeric(16),
                 Stream.of(authorities)
                         .map(SimpleGrantedAuthority::new)
                         .map(a -> (org.springframework.security.core.GrantedAuthority) a)

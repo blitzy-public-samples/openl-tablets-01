@@ -7,6 +7,7 @@ import java.util.function.BiFunction;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.jspecify.annotations.Nullable;
 import org.springframework.security.core.GrantedAuthority;
 
 import org.openl.rules.security.Group;
@@ -41,12 +42,15 @@ public class GetUserPrivileges implements BiFunction<String, Collection<? extend
      * V12: the same mapping without the ADMIN name-match warning, for requests that replay stored groups
      * (personal access tokens) instead of receiving them from the identity provider at login.
      */
-    public BiFunction<String, Collection<? extends GrantedAuthority>, Collection<GrantedAuthority>> withoutAdminMatchWarning() {
+    public BiFunction<String, Collection<? extends GrantedAuthority>, Collection<GrantedAuthority>>
+            withoutAdminMatchWarning() {
         return (u, a) -> map(u, a, false);
     }
 
     // V12: the former body of apply(), unchanged except that it passes the user and the warning switch on
-    private Collection<GrantedAuthority> map(String user, Collection<? extends GrantedAuthority> authorities, boolean warn) {
+    private Collection<GrantedAuthority> map(String user,
+                                             Collection<? extends GrantedAuthority> authorities,
+                                             boolean warn) {
 
         var privileges = new ArrayList<GrantedAuthority>();
 
@@ -79,11 +83,14 @@ public class GetUserPrivileges implements BiFunction<String, Collection<? extend
             // V12: a name match with an ADMIN-holding OpenL group silently grants administrator rights.
             // Only names are logged, never credentials; the warning repeats at every IdP-backed login.
             if (warn && group != null && group.hasPrivilege(Privileges.ADMIN.name())) {
+                // V12: the identity provider supplies these names and the log layouts print them as they are,
+                // so only loggable() copies are logged; the mapping keeps using the names unchanged.
                 log.warn(
-                        "External group '{}' of user '{}' matches OpenL group '{}', which holds ADMIN; the user gains administrator rights through this name match.",
-                        authorityName,
-                        user,
-                        group.getAuthority());
+                        "External group '{}' of user '{}' matches OpenL group '{}', which holds ADMIN; "
+                                + "the user gains administrator rights through this name match.",
+                        loggable(authorityName),
+                        loggable(user),
+                        loggable(group.getAuthority()));
             }
             // Expand priveleges from the DB
             privileges.add(Objects.requireNonNullElse(group, authority));
@@ -102,6 +109,26 @@ public class GetUserPrivileges implements BiFunction<String, Collection<? extend
         groupManagementService.addGroup(defaultGroup, "A default group for authenticated users");
         return groupManagementService.getGroupByName(defaultGroup);
 
+    }
+
+    /**
+     * V12: returns a copy of an identity-provider name that stays on one log line. Every ISO control character
+     * (CR, LF and TAB included) and the Unicode line and paragraph separators U+2028 and U+2029 become
+     * {@code '_'}, so a name cannot end the warning line and start a forged one.
+     *
+     * @param name the name as the identity provider supplied it, or {@code null}
+     * @return the name with those characters replaced, or {@code null} when {@code name} is {@code null}
+     */
+    private static @Nullable String loggable(@Nullable String name) {
+        if (name == null) {
+            return null;
+        }
+        var safe = new StringBuilder(name.length());
+        for (var i = 0; i < name.length(); i++) {
+            var c = name.charAt(i);
+            safe.append(Character.isISOControl(c) || c == '\u2028' || c == '\u2029' ? '_' : c);
+        }
+        return safe.toString();
     }
 
 }

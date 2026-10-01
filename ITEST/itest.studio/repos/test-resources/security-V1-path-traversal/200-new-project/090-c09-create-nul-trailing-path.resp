@@ -1,7 +1,7 @@
-HTTP/1.1 200
+HTTP/1.1 400
 Content-Type: application/json
 
 {
-  "branch": "master",
-  "revision": "*"
+  "code": "openl.error.400.file.path.invalid.message",
+  "message": "*"
 }

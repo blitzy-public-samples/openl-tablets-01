@@ -42,6 +42,7 @@ import org.openl.rules.workspace.uw.UserWorkspace;
 import org.openl.security.acl.permission.AclRole;
 import org.openl.security.acl.repository.RepositoryAclService;
 import org.openl.security.acl.repository.RepositoryAclServiceProvider;
+import org.openl.studio.common.exception.BadRequestException;
 import org.openl.studio.common.exception.ConflictException;
 import org.openl.studio.common.exception.ForbiddenException;
 import org.openl.studio.common.exception.NotFoundException;
@@ -89,6 +90,15 @@ public class ProjectCreationService {
     private void requireCreatePermission(String repositoryId) {
         if (!aclProjectsHelper.hasCreateProjectPermission(repositoryId)) {
             throw new ForbiddenException("default.message");
+        }
+    }
+
+    // V1: the write trims control characters away silently, so a path or name carrying one is rejected as received
+    private static void requireNoControlCharacters(@Nullable String path, @Nullable String projectName) {
+        for (String value : new String[]{path, projectName}) {
+            if (value != null && value.chars().anyMatch(ch -> ch < ' ')) {
+                throw new BadRequestException("file.path.invalid.message");
+            }
         }
     }
 
@@ -267,6 +277,13 @@ public class ProjectCreationService {
                                     String algorithmsModuleName, Map<String, String> tags) {
         var repositoryId = repository.getId();
         requireCreatePermission(repositoryId);
+        // V1: a rejected path or name never reaches the upload, so the files it would have released are released here
+        try {
+            requireNoControlCharacters(path, projectName);
+        } catch (BadRequestException e) {
+            files.forEach(ProjectFile::destroy);
+            throw e;
+        }
         try {
             var created = new ProjectUploader(repository, files, projectName, StringUtils.trimToEmpty(path),
                     getUserWorkspace(), aclServiceProvider.getDesignRepoAclService(), comment, zipFilter,
@@ -409,6 +426,8 @@ public class ProjectCreationService {
             // The state to copy is resolved first: a revision the source has none at fails before anything
             // is written to the target repository.
             var sourceCopy = sourceAtRevision(source, revision);
+            // V1: control characters in path or name are rejected unchecked, never mapped to a copy failure below
+            requireNoControlCharacters(path, newName);
             var designTimeRepository = workspace.getDesignTimeRepository();
             var designPath = designTimeRepository.getRulesLocation() + newName;
             var designData = new FileData();

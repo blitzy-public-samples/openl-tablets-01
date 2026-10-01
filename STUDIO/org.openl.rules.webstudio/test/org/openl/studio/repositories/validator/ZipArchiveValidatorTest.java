@@ -1,7 +1,6 @@
 package org.openl.studio.repositories.validator;
 
-// V1-D: the zip-slip matrix adds the assertion, file, archive-writing, charset, temporary-directory and
-// parameterized-test imports.
+// V1-D: imports of the upload-project path matrix
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
@@ -171,6 +170,22 @@ class ZipArchiveValidatorTest extends AbstractConstraintValidatorTest {
         assertEquals(2, result.getGlobalErrorCount(), "zipfs cannot open: one error for each raw violation");
         for (ObjectError error : result.getGlobalErrors()) {
             assertEquals(UNKNOWN_ARCHIVE_PATH, error.getCode(), "zipfs cannot open: raw violations use the path key");
+        }
+    }
+
+    // V1-D: 15 distinct traversal names still reject the archive, with the raw-name errors capped at 10 (the
+    // validator's MAX_RAW_VIOLATIONS), so the entry count cannot grow the 400 body.
+    @Test
+    void testArchives_RawViolationsCapped() throws IOException {
+        var names = new String[15];
+        for (var i = 0; i < names.length; i++) {
+            names[i] = "../a%02d.xlsx".formatted(i);
+        }
+        var result = validate("raw violations capped", archive(names));
+        assertEntryRejected("raw violations capped", result, UNKNOWN_ARCHIVE_PATH);
+        assertEquals(10, result.getGlobalErrorCount(), "raw violations capped: at most 10 errors are reported");
+        for (ObjectError error : result.getGlobalErrors()) {
+            assertEquals(UNKNOWN_ARCHIVE_PATH, error.getCode(), "raw violations capped: errors use the path key");
         }
     }
 

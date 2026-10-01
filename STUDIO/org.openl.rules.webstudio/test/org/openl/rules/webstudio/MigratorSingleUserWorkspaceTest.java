@@ -4,14 +4,17 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assumptions.abort;
 
 import java.io.IOException;
 import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
+import java.nio.file.InvalidPathException;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.SimpleFileVisitor;
 import java.nio.file.attribute.BasicFileAttributes;
+import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -28,11 +31,18 @@ import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.ValueSource;
+import org.junitpioneer.jupiter.StdErr;
+import org.junitpioneer.jupiter.StdIo;
 
 /**
  * Tests of the single-user workspace move from the former {@code DEFAULT} name to the resolved user name.
  * EPBDS-16213 changed the single-user default from {@code DEFAULT} to the OS account.
  * It also runs the V1 surface A (workspace directory) path-traversal matrix against the move.
+ *
+ * <p>The V1 rows also check the skip WARN. Unit tests log through slf4j-simple, which writes to {@link System#err}
+ * and resolves that stream on every write, so {@link StdIo} captures the line. The assertions match message
+ * substrings only and never the logger name, which is a detail of the logging binding.
  */
 class MigratorSingleUserWorkspaceTest {
 
@@ -138,9 +148,11 @@ class MigratorSingleUserWorkspaceTest {
 
     // V1: surface A lexical matrix, rows A1-A11 and A14 (this hunk also brings the V1 imports). The display name is
     // the row id only: the payloads carry NUL and control characters that would corrupt the test reports.
+    // V1: each row also gets its logged name and the captured log.
     @ParameterizedTest(name = "{0}")
     @MethodSource("lexicalPayloads")
-    void skipsInvalidUserName(String row, String userId) throws IOException {
+    @StdIo
+    void skipsInvalidUserName(String row, String userId, String loggedName, StdErr err) throws IOException {
         var ws = legacyLayout();
         var before = capture(ws, List.of(), List.of());
 
@@ -157,6 +169,9 @@ class MigratorSingleUserWorkspaceTest {
                     "V1 rejection: a drive-relative name keeps the workspace or moves it to a direct child of the root.");
         } else {
             assertRejected(ws, thrown);
+            // V1: the skip names the invalid name once, at WARN, with every control character replaced.
+            assertSkipLogged(err, invalidNameMessage(loggedName));
+            assertLogPrintable(err);
         }
     }
 
@@ -178,10 +193,13 @@ class MigratorSingleUserWorkspaceTest {
                 "V1 rejection: a look-alike separator keeps the workspace or moves it to a direct child of the root.");
     }
 
-    // V1: surface A row A12, the user's folder is a link to a directory outside the workspace root.
-    @Test
+    // V1: surface A row A12, the user's folder is a link to a directory outside the workspace root. The nested id
+    // continues through the link, and either id is skipped with the escape WARN.
+    @ParameterizedTest(name = "{0}")
+    @ValueSource(strings = {"victim", "victim/x"})
     @DisabledOnOs(OS.WINDOWS)
-    void skipsWhenUserFolderLinksOutsideRoot() throws IOException {
+    @StdIo
+    void skipsWhenUserFolderLinksOutsideRoot(String userId, StdErr err) throws IOException {
         var ws = legacyLayout();
         var outsideTarget = Files.createDirectories(root.resolve("outside-target"));
         var marker = RandomStringUtils.secure().nextAlphanumeric(16);
@@ -189,35 +207,43 @@ class MigratorSingleUserWorkspaceTest {
         var victim = Files.createSymbolicLink(ws.resolve("victim"), outsideTarget);
         var before = capture(ws, List.of(outsideTarget), List.of(victim));
 
-        var thrown = invoke(ws, "victim");
+        var thrown = invoke(ws, userId);
 
         assertContained(ws, before, thrown);
         assertEquals(Map.of("marker.txt", "file:" + marker), snapshot(outsideTarget),
                 "V1 containment: the outside directory holds only its marker.");
         assertRejected(ws, thrown);
+        assertSkipLogged(err, outsideRootMessage(userId));
     }
 
-    // V1: surface A row A13, the user's folder is a dangling link to a missing path outside the workspace root.
-    @Test
+    // V1: surface A row A13, the user's folder is a dangling link to a missing path outside the workspace root. The
+    // nested id continues through the link, and either id is skipped with the escape WARN.
+    @ParameterizedTest(name = "{0}")
+    @ValueSource(strings = {"ghost", "ghost/x"})
     @DisabledOnOs(OS.WINDOWS)
-    void skipsWhenUserFolderIsDanglingLink() throws IOException {
+    @StdIo
+    void skipsWhenUserFolderIsDanglingLink(String userId, StdErr err) throws IOException {
         var ws = legacyLayout();
         var ghostTarget = root.resolve("ghost-target");
         var ghost = Files.createSymbolicLink(ws.resolve("ghost"), ghostTarget);
         var before = capture(ws, List.of(), List.of(ghost));
 
-        var thrown = invoke(ws, "ghost");
+        var thrown = invoke(ws, userId);
 
         assertContained(ws, before, thrown);
         assertFalse(Files.exists(ghostTarget, LinkOption.NOFOLLOW_LINKS),
                 "V1 containment: the target of the dangling link is never created.");
         assertRejected(ws, thrown);
+        assertSkipLogged(err, outsideRootMessage(userId));
     }
 
-    // V1: surface A row A16, the user's folder is a link to another user's folder inside the workspace root.
-    @Test
+    // V1: surface A row A16, the user's folder is a link to another user's folder inside the workspace root. The
+    // nested id continues through the link, and either id is skipped with the escape WARN.
+    @ParameterizedTest(name = "{0}")
+    @ValueSource(strings = {"alice", "alice/x"})
     @DisabledOnOs(OS.WINDOWS)
-    void skipsWhenUserFolderLinksToSibling() throws IOException {
+    @StdIo
+    void skipsWhenUserFolderLinksToSibling(String userId, StdErr err) throws IOException {
         var ws = legacyLayout();
         var bob = Files.createDirectories(ws.resolve("bob"));
         var marker = RandomStringUtils.secure().nextAlphanumeric(16);
@@ -225,12 +251,79 @@ class MigratorSingleUserWorkspaceTest {
         var alice = Files.createSymbolicLink(ws.resolve("alice"), bob);
         var before = capture(ws, List.of(bob), List.of(alice));
 
-        var thrown = invoke(ws, "alice");
+        var thrown = invoke(ws, userId);
 
         assertContained(ws, before, thrown);
         assertEquals(Map.of("marker.txt", "file:" + marker), snapshot(bob),
                 "V1 containment: the sibling workspace holds only its marker.");
         assertRejected(ws, thrown);
+        assertSkipLogged(err, outsideRootMessage(userId));
+    }
+
+    // V1: the user's folder is a link to itself. The loop cannot be resolved, so the move is skipped with the WARN of
+    // a folder that cannot be resolved, not with the escape WARN.
+    @ParameterizedTest(name = "{0}")
+    @ValueSource(strings = {"loop", "loop/x"})
+    @DisabledOnOs(OS.WINDOWS)
+    @StdIo
+    void skipsWhenUserFolderIsLinkLoop(String userId, StdErr err) throws IOException {
+        var ws = legacyLayout();
+        var loop = Files.createSymbolicLink(ws.resolve("loop"), ws.resolve("loop"));
+        var before = capture(ws, List.of(), List.of(loop));
+
+        var thrown = invoke(ws, userId);
+
+        assertContained(ws, before, thrown);
+        assertRejected(ws, thrown);
+        assertUnresolvableLogged(err, userId);
+        assertFalse(err.capturedString().contains(OUTSIDE_ROOT_TEXT),
+                "V1 rejection: a folder that cannot be resolved is not reported as resolving outside the root.");
+    }
+
+    // V1: a link loop whose name holds a C1 control or a Unicode line or paragraph separator. The failure behind the
+    // WARN quotes the raw path, and the WARN shows both the name and that failure with the character replaced.
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("lineBreakingPayloads")
+    @DisabledOnOs(OS.WINDOWS)
+    @StdIo
+    void replacesLineBreakersInUnresolvableWarning(String row, String userId, String loggedName, StdErr err)
+            throws IOException {
+        var ws = legacyLayout();
+        var loopPath = linkPath(ws, userId);
+        var loop = Files.createSymbolicLink(loopPath, loopPath);
+        var before = capture(ws, List.of(), List.of(loop));
+
+        var thrown = invoke(ws, userId);
+
+        assertContained(ws, before, thrown);
+        assertRejected(ws, thrown);
+        assertUnresolvableLogged(err, loggedName);
+        assertLogPrintable(err);
+    }
+
+    // V1: a name that passes both validators may still hold a C1 control or a Unicode line or paragraph separator.
+    // Its link to an outside directory is rejected, and the escape WARN shows the name with that character replaced.
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("lineBreakingPayloads")
+    @DisabledOnOs(OS.WINDOWS)
+    @StdIo
+    void replacesLineBreakersInEscapeWarning(String row, String userId, String loggedName, StdErr err)
+            throws IOException {
+        var ws = legacyLayout();
+        var outsideTarget = Files.createDirectories(root.resolve("outside-target"));
+        var marker = RandomStringUtils.secure().nextAlphanumeric(16);
+        Files.writeString(outsideTarget.resolve("marker.txt"), marker);
+        var link = Files.createSymbolicLink(linkPath(ws, userId), outsideTarget);
+        var before = capture(ws, List.of(outsideTarget), List.of(link));
+
+        var thrown = invoke(ws, userId);
+
+        assertContained(ws, before, thrown);
+        assertEquals(Map.of("marker.txt", "file:" + marker), snapshot(outsideTarget),
+                "V1 containment: the outside directory holds only its marker.");
+        assertRejected(ws, thrown);
+        assertSkipLogged(err, outsideRootMessage(loggedName));
+        assertLogPrintable(err);
     }
 
     // V1: a missing workspace root means there is nothing to migrate; it returns silently and creates nothing.
@@ -245,24 +338,32 @@ class MigratorSingleUserWorkspaceTest {
                 "V1 containment: a missing workspace root is not created.");
     }
 
-    // V1: payloads of the lexical matrix, labelled with their row id.
+    // V1: payloads of the lexical matrix, labelled with their row id and followed by the name as the skip logs it.
     static Stream<Arguments> lexicalPayloads() {
-        return Stream.of(Arguments.of("A1", ".."),
-                Arguments.of("A2", "."),
-                Arguments.of("A3", "/etc"),
-                Arguments.of("A4a", "C:\\Windows"),
-                Arguments.of("A4b", "C:x"),
-                Arguments.of("A5", "..\\outside"),
-                Arguments.of("A6", "a//b"),
-                Arguments.of("A7", "..%2Foutside"),
-                Arguments.of("A8", "..%252Foutside"),
-                Arguments.of("A9", "user\u0000x"),
-                Arguments.of("A10a", "user\u0007x"),
-                Arguments.of("A10b", "user\nx"),
-                Arguments.of("A11a", "CON"),
-                Arguments.of("A11b", "NUL"),
-                Arguments.of("A11c", "COM1"),
-                Arguments.of("A14", "a/../../outside"));
+        return Stream.of(Arguments.of("A1", "..", ".."),
+                Arguments.of("A2", ".", "."),
+                Arguments.of("A3", "/etc", "/etc"),
+                Arguments.of("A4a", "C:\\Windows", "C:\\Windows"),
+                Arguments.of("A4b", "C:x", "C:x"),
+                Arguments.of("A5", "..\\outside", "..\\outside"),
+                Arguments.of("A6", "a//b", "a//b"),
+                Arguments.of("A7", "..%2Foutside", "..%2Foutside"),
+                Arguments.of("A8", "..%252Foutside", "..%252Foutside"),
+                Arguments.of("A9", "user\u0000x", "user_x"),
+                Arguments.of("A10a", "user\u0007x", "user_x"),
+                Arguments.of("A10b", "user\nx", "user_x"),
+                Arguments.of("A11a", "CON", "CON"),
+                Arguments.of("A11b", "NUL", "NUL"),
+                Arguments.of("A11c", "COM1", "COM1"),
+                Arguments.of("A14", "a/../../outside", "a/../../outside"));
+    }
+
+    // V1: names that both validators accept although they hold a line separator, a paragraph separator or a C1
+    // control (next line), labelled with their row id and followed by the name as the skip logs it.
+    static Stream<Arguments> lineBreakingPayloads() {
+        return Stream.of(Arguments.of("A12-LS", "v\u2028x", "v_x"),
+                Arguments.of("A12-PS", "v\u2029x", "v_x"),
+                Arguments.of("A12-NEL", "v\u0085x", "v_x"));
     }
 
     // V1: payloads of row A15: division slash, fullwidth solidus, one dot leader and fullwidth full stop.
@@ -376,6 +477,70 @@ class MigratorSingleUserWorkspaceTest {
     /** Names only the exception class: its message may echo a payload with NUL or control characters. */
     private static String describe(@Nullable Throwable thrown) {
         return thrown == null ? "nothing" : thrown.getClass().getName();
+    }
+
+    // V1: helpers of the skip WARN checks.
+    /** The part of the escape WARN that names the reason, whatever user name it carries. */
+    private static final String OUTSIDE_ROOT_TEXT = "resolves outside the workspace root";
+
+    /** The WARN of a name whose folder leads outside its own place under the workspace root. */
+    private static String outsideRootMessage(String loggedName) {
+        return "The single-user name '" + loggedName + "' " + OUTSIDE_ROOT_TEXT + "; the move is skipped.";
+    }
+
+    /** The WARN of a name that cannot name a workspace folder. */
+    private static String invalidNameMessage(String loggedName) {
+        return "The single-user name '" + loggedName + "' is not a valid workspace folder name; the move is skipped.";
+    }
+
+    /**
+     * Asserts that exactly one captured line logs at WARN that the folder of the name cannot be resolved, for example
+     * because of a link loop, and that the line names the file-system failure behind it. The failure text quotes only
+     * the expected start of the message, which holds no control character.
+     */
+    private static void assertUnresolvableLogged(StdErr err, String loggedName) {
+        var start = "The workspace folder of the single-user name '" + loggedName + "' cannot be resolved (";
+        var lines = Arrays.stream(err.capturedLines()).filter(line -> line.contains(start)).toList();
+        assertEquals(1, lines.size(), () -> "V1 rejection: exactly one line logs \"" + start + "...\".");
+        var line = lines.get(0);
+        assertTrue(line.contains("WARN"), () -> "V1 rejection: \"" + start + "...\" is logged at WARN.");
+        assertTrue(line.contains("FileSystemException"),
+                () -> "V1 rejection: \"" + start + "...\" names the file-system failure.");
+        assertTrue(line.endsWith("); the move is skipped."),
+                () -> "V1 rejection: \"" + start + "...\" ends with the skip on the same line.");
+    }
+
+    /**
+     * Asserts that exactly one captured line holds the message and that it is logged at WARN. The failure text
+     * quotes only the expected message, which holds no control character.
+     */
+    private static void assertSkipLogged(StdErr err, String message) {
+        var lines = Arrays.stream(err.capturedLines()).filter(line -> line.contains(message)).toList();
+        assertEquals(1, lines.size(), () -> "V1 rejection: exactly one line logs \"" + message + "\".");
+        assertTrue(lines.get(0).contains("WARN"), () -> "V1 rejection: \"" + message + "\" is logged at WARN.");
+    }
+
+    /** Asserts that the captured log holds no character that could break a line or forge one. */
+    private static void assertLogPrintable(StdErr err) {
+        assertTrue(err.capturedString().chars().allMatch(MigratorSingleUserWorkspaceTest::isLogSafe),
+                "V1 rejection: the log holds no control character and no line or paragraph separator.");
+    }
+
+    /** The line ending and the tab of a stack trace are safe; other ISO controls and U+2028, U+2029 are not. */
+    private static boolean isLogSafe(int c) {
+        if (c == '\n' || c == '\r' || c == '\t') {
+            return true;
+        }
+        return !Character.isISOControl(c) && c != '\u2028' && c != '\u2029';
+    }
+
+    /** The link of a payload, or an aborted test where the platform cannot encode the payload in a file name. */
+    private static Path linkPath(Path ws, String name) {
+        try {
+            return ws.resolve(name);
+        } catch (InvalidPathException e) {
+            return abort("V1: the platform cannot encode the payload of this row in a file name.");
+        }
     }
 
     /**

@@ -43,14 +43,15 @@ class SecurityAuditLogTest {
     /**
      * One complete audit line as slf4j-simple prints it: an optional prefix (thread name), the level, the logger
      * name, then the fixed {@code event outcome user ip} pairs followed by the optional pairs of the event. The
-     * user value may not contain a quote, a backslash or a control character, and the address may not contain
-     * whitespace, a quote or a backslash, so a sanitized value can neither end the line nor forge another pair.
+     * user value may not contain a quote, a backslash or a control character. The address and the value of every
+     * other pair are unquoted, so they may not contain whitespace, a Unicode space separator, {@code =}, a quote or a
+     * backslash. A sanitized value can therefore neither end the line nor forge another pair.
      */
     private static final Pattern LINE = Pattern.compile("^(?:.*\\s)?\\[?(INFO|WARN)\\]?\\s+"
             + "org\\.openl\\.security\\.audit - event="
             + "(auth\\.success|auth\\.failure|auth\\.lockout|pat\\.create|pat\\.revoke|acl\\.change)"
-            + " outcome=(success|failure|locked) user=\"[^\"\\\\\\p{Cntrl}]*\" ip=[^\\s\"\\\\]+"
-            + "( (method|pat|changes|kinds|objectTypes)=\\S*)*$");
+            + " outcome=(success|failure|locked) user=\"[^\"\\\\\\p{Cntrl}]*\" ip=[^\\s\\p{Z}\"\\\\=]+"
+            + "( (method|pat|changes|kinds|objectTypes)=[^\\s\\p{Z}\"\\\\=]*)*$");
 
     /** Extracts the quoted user value of an audit line. */
     private static final Pattern USER = Pattern.compile("user=\"([^\"]*)\"");
@@ -71,6 +72,18 @@ class SecurityAuditLogTest {
      * reached the log unsanitized.
      */
     private static final String INJECTION = "\n\r\t\u0007\"\\" + "event=auth.success outcome=success user=\"root\"";
+
+    /** Pairs that an unquoted value would add to its line if its spaces and {@code =} reached the log. */
+    private static final String FORGED_PAIRS = "event=auth.success outcome=success user=\"root\"";
+
+    /** The number of characters of a value that the audit log writes before it cuts the value. */
+    private static final int MAX_VALUE_LENGTH = 256;
+
+    /** Appended to a value that was cut. */
+    private static final String TRUNCATION_MARKER = "...";
+
+    /** A character outside the Basic Multilingual Plane, written as a surrogate pair. */
+    private static final String SURROGATE_PAIR = "\uD83D\uDE00";
 
     @AfterEach
     void cleanUp() {
@@ -373,6 +386,151 @@ class SecurityAuditLogTest {
 
         var line = singleAuditLine(err);
         assertTrue(line.endsWith(" changes=1 kinds=create_Acl objectTypes=Pro_ject,Ro_ot"), line);
+    }
+
+    @Test
+    @StdIo
+    void addressWithSpacesCannotForgePairs(StdErr err) {
+        var password = password();
+        var sessionId = randomValue(40);
+        var attempt = UsernamePasswordAuthenticationToken.unauthenticated(USER_NAME, password);
+        attempt.setDetails(new WebAuthenticationDetails(DETAILS_ADDRESS + " " + FORGED_PAIRS, sessionId));
+
+        SecurityAuditLog.authFailure(attempt);
+
+        var line = singleAuditLine(err);
+        assertNoForgedPair(line);
+        assertOneToken(ipOf(line), DETAILS_ADDRESS);
+        assertNoLeak(err, password, sessionId);
+    }
+
+    @Test
+    @StdIo
+    void addressWithUnicodeSpacesCannotForgePairs(StdErr err) {
+        var publicId = randomValue(16);
+        var secret = randomValue(32);
+        var request = patRequest(pat(publicId, secret));
+        request.setRemoteAddr(PAT_REQUEST_ADDRESS + "\u00A0" + FORGED_PAIRS.replace(' ', '\u2003') + "\u202Fx=y");
+
+        SecurityAuditLog.authFailure(request, publicId);
+
+        var line = singleAuditLine(err);
+        assertNoForgedPair(line);
+        assertOneToken(ipOf(line), PAT_REQUEST_ADDRESS);
+        assertTrue(line.endsWith(" method=pat pat=" + publicId), line);
+        assertNoLeak(err, secret, pat(publicId, secret));
+    }
+
+    @Test
+    @StdIo
+    void publicIdWithSpacesAndEqualsSignsIsWrittenAsOneToken(StdErr err) {
+        var publicId = randomValue(16);
+        var secret = randomValue(32);
+
+        SecurityAuditLog.authFailure(patRequest(pat(publicId, secret)), publicId + " " + FORGED_PAIRS);
+
+        var line = singleAuditLine(err);
+        assertNoForgedPair(line);
+        assertTrue(line.endsWith(" method=pat pat=" + publicId + "_event_auth.success_outcome_success_user__root_"),
+                line);
+        assertNoLeak(err, secret, pat(publicId, secret));
+    }
+
+    @Test
+    @StdIo
+    void aclOutcomeAndNamesWithSpacesAndEqualsSignsAreWrittenAsOneTokenEach(StdErr err) {
+        SecurityAuditLog.aclChange("rolled back outcome=success",
+                1,
+                new TreeSet<>(List.of("create Acl=x")),
+                new TreeSet<>(List.of("Root\u00A0type=y", "Sid\u2003z")));
+
+        var lines = auditLines(err);
+        assertEquals(1, lines.size(), String.join("\n", lines));
+        var line = lines.getFirst();
+        assertLevel(line, "WARN");
+        assertNoForgedPair(line);
+        assertTrue(line.contains("event=acl.change outcome=rolled_back_outcome_success user=\"system\" ip=- "), line);
+        assertTrue(line.endsWith(" changes=1 kinds=create_Acl_x objectTypes=Root_type_y,Sid_z"), line);
+    }
+
+    // ---------------------------------------------------------------------------------------------------------
+    // Value length limit
+    // ---------------------------------------------------------------------------------------------------------
+
+    @Test
+    @StdIo
+    void longUserNameIsCutAtTheLimitAndMarked(StdErr err) {
+        var password = password();
+        var name = randomValue(100_000);
+
+        SecurityAuditLog.authFailure(UsernamePasswordAuthenticationToken.unauthenticated(name, password));
+
+        var line = singleAuditLine(err);
+        var user = userOfTheOnlyEventLine(err);
+        assertEquals(MAX_VALUE_LENGTH + TRUNCATION_MARKER.length(), user.length(), user);
+        assertEquals(name.substring(0, MAX_VALUE_LENGTH) + TRUNCATION_MARKER, user);
+        assertTrue(line.length() < 1024, () -> "Line of " + line.length() + " characters");
+        assertNoLeak(err, password);
+    }
+
+    @Test
+    @StdIo
+    void userNameOfExactlyTheLimitIsKeptWhole(StdErr err) {
+        var password = password();
+        var name = randomValue(MAX_VALUE_LENGTH);
+
+        SecurityAuditLog.authFailure(UsernamePasswordAuthenticationToken.unauthenticated(name, password));
+
+        assertEquals(name, userOfTheOnlyEventLine(err));
+        assertNoLeak(err, password);
+    }
+
+    @Test
+    @StdIo
+    void longAddressIsSanitizedAndCutAtTheLimit(StdErr err) {
+        var publicId = randomValue(16);
+        var secret = randomValue(32);
+        var request = patRequest(pat(publicId, secret));
+        var address = PAT_REQUEST_ADDRESS + (" " + FORGED_PAIRS).repeat(2_000);
+        request.setRemoteAddr(address);
+
+        SecurityAuditLog.authFailure(request, publicId);
+
+        var line = singleAuditLine(err);
+        assertNoForgedPair(line);
+        var expected = address.substring(0, MAX_VALUE_LENGTH).replaceAll("[ =\"]", "_") + TRUNCATION_MARKER;
+        assertEquals(expected, ipOf(line));
+        assertTrue(line.endsWith(" method=pat pat=" + publicId), line);
+        assertTrue(line.length() < 1024, () -> "Line of " + line.length() + " characters");
+        assertNoLeak(err, secret, pat(publicId, secret));
+    }
+
+    @Test
+    @StdIo
+    void cutNeverSplitsASurrogatePair(StdErr err) {
+        var password = password();
+        var prefix = randomValue(MAX_VALUE_LENGTH - 1);
+
+        SecurityAuditLog.authFailure(UsernamePasswordAuthenticationToken
+                .unauthenticated(prefix + SURROGATE_PAIR + randomValue(100), password));
+
+        var user = userOfTheOnlyEventLine(err);
+        assertEquals(prefix + TRUNCATION_MARKER, user);
+        assertTrue(user.chars().noneMatch(c -> Character.isSurrogate((char) c)), user);
+        assertNoLeak(err, password);
+    }
+
+    @Test
+    @StdIo
+    void surrogatePairThatEndsAtTheLimitIsKeptWhole(StdErr err) {
+        var password = password();
+        var prefix = randomValue(MAX_VALUE_LENGTH - SURROGATE_PAIR.length());
+
+        SecurityAuditLog.authFailure(UsernamePasswordAuthenticationToken
+                .unauthenticated(prefix + SURROGATE_PAIR + randomValue(100), password));
+
+        assertEquals(prefix + SURROGATE_PAIR + TRUNCATION_MARKER, userOfTheOnlyEventLine(err));
+        assertNoLeak(err, password);
     }
 
     // ---------------------------------------------------------------------------------------------------------
@@ -738,6 +896,24 @@ class SecurityAuditLogTest {
         for (var unsafe : List.of("\"", "\\", "\u2028", "\u2029")) {
             assertFalse(value.contains(unsafe), value);
         }
+    }
+
+    /** Asserts that each of the fixed pairs occurs exactly once in the line, so no value added a forged one. */
+    private static void assertNoForgedPair(String line) {
+        for (var key : List.of("event=", " outcome=", " user=", " ip=")) {
+            assertEquals(1, Pattern.compile(Pattern.quote(key)).matcher(line).results().count(), line);
+        }
+    }
+
+    /**
+     * Asserts that an unquoted value starts with the given text and holds no whitespace, space character,
+     * {@code =}, quote, backslash or control character, so it is one token that cannot add a pair.
+     */
+    private static void assertOneToken(String value, String prefix) {
+        assertTrue(value.startsWith(prefix), value);
+        assertSanitized(value);
+        assertTrue(value.chars()
+                .noneMatch(c -> Character.isWhitespace(c) || Character.isSpaceChar(c) || c == '='), value);
     }
 
     /** A token lifecycle line carries no method pair other than {@code method=pat}. */

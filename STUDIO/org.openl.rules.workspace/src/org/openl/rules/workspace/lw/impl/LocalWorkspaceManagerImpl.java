@@ -36,6 +36,9 @@ import org.openl.util.FileUtils;
 @Slf4j
 public class LocalWorkspaceManagerImpl implements LocalWorkspaceManager, LocalWorkspaceListener {
 
+    // V1: the message of every rejected user id
+    private static final String INVALID_USER_ID = "The user id is not a valid workspace folder name.";
+
     @Setter
     private String workspaceHome;
     @Setter
@@ -64,7 +67,7 @@ public class LocalWorkspaceManagerImpl implements LocalWorkspaceManager, LocalWo
         this.designTimeRepository = designTimeRepository;
     }
 
-    // V1: hand-written instead of @Setter, so that null restores the accept-all default
+    // V1: injection point for the web module's user-id check; null restores the accept-all default
     /**
      * Sets the check each user id must pass before it names a workspace folder.
      *
@@ -125,13 +128,17 @@ public class LocalWorkspaceManagerImpl implements LocalWorkspaceManager, LocalWo
                     && isOwnWorkspaceFolder(root, userId, folderNameCheck)) {
                 return userDir;
             }
-        } catch (IllegalArgumentException ignored) {
-            // V1: an id the path API cannot parse, such as one with a NUL byte, gets the rejection below
+        } catch (IllegalArgumentException e) {
+            // V1: an id the path API cannot parse, such as one with a NUL byte, gets the same rejection, with the
+            // parser failure as its cause
+            throw new IllegalArgumentException(INVALID_USER_ID, e);
         }
-        throw new IllegalArgumentException("The user id is not a valid workspace folder name.");
+        throw new IllegalArgumentException(INVALID_USER_ID);
     }
 
-    // V1: kept private here, not in a dedicated file (Minimal Change Rule), as V1 allows no shared path component
+    // V1: real-path containment of the user's folder under the workspace home. It is a private helper of this class,
+    // against the Minimal Change Rule's preference for dedicated files, because path checks are not shared between
+    // the workspace, file, project and upload surfaces
     /**
      * Checks that the user folder is a real folder of its own right under the workspace root.
      *
@@ -166,7 +173,10 @@ public class LocalWorkspaceManagerImpl implements LocalWorkspaceManager, LocalWo
             // A dangling link counts as existing here, so toRealPath() rejects it
             var walked = Files.exists(boundary, LinkOption.NOFOLLOW_LINKS) ? boundary.toRealPath() : boundary;
             return walked.startsWith(boundary);
-        } catch (IOException | IllegalArgumentException e) {
+        } catch (IOException | IllegalArgumentException | SecurityException e) {
+            // V1: the caller turns the failure into the rejection; the message leaves out the id, which may hold
+            // control characters
+            log.debug("A user id failed the workspace folder check.", e);
             return false;
         }
     }

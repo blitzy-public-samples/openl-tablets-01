@@ -27,7 +27,7 @@ public class SecurityConfig {
         return new PathPatternRequestMatcherBuilderFactoryBean();
     }
 
-    // Static resource patterns with no filters
+    // Static resource patterns: no authentication, default security headers only
     @Bean
     @Order(0)
     public SecurityFilterChain staticResourcesFilterChain(HttpSecurity http) throws Exception {
@@ -50,7 +50,7 @@ public class SecurityConfig {
                         RequestMatchers.not(RequestMatchers.anyOf(
                                 "/rest/public/info/sys.json",
                                 "/rest/public/info/http.json"))))
-                // Disable any configurers and authentications for the static-like resources.
+                // Disable every configurer and authentication except the default security headers.
                 // V4: security headers stay enabled (HttpSecurity defaults) on the static chain.
                 .csrf(AbstractHttpConfigurer::disable)
                 .sessionManagement(AbstractHttpConfigurer::disable)

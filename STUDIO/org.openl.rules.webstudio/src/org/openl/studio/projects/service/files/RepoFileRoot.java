@@ -6,9 +6,9 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.List;
-import java.util.Optional;
 
 import lombok.RequiredArgsConstructor;
+import org.jspecify.annotations.Nullable;
 import org.springframework.security.acls.domain.BasePermission;
 
 import org.openl.rules.project.abstraction.AProject;
@@ -53,13 +53,19 @@ public class RepoFileRoot implements FileRoot {
 
     // V1: the real local root of a file-backed repository, the anchor of the containment check.
     /**
-     * Real root directory of the repository when it is file-backed, empty for any other backend.
+     * Real root directory of the repository when it is file-backed.
      *
-     * <p>Resolved on first use of {@link #contains(String)} from {@link FileRoot#localRoot(Repository)},
-     * and {@code null} until then. No synchronization is needed, because the mount is built per request
-     * by {@link RepoFileRootFactory#of(Repository, String)} and is not shared between threads.
+     * <p>Resolved on the first call of {@link #contains(String)} from
+     * {@link FileRoot#localRoot(Repository)}, which then sets {@link #anchorResolved}. After that,
+     * {@code null} means the repository is not file-backed. No synchronization is needed, because the
+     * mount is built per request by {@link RepoFileRootFactory#of(Repository, String)} and is not
+     * shared between threads.
      */
-    private Optional<Path> anchor;
+    private @Nullable Path anchor;
+    /**
+     * Whether {@link #anchor} has been resolved.
+     */
+    private boolean anchorResolved;
 
     @Override
     public AProjectFolder readFolder(String version) {
@@ -155,24 +161,14 @@ public class RepoFileRoot implements FileRoot {
      */
     @Override
     public boolean contains(String path) {
-        try {
-            if (anchor == null) {
-                // V1: resolved once per mount; the mount lives for one request.
-                anchor = FileRoot.localRoot(repository);
-            }
-            if (anchor.isEmpty()) {
-                // V1: not file-backed, so there are no filesystem links to follow.
-                return true;
-            }
-            Path root = anchor.get();
-            Path target = root.resolve(FilePaths.trimSlashes(path)).normalize();
-            // V1: the lexical guard is defensive; callers validate the path first, but the empty-input
-            // walk below alone would accept a lexically escaping target that is not a link.
-            return target.startsWith(root) && FileRoot.resolvesInside(target, "");
-        } catch (RuntimeException e) {
-            // V1: an unparsable path, such as one holding a NUL byte, fails closed.
-            return false;
+        if (!anchorResolved) {
+            // V1: resolved once per mount; the mount lives for one request.
+            anchor = FileRoot.localRoot(repository).orElse(null);
+            anchorResolved = true;
         }
+        var root = anchor;
+        // V1: a repository that is not file-backed has no filesystem links to follow.
+        return root == null || FileRoot.atOwnPath(root, path);
     }
 
     /**

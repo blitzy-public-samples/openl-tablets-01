@@ -36,6 +36,9 @@ import org.openl.util.ZipUtils;
 @Component
 public class ZipArchiveValidator implements Validator {
 
+    // V1: one violation already refuses the archive, so the cap bounds memory and the 400 body whatever the entry count
+    private static final int MAX_RAW_VIOLATIONS = 10;
+
     private final PathFilter zipFilter;
     private final ZipCharsetDetector zipCharsetDetector;
 
@@ -62,7 +65,7 @@ public class ZipArchiveValidator implements Validator {
         }
         // V1: raw entry names, validated before the zipfs view below normalizes them or fails on them
         var rawViolations = rawEntryNameViolations(archive, charset);
-        var errorsBefore = errors.getErrorCount(); // V1: tells whether the existing checks rejected anything
+        var errorsBefore = errors.getErrorCount(); // V1: the count before the zipfs checks, to tell if they reject
 
         try (FileSystem fs = FileSystems.newFileSystem(ZipUtils.toJarURI(archive),
                 Map.of("encoding", charset.name()))) {
@@ -93,7 +96,7 @@ public class ZipArchiveValidator implements Validator {
             }
             throw e;
         }
-        // V1: reported only when the existing checks found nothing, so today's rejections keep today's errors
+        // V1: reported only when the zipfs checks found nothing, so their errors take precedence
         if (errors.getErrorCount() == errorsBefore) {
             rejectRawEntryNames(rawViolations, errors);
         }
@@ -134,21 +137,24 @@ public class ZipArchiveValidator implements Validator {
         }
     }
 
+    // V1: not in a dedicated component as the Minimal Change Rule prefers, because surfaces share no path component
     /**
-     * V1: collects the violations of the entry names exactly as the archive records them.
+     * V1: collects the violations of the raw entry names, read before the zipfs view normalizes them, with
+     * {@code \} read as {@code /} and the trailing {@code /} of a folder entry dropped.
      *
      * <p>The zipfs view the other checks walk normalizes a name such as {@code a//x.xlsx} or {@code /etc/x}, and
      * refuses to open an archive with a {@code .} or {@code ..} segment at all, so a crafted name is never checked
      * there. Each raw name is therefore run through {@link Repository#validatePath(String)} (absolute paths,
-     * {@code .} and {@code ..} segments, {@code //} and {@code \}) and {@link NameChecker#validatePath(String)}
-     * (forbidden and control characters, reserved names, trailing dots and spaces). Names decode with the charset
-     * the archive was detected with, as in the zipfs view. Entries the upload filter drops are skipped, because they
-     * are never written.
+     * {@code .} and {@code ..} segments, {@code //}), which catches a backslash traversal such as {@code ..\x} as a
+     * {@code ..} segment, and {@link NameChecker#validatePath(String)} (forbidden and control characters, reserved
+     * names, trailing dots and spaces). Names decode with the charset the archive was detected with, as in the zipfs
+     * view. Entries the upload filter drops are skipped, because they are never written. Reading stops once
+     * {@value #MAX_RAW_VIOLATIONS} distinct violations are collected, because any one of them refuses the archive.
      *
-     * <p>The checks are private to this validator on purpose, not moved to a dedicated component as the Minimal
-     * Change Rule would prefer: each upload surface keeps its own guard, and no component is shared between them.
+     * <p>Private to this validator: V1 allows no path component shared between surfaces, so the upload-project
+     * surface keeps its own path guard.
      *
-     * @return the distinct violation messages, in the order of the entries
+     * @return the distinct violation messages, in the order of the entries, at most {@value #MAX_RAW_VIOLATIONS}
      */
     private Set<String> rawEntryNameViolations(Path archive, Charset charset) {
         var violations = new LinkedHashSet<String>();
@@ -158,7 +164,7 @@ public class ZipArchiveValidator implements Validator {
                 .setUseUnicodeExtraFields(false)
                 .get()) {
             var entries = zip.getEntries();
-            while (entries.hasMoreElements()) {
+            while (entries.hasMoreElements() && violations.size() < MAX_RAW_VIOLATIONS) {
                 var name = entries.nextElement().getName().replace('\\', '/');
                 // The filter sees the raw name, trailing '/' of a folder entry included, as the other uploaders do.
                 if (!zipFilter.accept(name)) {

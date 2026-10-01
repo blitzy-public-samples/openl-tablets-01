@@ -43,9 +43,10 @@ class WebStudioTest {
             failure = t;
             throw t;
         } finally {
+            // V1: a scan error of any kind is suppressed onto the suite failure instead of replacing it
             try {
                 assertNoSecretsSaved(generated);
-            } catch (AssertionError scan) {
+            } catch (AssertionError | RuntimeException scan) {
                 if (failure != null) {
                     failure.addSuppressed(scan);
                 } else {
@@ -205,7 +206,8 @@ class WebStudioTest {
                 .encodeToString((user + ":" + password).getBytes(StandardCharsets.UTF_8));
     }
 
-    // V1: fails, naming only the keys, when a generated secret appears in a saved mismatching response
+    // V1: fails, naming only the keys, when a generated secret appears in a saved mismatching response.
+    // An unlistable or unreadable response also fails as an AssertionError, so callers' suppression covers it.
     static void assertNoSecretsSaved(Map<String, String> generated) {
         Path dir = Path.of(System.getProperty("server.responses", "target/responses"));
         if (!Files.exists(dir) || generated.isEmpty()) {
@@ -215,15 +217,16 @@ class WebStudioTest {
         List<Path> files;
         try (Stream<Path> walk = Files.walk(dir)) {
             files = walk.filter(Files::isRegularFile).toList();
-        } catch (IOException e) {
-            throw new UncheckedIOException(e);
+        } catch (IOException | UncheckedIOException e) {
+            // The directory stream reports a failed traversal step unchecked.
+            throw new AssertionError("Cannot list the saved responses under " + dir, e);
         }
         for (Path file : files) {
             String content;
             try {
                 content = new String(Files.readAllBytes(file), StandardCharsets.UTF_8);
             } catch (IOException e) {
-                throw new UncheckedIOException(e);
+                throw new AssertionError("Cannot read the saved response " + file, e);
             }
             for (Map.Entry<String, String> entry : generated.entrySet()) {
                 String value = entry.getValue();

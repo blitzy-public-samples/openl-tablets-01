@@ -1,6 +1,7 @@
 package org.openl.studio.repositories.service;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -15,10 +16,14 @@ import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.NullAndEmptySource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import org.openl.rules.common.ProjectException;
 import org.openl.rules.project.abstraction.AProject;
@@ -40,6 +45,7 @@ import org.openl.rules.workspace.lw.LocalWorkspace;
 import org.openl.rules.workspace.uw.UserWorkspace;
 import org.openl.security.acl.repository.RepositoryAclService;
 import org.openl.security.acl.repository.RepositoryAclServiceProvider;
+import org.openl.studio.common.exception.BadRequestException;
 import org.openl.studio.common.exception.ConflictException;
 import org.openl.studio.common.exception.ForbiddenException;
 import org.openl.studio.common.exception.NotFoundException;
@@ -145,6 +151,102 @@ class ProjectCreationServiceTest {
                 "comment", "5"));
 
         verify(repository).checkHistory("DESIGN/Source", "5");
+    }
+
+    // V1: a path or name carrying a control character is rejected as received, before anything is written
+    @ParameterizedTest
+    @ValueSource(strings = {"Dir\u0000", "Dir\u0007"})
+    void create_from_files_rejects_a_path_with_a_control_character(String path) {
+        when(aclProjectsHelper.hasCreateProjectPermission("design")).thenReturn(true);
+        var repository = mock(Repository.class);
+        when(repository.getId()).thenReturn("design");
+        var file = mock(ProjectFile.class);
+        List<ProjectFile> files = List.of(file);
+
+        var e = assertThrows(BadRequestException.class, () -> service.createFromFiles(repository, "Project", path,
+                files, "comment", "rules/Models.xlsx", "rules/Algorithms.xlsx", "Models", "Algorithms", Map.of()));
+
+        assertEquals("openl.error.400.file.path.invalid.message", e.getErrorCode());
+        // The upload never runs, so the rejection releases the files the upload would have released.
+        verify(file).destroy();
+    }
+
+    @Test
+    void create_from_files_rejects_a_project_name_with_a_control_character() {
+        when(aclProjectsHelper.hasCreateProjectPermission("design")).thenReturn(true);
+        var repository = mock(Repository.class);
+        when(repository.getId()).thenReturn("design");
+        List<ProjectFile> files = List.of(mock(ProjectFile.class));
+
+        var e = assertThrows(BadRequestException.class, () -> service.createFromFiles(repository, "Project\u0007",
+                "Dir", files, "comment", "rules/Models.xlsx", "rules/Algorithms.xlsx", "Models", "Algorithms",
+                Map.of()));
+
+        assertEquals("openl.error.400.file.path.invalid.message", e.getErrorCode());
+    }
+
+    @Test
+    void create_from_template_rejects_a_path_with_a_control_character() {
+        when(aclProjectsHelper.hasCreateProjectPermission("design")).thenReturn(true);
+        var repository = mock(Repository.class);
+        when(repository.getId()).thenReturn("design");
+
+        // The template exists, so the rejection comes from the path and not from the template lookup.
+        var e = assertThrows(BadRequestException.class, () -> service.createFromTemplate(repository, "Project",
+                "Dir\u0000", "predefined", "templates", "Sample Project", "comment", Map.of()));
+
+        assertEquals("openl.error.400.file.path.invalid.message", e.getErrorCode());
+    }
+
+    @Test
+    void copy_project_rejects_a_target_with_a_control_character() throws Exception {
+        when(aclProjectsHelper.hasCreateProjectPermission("design")).thenReturn(true);
+        var acl = mock(RepositoryAclService.class);
+        when(acl.isGranted(any(RulesProject.class), anyList())).thenReturn(true);
+        when(aclServiceProvider.getDesignRepoAclService()).thenReturn(acl);
+
+        var repository = mock(Repository.class);
+        when(repository.getId()).thenReturn("design");
+        when(repository.supports()).thenReturn(new FeaturesBuilder(repository).setVersions(true).build());
+        when(repository.check("DESIGN/Source")).thenReturn(fileData("9"));
+        var source = mock(RulesProject.class);
+        when(source.getRepository()).thenReturn(repository);
+        when(source.getFolderPath()).thenReturn("DESIGN/Source");
+
+        var workspace = mock(UserWorkspace.class);
+        service = serviceWithWorkspace(workspace);
+        var targetRepository = mock(Repository.class);
+        when(targetRepository.getId()).thenReturn("design");
+        when(targetRepository.supports()).thenReturn(new FeaturesBuilder(targetRepository).build());
+
+        // A blank revision copies the latest state of the source.
+        var pathError = assertThrows(BadRequestException.class, () -> service.copyProject(targetRepository, "Copy",
+                "Dir\u0007", source, "comment", ""));
+        var nameError = assertThrows(BadRequestException.class, () -> service.copyProject(targetRepository,
+                "Copy\u0000", "Dir", source, "comment", ""));
+
+        assertEquals("openl.error.400.file.path.invalid.message", pathError.getErrorCode());
+        assertEquals("openl.error.400.file.path.invalid.message", nameError.getErrorCode());
+        // Rejected before the copy resolves its destination, so nothing is written.
+        verify(workspace, never()).getDesignTimeRepository();
+    }
+
+    @ParameterizedTest
+    @NullAndEmptySource
+    @ValueSource(strings = {"Dir ", "Dir/Nested"})
+    void create_from_files_lets_a_path_without_control_characters_through(String path) {
+        when(aclProjectsHelper.hasCreateProjectPermission("design")).thenReturn(true);
+        var repository = mock(Repository.class);
+        when(repository.getId()).thenReturn("design");
+        var file = mock(ProjectFile.class);
+        List<ProjectFile> files = List.of(file);
+
+        // Past the check, the upload looks up the user workspace, which only the Spring container provides.
+        assertThrows(UnsupportedOperationException.class, () -> service.createFromFiles(repository, "Project",
+                path, files, "comment", "rules/Models.xlsx", "rules/Algorithms.xlsx", "Models", "Algorithms",
+                Map.of()));
+
+        verify(file, never()).destroy();
     }
 
     @Test

@@ -62,13 +62,16 @@ class FileSearchSupport {
         while (!queue.isEmpty()) {
             var folder = queue.poll();
             for (AProjectArtefact artefact : folder.getArtefacts()) {
-                if (!root.contains(artefact.getInternalPath())) {
-                    continue; // V1: an entry a link places outside the mount is not matched, read or descended into
+                // V1: an entry a link places outside the mount is not matched, read or descended into. A folder
+                // the walk descends into is checked here; any other entry once its cheap criteria pass.
+                boolean descend = query.recursive() && artefact.isFolder();
+                if (descend && !root.contains(artefact.getInternalPath())) {
+                    continue;
                 }
-                if (matchesSearch(artefact, query, pattern, matcher, extensions, contentNeedle)) {
+                if (matchesSearch(artefact, query, pattern, matcher, extensions, contentNeedle, root, !descend)) {
                     result.add(resourceMapper.map(artefact));
                 }
-                if (query.recursive() && artefact.isFolder()) {
+                if (descend) {
                     queue.add((AProjectFolder) artefact);
                 }
             }
@@ -77,16 +80,25 @@ class FileSearchSupport {
         return result;
     }
 
+    // V1: containment on disk runs after the in-memory criteria and before the content read.
     /**
-     * Tests one artefact against the search criteria. The expensive checks (content read, ACL)
-     * run last.
+     * Tests one artefact against the search criteria. The in-memory criteria (type, extension,
+     * pattern) run first; the checks touching storage (containment on disk, content read, ACL) run
+     * last.
+     *
+     * @param root             the mount the artefact belongs to
+     * @param checkContainment whether the artefact still has to be checked with
+     *                         {@link FileRoot#contains(String)}; a folder the search descends into
+     *                         has been checked already
      */
     private boolean matchesSearch(AProjectArtefact artefact,
                                   FileSearchQuery query,
                                   String pattern,
                                   AntPathMatcher matcher,
                                   Set<String> extensions,
-                                  String contentNeedle) {
+                                  String contentNeedle,
+                                  FileRoot root,
+                                  boolean checkContainment) {
         if (query.type() == FileSearchQuery.FileType.FILE && artefact.isFolder()) {
             return false;
         }
@@ -97,6 +109,10 @@ class FileSearchSupport {
             return false;
         }
         if (matcher != null && !matcher.match(pattern, artefact.getInternalPath())) {
+            return false;
+        }
+        // V1: an entry a link places outside the mount is neither matched nor read.
+        if (checkContainment && !root.contains(artefact.getInternalPath())) {
             return false;
         }
         if (contentNeedle != null && !containsText(artefact, contentNeedle)) {

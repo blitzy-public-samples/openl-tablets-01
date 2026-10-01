@@ -18,6 +18,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.stream.Stream;
 
+import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -49,15 +50,27 @@ import org.openl.rules.webstudio.service.UserManagementService;
  * independent copy of the mapping rule as it stood before V12, because the warning must not change the returned
  * authorities.
  *
- * <p>The methods before the {@code withoutAdminMatchWarning} section use only the constructor and {@code apply},
- * so they also compile against the code as it stood before V12, where {@link #adminGroupMatchLogsOneWarning}
- * fails with no warning line.
+ * <p>The warning names the external group, the user and the matched OpenL group with every ISO control character
+ * and the Unicode line and paragraph separators replaced by {@code '_'}, so a name the identity provider supplies
+ * cannot end the warning line and start a forged one. The mapping still looks up and returns the names as they
+ * were supplied.
  */
 @ExtendWith(MockitoExtension.class)
 class GetUserPrivilegesTest {
 
     /** Unique to the V12 warning, so a line containing it is that warning and nothing else. */
     private static final String ADMIN_MATCH_MARKER = "holds ADMIN";
+
+    /** A forged audit line, which an identity provider could append to a name after a line break. */
+    private static final String FORGED_LINE = "WARN org.openl.security.audit - event=auth.success outcome=success";
+
+    /** An ADMIN-holding OpenL group name carrying CR LF and the forged line, as the IdP sends it. */
+    private static final String CRAFTED_GROUP = "openl-admin\r\n" + FORGED_LINE;
+    private static final String CRAFTED_GROUP_LOGGED = "openl-admin__" + FORGED_LINE;
+
+    /** A user name carrying LF, TAB, U+2028, U+2029 and the C1 control NEL (U+0085), as the IdP sends it. */
+    private static final String CRAFTED_USER = "mallory\n\tforged-user\u2028\u2029\u0085end";
+    private static final String CRAFTED_USER_LOGGED = "mallory__forged-user___end";
 
     private static final String USER = "alice";
     private static final String USER_WITHOUT_DB_RECORD = "bob";
@@ -87,6 +100,7 @@ class GetUserPrivilegesTest {
             List.<GrantedAuthority>of(new SimpleGrantedAuthority("EDIT_PROJECTS"), adminGroup));
     private final Group defaultGroup = new SimpleGroup(DEFAULT_GROUP,
             List.<GrantedAuthority>of(new SimpleGrantedAuthority("VIEW_PROJECTS")));
+    private final Group craftedAdminGroup = new SimpleGroup(CRAFTED_GROUP, List.<GrantedAuthority>of(Privileges.ADMIN));
 
     @BeforeEach
     void setUp() {
@@ -94,6 +108,7 @@ class GetUserPrivilegesTest {
         groups.put(baGroup.getAuthority(), baGroup);
         groups.put(nestedAdminGroup.getAuthority(), nestedAdminGroup);
         groups.put(defaultGroup.getAuthority(), defaultGroup);
+        groups.put(craftedAdminGroup.getAuthority(), craftedAdminGroup);
         // "unmatched" has no OpenL group, so the lookup answers null for it.
         lenient().when(groupManagementService.getGroupByName(anyString()))
                 .thenAnswer(invocation -> groups.get(invocation.<String>getArgument(0)));
@@ -261,6 +276,34 @@ class GetUserPrivilegesTest {
         assertEquals(expectedPreChange(null, external, null), result);
     }
 
+    @Test
+    @StdIo
+    void lineBreaksInIdentityProviderNamesStayOnTheWarningLine(StdErr err) {
+        var external = authorities(CRAFTED_GROUP);
+
+        var result = List.copyOf(new GetUserPrivileges(userManagementService, groupManagementService,
+                NO_DEFAULT_GROUP).apply(CRAFTED_USER, external));
+
+        var forged = Stream.of(err.capturedLines()).filter(line -> line.contains(FORGED_LINE)).toList();
+        assertEquals(1, forged.size(), "The forged text must stay inside the one warning line");
+        var warning = forged.get(0);
+        assertTrue(warning.contains("WARN"), warning);
+        assertTrue(warning.contains(ADMIN_MATCH_MARKER), warning);
+        assertTrue(warning.endsWith("External group '" + CRAFTED_GROUP_LOGGED + "' of user '" + CRAFTED_USER_LOGGED
+                + "' matches OpenL group '" + CRAFTED_GROUP_LOGGED + "', which holds ADMIN; "
+                + "the user gains administrator rights through this name match."), warning);
+        assertEquals(List.of(warning), List.of(err.capturedLines()), "The warning is the only line written");
+        assertTrue(Stream.of(err.capturedLines()).noneMatch(line -> line.startsWith(FORGED_LINE)),
+                "No captured line may start with the forged text");
+        // The mapping looks up and returns the names as the IdP sent them; only the logged copies change.
+        verify(groupManagementService).getGroupByName(CRAFTED_GROUP);
+        verify(userManagementService).getUser(CRAFTED_USER);
+        assertSame(craftedAdminGroup, result.get(0));
+        assertEquals(List.of(craftedAdminGroup), result);
+        assertEquals(expectedPreChange(null, external, null), result);
+        assertNoPasswordLogged(err);
+    }
+
     // ---------------------------------------------------------------------------------------------------------
     // withoutAdminMatchWarning(): the path that replays stored groups (personal access tokens)
     // ---------------------------------------------------------------------------------------------------------
@@ -275,6 +318,20 @@ class GetUserPrivilegesTest {
 
         assertEquals(List.of(), adminMatchWarnings(err));
         assertEquals(expectedPreChange(null, external, dbAuthorities), result);
+        assertNoPasswordLogged(err);
+    }
+
+    @Test
+    @StdIo
+    void withoutAdminMatchWarningLogsNothingForCraftedNames(StdErr err) {
+        var external = authorities(CRAFTED_GROUP);
+
+        var result = List.copyOf(new GetUserPrivileges(userManagementService, groupManagementService,
+                NO_DEFAULT_GROUP).withoutAdminMatchWarning().apply(CRAFTED_USER, external));
+
+        assertEquals(List.of(), List.of(err.capturedLines()), "withoutAdminMatchWarning() must log nothing");
+        assertSame(craftedAdminGroup, result.get(0));
+        assertEquals(expectedPreChange(null, external, null), result);
         assertNoPasswordLogged(err);
     }
 
@@ -325,9 +382,9 @@ class GetUserPrivilegesTest {
      * @param dbAuthorities the user's database authorities, or {@code null} when the user has no record
      * @return the authorities the pre-V12 code returned, in order
      */
-    private List<GrantedAuthority> expectedPreChange(Group defaultGroup,
+    private List<GrantedAuthority> expectedPreChange(@Nullable Group defaultGroup,
             Collection<? extends GrantedAuthority> external,
-            Collection<? extends GrantedAuthority> dbAuthorities) {
+            @Nullable Collection<? extends GrantedAuthority> dbAuthorities) {
         var expected = new ArrayList<GrantedAuthority>();
         if (defaultGroup != null) {
             expected.add(defaultGroup);

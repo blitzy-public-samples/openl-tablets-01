@@ -43,6 +43,15 @@ import org.springframework.security.saml2.provider.service.authentication.Abstra
  */
 class RelayStateSaml2AuthenticationRequestRepositoryTest {
 
+    /**
+     * The required expiry, stated here so that a wrong production value fails the tests.
+     */
+    private static final Duration POLICY_TTL = Duration.ofMinutes(5);
+    /**
+     * The required cap, stated here so that a wrong production value fails the tests.
+     */
+    private static final int POLICY_CAP = 10_000;
+
     private static final int THREADS = 8;
     private static final int SAVES_PER_THREAD = 250;
     private static final long WAIT_SECONDS = 30;
@@ -105,12 +114,18 @@ class RelayStateSaml2AuthenticationRequestRepositoryTest {
     }
 
     @Test
+    void entriesLiveFiveMinutesAndTheStoreHoldsTenThousand() {
+        assertEquals(POLICY_TTL, RelayStateSaml2AuthenticationRequestRepository.TTL);
+        assertEquals(POLICY_CAP, RelayStateSaml2AuthenticationRequestRepository.MAX_ENTRIES);
+    }
+
+    @Test
     void entryExpiresExactlyAtTtl() {
         var authnRequest = authnRequest();
         var relayState = authnRequest.getRelayState();
         save(authnRequest);
 
-        clock.advance(RelayStateSaml2AuthenticationRequestRepository.TTL.minusMillis(1));
+        clock.advance(POLICY_TTL.minusMillis(1));
         assertSame(authnRequest, load(relayState), "The entry must be live just before the TTL elapses");
 
         clock.advance(Duration.ofMillis(1));
@@ -145,7 +160,7 @@ class RelayStateSaml2AuthenticationRequestRepositoryTest {
 
     @Test
     void evictsTheOldestEntryWhenTheStoreIsFull() {
-        int total = RelayStateSaml2AuthenticationRequestRepository.MAX_ENTRIES + 1;
+        int total = POLICY_CAP + 1;
         List<AbstractSaml2AuthenticationRequest> authnRequests = new ArrayList<>(total);
         for (int i = 0; i < total; i++) {
             authnRequests.add(authnRequest());
@@ -158,7 +173,7 @@ class RelayStateSaml2AuthenticationRequestRepositoryTest {
             save(authnRequest);
         }
 
-        assertEquals(RelayStateSaml2AuthenticationRequestRepository.MAX_ENTRIES, repository.size());
+        assertEquals(POLICY_CAP, repository.size());
         var oldest = authnRequests.get(0);
         var second = authnRequests.get(1);
         var newest = authnRequests.get(total - 1);
@@ -172,7 +187,7 @@ class RelayStateSaml2AuthenticationRequestRepositoryTest {
         var expired = List.of(authnRequest(), authnRequest(), authnRequest());
         expired.forEach(this::save);
 
-        clock.advance(RelayStateSaml2AuthenticationRequestRepository.TTL);
+        clock.advance(POLICY_TTL);
         var fresh = authnRequest();
         save(fresh);
 
@@ -202,14 +217,25 @@ class RelayStateSaml2AuthenticationRequestRepositoryTest {
     }
 
     @Test
-    void doesNotStoreAMissingAuthenticationRequest() {
-        var authnRequest = authnRequest();
-        save(authnRequest);
+    void savingANullRequestRemovesOnlyTheEntryOfTheRequestRelayState() {
+        var removed = authnRequest();
+        var kept = authnRequest();
+        save(removed);
+        save(kept);
+        var response = new MockHttpServletResponse();
 
-        repository.saveAuthenticationRequest(null, new MockHttpServletRequest(), new MockHttpServletResponse());
+        repository.saveAuthenticationRequest(null, requestWith(removed.getRelayState()), response);
 
+        assertNull(load(removed.getRelayState()), "Saving null must remove the entry of the request's RelayState");
+        assertSame(kept, load(kept.getRelayState()), "Saving null must not remove another entry");
         assertEquals(1, repository.size());
-        assertSame(authnRequest, load(authnRequest.getRelayState()));
+
+        repository.saveAuthenticationRequest(null, new MockHttpServletRequest(), response);
+        repository.saveAuthenticationRequest(null, requestWith(""), response);
+        repository.saveAuthenticationRequest(null, requestWith(UUID.randomUUID().toString()), response);
+
+        assertEquals(1, repository.size(), "Saving null without a matching RelayState must remove nothing");
+        assertSame(kept, load(kept.getRelayState()));
     }
 
     @Test
@@ -221,7 +247,125 @@ class RelayStateSaml2AuthenticationRequestRepositoryTest {
     }
 
     @Test
+    void removingAnEntryFreesItsSlot() {
+        var held = saveOneMillisecondApart(POLICY_CAP);
+        var oldest = held.get(0);
+        var second = held.get(1);
+        var third = held.get(2);
+        assertSame(oldest, remove(oldest.getRelayState()));
+
+        clock.advance(Duration.ofMillis(1));
+        var refill = authnRequest();
+        save(refill);
+
+        assertEquals(POLICY_CAP, repository.size());
+        assertSame(second, load(second.getRelayState()), "Saving into a freed slot must not evict");
+        assertSame(refill, load(refill.getRelayState()));
+
+        clock.advance(Duration.ofMillis(1));
+        var overflow = authnRequest();
+        save(overflow);
+
+        assertEquals(POLICY_CAP, repository.size(), "A removed entry must not stay in the eviction order");
+        assertNull(load(second.getRelayState()), "The oldest entry still held must be evicted");
+        assertSame(third, load(third.getRelayState()));
+        assertSame(refill, load(refill.getRelayState()));
+        assertSame(overflow, load(overflow.getRelayState()));
+    }
+
+    @Test
+    void savingAHeldRelayStateIntoAFullStoreDoesNotEvictAndMakesItTheNewest() {
+        var held = saveOneMillisecondApart(POLICY_CAP);
+        var oldest = held.get(0);
+        var second = held.get(1);
+        var third = held.get(2);
+
+        clock.advance(Duration.ofMillis(1));
+        var replacement = authnRequest(oldest.getRelayState());
+        save(replacement);
+
+        assertEquals(POLICY_CAP, repository.size());
+        assertSame(replacement, load(oldest.getRelayState()));
+        for (int i = 1; i < POLICY_CAP; i++) {
+            var authnRequest = held.get(i);
+            assertSame(authnRequest, load(authnRequest.getRelayState()), "Replacing an entry must not evict another");
+        }
+
+        clock.advance(Duration.ofMillis(1));
+        var overflow = authnRequest();
+        save(overflow);
+
+        assertEquals(POLICY_CAP, repository.size(), "A replaced entry must not stay in the eviction order");
+        assertNull(load(second.getRelayState()), "The oldest save must be evicted, not the replaced entry");
+        assertSame(replacement, load(oldest.getRelayState()));
+        assertSame(third, load(third.getRelayState()));
+        assertSame(overflow, load(overflow.getRelayState()));
+    }
+
+    @Test
     void concurrentSavesKeepEveryEntry() throws Exception {
+        var batches = batches();
+
+        saveConcurrently(batches);
+
+        assertEquals(THREADS * SAVES_PER_THREAD, repository.size());
+        for (var batch : batches) {
+            for (var authnRequest : batch) {
+                assertSame(authnRequest, load(authnRequest.getRelayState()));
+            }
+        }
+    }
+
+    @Test
+    void concurrentSavesIntoAFullStoreEvictTheOldestEntries() throws Exception {
+        var held = saveOneMillisecondApart(POLICY_CAP);
+        var batches = batches();
+        // The clock then stands still: every new entry is saved after every held one, so whatever the interleaving,
+        // each new save evicts the oldest held entry that is left.
+        clock.advance(Duration.ofMillis(1));
+
+        saveConcurrently(batches);
+
+        int evicted = THREADS * SAVES_PER_THREAD;
+        assertEquals(POLICY_CAP, repository.size(), "Concurrent saves must not exceed the cap");
+        for (int i = 0; i < evicted; i++) {
+            assertNull(load(held.get(i).getRelayState()), "The oldest entries must be evicted");
+        }
+        for (int i = evicted; i < POLICY_CAP; i++) {
+            var authnRequest = held.get(i);
+            assertSame(authnRequest, load(authnRequest.getRelayState()), "Newer held entries must be kept");
+        }
+        for (var batch : batches) {
+            for (var authnRequest : batch) {
+                assertSame(authnRequest, load(authnRequest.getRelayState()), "Every new entry must be kept");
+            }
+        }
+    }
+
+    /**
+     * Saves new AuthnRequests one millisecond apart, so each has a distinct save time. Ten thousand saves span about
+     * ten seconds, far below the TTL, so nothing expires and only the cap can remove an entry.
+     *
+     * @param count the number of AuthnRequests to save
+     * @return the saved AuthnRequests, oldest first
+     */
+    private List<AbstractSaml2AuthenticationRequest> saveOneMillisecondApart(int count) {
+        List<AbstractSaml2AuthenticationRequest> saved = new ArrayList<>(count);
+        for (int i = 0; i < count; i++) {
+            var authnRequest = authnRequest();
+            clock.advance(Duration.ofMillis(1));
+            save(authnRequest);
+            saved.add(authnRequest);
+        }
+        return saved;
+    }
+
+    /**
+     * Creates the AuthnRequests of the concurrency tests on the test thread, one batch per worker.
+     *
+     * @return {@link #THREADS} batches of {@link #SAVES_PER_THREAD} AuthnRequests
+     */
+    private static List<List<AbstractSaml2AuthenticationRequest>> batches() {
         List<List<AbstractSaml2AuthenticationRequest>> batches = new ArrayList<>(THREADS);
         for (int t = 0; t < THREADS; t++) {
             List<AbstractSaml2AuthenticationRequest> batch = new ArrayList<>(SAVES_PER_THREAD);
@@ -230,11 +374,20 @@ class RelayStateSaml2AuthenticationRequestRepositoryTest {
             }
             batches.add(batch);
         }
+        return batches;
+    }
 
-        ExecutorService executor = Executors.newFixedThreadPool(THREADS);
+    /**
+     * Saves each batch on its own worker thread, with every worker released at once, and fails on any worker failure.
+     *
+     * @param batches the AuthnRequests of each worker
+     * @throws Exception if a worker fails, is interrupted or does not finish in time
+     */
+    private void saveConcurrently(List<List<AbstractSaml2AuthenticationRequest>> batches) throws Exception {
+        ExecutorService executor = Executors.newFixedThreadPool(batches.size());
         var start = new CountDownLatch(1);
-        var done = new CountDownLatch(THREADS);
-        List<Future<?>> workers = new ArrayList<>(THREADS);
+        var done = new CountDownLatch(batches.size());
+        List<Future<?>> workers = new ArrayList<>(batches.size());
         try {
             for (var batch : batches) {
                 workers.add(executor.submit(() -> {
@@ -264,13 +417,6 @@ class RelayStateSaml2AuthenticationRequestRepositoryTest {
                 executor.shutdownNow();
             }
         }
-
-        assertEquals(THREADS * SAVES_PER_THREAD, repository.size());
-        for (var batch : batches) {
-            for (var authnRequest : batch) {
-                assertSame(authnRequest, load(authnRequest.getRelayState()));
-            }
-        }
     }
 
     private void save(AbstractSaml2AuthenticationRequest authnRequest) {
@@ -296,8 +442,8 @@ class RelayStateSaml2AuthenticationRequestRepositoryTest {
     }
 
     private static AbstractSaml2AuthenticationRequest authnRequest(String relayState) {
-        // Stub-only mocks record no invocations, which keeps the 10,001 mocks of the cap test small and makes the
-        // mocks safe to read from the worker threads of the concurrency test.
+        // Stub-only mocks record no invocations, which keeps the ten thousand or more mocks of each cap test small and
+        // makes the mocks safe to read from the worker threads of the concurrency tests.
         var authnRequest = mock(AbstractSaml2AuthenticationRequest.class, withSettings().stubOnly());
         when(authnRequest.getRelayState()).thenReturn(relayState);
         return authnRequest;

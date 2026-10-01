@@ -149,13 +149,19 @@ public class JdbcMutableAclService extends org.springframework.security.acls.jdb
         if (sidId == null) {
             return;
         }
-        jdbcOperations.update(DELETE_ENTRIES_BY_SID_QUERY, sidId);
+        // V11: report the SID removal, and a failed one as a failure; the exception is rethrown unchanged
+        try {
+            jdbcOperations.update(DELETE_ENTRIES_BY_SID_QUERY, sidId);
 
-        var newOwnerSid = createOrRetrieveSidPrimaryKey(relevantSystemWideSid, true);
-        jdbcOperations.update(UPDATE_OWNER_QUERY, newOwnerSid, sidId);
-        jdbcOperations.update(DELETE_SID_QUERY, sidId);
-        aclCache.clearCache();
-        AclChangeListener.record(aclChangeListener, "deleteSid", "sid", false); // V11: report the SID removal
+            var newOwnerSid = createOrRetrieveSidPrimaryKey(relevantSystemWideSid, true);
+            jdbcOperations.update(UPDATE_OWNER_QUERY, newOwnerSid, sidId);
+            jdbcOperations.update(DELETE_SID_QUERY, sidId);
+            aclCache.clearCache();
+            AclChangeListener.record(aclChangeListener, "deleteSid", "sid", false);
+        } catch (RuntimeException e) {
+            AclChangeListener.record(aclChangeListener, "deleteSid", "sid", true);
+            throw e;
+        }
     }
 
     public void updateSid(Sid sid, String newSidName) {
@@ -173,9 +179,15 @@ public class JdbcMutableAclService extends org.springframework.security.acls.jdb
             case null, default -> throw new IllegalStateException("Sid type is not supported");
         }
 
-        jdbcOperations.update(UPDATE_SID_QUERY, newSidName, currentSidName, isPrincipal);
-        aclCache.clearCache();
-        AclChangeListener.record(aclChangeListener, "updateSid", "sid", false); // V11: report the SID rename
+        // V11: report the SID rename, and a failed one as a failure; the exception is rethrown unchanged
+        try {
+            jdbcOperations.update(UPDATE_SID_QUERY, newSidName, currentSidName, isPrincipal);
+            aclCache.clearCache();
+            AclChangeListener.record(aclChangeListener, "updateSid", "sid", false);
+        } catch (RuntimeException e) {
+            AclChangeListener.record(aclChangeListener, "updateSid", "sid", true);
+            throw e;
+        }
     }
 
     // V11: report the created ACL to the listener; the parent's exception is rethrown unchanged

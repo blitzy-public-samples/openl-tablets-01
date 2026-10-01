@@ -29,7 +29,9 @@ import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.security.crypto.password.PasswordEncoder;
 
 import org.openl.rules.security.standalone.persistence.PersonalAccessToken;
+import org.openl.studio.common.ExceptionMappingService;
 import org.openl.studio.common.exception.BadRequestException;
+import org.openl.studio.config.ValidationConfiguration;
 import org.openl.studio.security.pat.model.PatToken;
 import org.openl.studio.users.service.pat.PersonalAccessTokenService;
 
@@ -415,6 +417,27 @@ class PatGeneratorServiceImplTest {
         assertEquals("openl.error.400.pat.expires-at.max.message", ex.getErrorCode());
         assertEquals("30", String.valueOf(ex.getArgs()[0]));
         verify(crudService, times(2)).save(any(PersonalAccessToken.class));
+    }
+
+    // V8: a maximum of 1000 days or more reaches the 400 message without digit grouping ("1000", not "1,000")
+    @Test
+    void testGenerateToken_BeyondMaximumOf1000Days_MessageHasNoDigitGrouping() {
+        // Arrange
+        var service = newService(Duration.ofDays(90), Duration.ofDays(1000));
+        var tooLate = FIXED_TIME.plus(Duration.ofDays(1000)).plusSeconds(1);
+
+        // Act
+        var ex = assertThrows(BadRequestException.class,
+                () -> service.generateToken("jdoe", "My Token", tooLate));
+
+        // Assert - resolved as the REST layer resolves it: the production message source, with Locale.US
+        assertEquals("openl.error.400.pat.expires-at.max.message", ex.getErrorCode());
+        assertEquals("1000", ex.getArgs()[0]);
+        var error = new ExceptionMappingService(new ValidationConfiguration().validationMessageSource())
+                .processException(ex);
+        assertEquals("openl.error.400.pat.expires-at.max.message", error.code);
+        assertEquals("The expiration date must be within 1000 days.", error.message);
+        verify(crudService, never()).save(any(PersonalAccessToken.class));
     }
 
     // V8: a null, zero or negative lifetime, or a default above the maximum, fails at construction

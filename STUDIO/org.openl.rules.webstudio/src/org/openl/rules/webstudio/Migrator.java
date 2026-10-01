@@ -5,6 +5,7 @@ import java.nio.file.FileVisitOption;
 import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.SimpleFileVisitor;
 import java.nio.file.StandardOpenOption;
@@ -149,7 +150,9 @@ public class Migrator {
         }
         // V1: validate the user name before it is resolved as a path segment.
         if (!isValidWorkspaceFolderName(username)) {
-            log.warn("The single-user name '{}' resolves outside the workspace root; the move is skipped.", username);
+            // V1: the rejected name is logged in its printable form.
+            log.warn("The single-user name '{}' is not a valid workspace folder name; the move is skipped.",
+                    printable(username));
             return;
         }
         var workspacesRoot = Path.of(workspacePath).normalize();
@@ -165,8 +168,18 @@ public class Migrator {
         if (!Files.isDirectory(workspacesRoot)) {
             return; // nothing to migrate, as the no-legacy return below
         }
-        if (!isOwnWorkspaceFolder(workspacesRoot, username)) {
-            log.warn("The single-user name '{}' resolves outside the workspace root; the move is skipped.", username);
+        // V1: a folder that leads elsewhere and a folder that cannot be resolved (a link loop, a denied access) are
+        // both skipped, each with its own WARN that names the user, and the cause, in their printable form.
+        try {
+            if (!isOwnWorkspaceFolder(workspacesRoot, username)) {
+                log.warn("The single-user name '{}' resolves outside the workspace root; the move is skipped.",
+                        printable(username));
+                return;
+            }
+        } catch (IOException | IllegalArgumentException e) {
+            log.warn("The workspace folder of the single-user name '{}' cannot be resolved ({}); the move is skipped.",
+                    printable(username),
+                    printable(e.toString()));
             return;
         }
         if (!Files.isDirectory(legacy) || Files.exists(target)) {
@@ -210,31 +223,57 @@ public class Migrator {
      * <p>The configured root is the anchor: links in its own path are trusted and followed. The user's folder is the
      * boundary: no existing link from the root down to it may lead elsewhere, neither outside the root nor into
      * another user's folder. The part of the folder that does not exist yet cannot contain a link, so the deepest
-     * existing ancestor is resolved and the missing tail re-appended. A dangling link counts as existing and fails
-     * the resolution, which rejects it.
+     * existing ancestor is resolved and the missing tail re-appended. A dangling link counts as existing and leads
+     * to a missing location, which rejects it.
      *
      * @param workspacesRoot an existing workspace root
      * @param username a user name that passed {@link #isValidWorkspaceFolderName(String)}
      * @return {@code true} if the user's folder resolves to its own lexical place under the real root
+     * @throws IOException if the root or the user's folder cannot be resolved, for example because of a link loop or
+     *         a denied access
      */
-    private static boolean isOwnWorkspaceFolder(Path workspacesRoot, String username) {
-        try {
-            var anchorReal = workspacesRoot.toRealPath();
-            // Computed lexically, so a boundary that is itself a link is caught by the walk below.
-            var boundary = anchorReal.resolve(username).normalize();
-            var existing = boundary;
-            while (existing != null && !Files.exists(existing, LinkOption.NOFOLLOW_LINKS)) {
-                existing = existing.getParent();
-            }
-            if (existing == null) {
-                // Defensive: the walk stops at the real root at the latest, which exists unless removed meanwhile.
-                return false;
-            }
-            var walked = existing.toRealPath().resolve(existing.relativize(boundary));
-            return walked.startsWith(boundary);
-        } catch (IOException | IllegalArgumentException e) {
+    private static boolean isOwnWorkspaceFolder(Path workspacesRoot, String username) throws IOException {
+        var anchorReal = workspacesRoot.toRealPath();
+        // Computed lexically, so a boundary that is itself a link is caught by the walk below.
+        var boundary = anchorReal.resolve(username).normalize();
+        var existing = boundary;
+        while (existing != null && !Files.exists(existing, LinkOption.NOFOLLOW_LINKS)) {
+            existing = existing.getParent();
+        }
+        if (existing == null) {
+            // Defensive: the walk stops at the real root at the latest, which exists unless removed meanwhile.
             return false;
         }
+        // V1: only a missing location is a rejection here; any other resolution failure reaches the caller.
+        Path existingReal;
+        try {
+            existingReal = existing.toRealPath();
+        } catch (NoSuchFileException e) {
+            // V1: a dangling link leads to a missing location, which is rejected as an escape.
+            return false;
+        }
+        var walked = existingReal.resolve(existing.relativize(boundary));
+        return walked.startsWith(boundary);
+    }
+
+    /**
+     * V1 surface A (workspace directory) log form of a text that holds a single-user name, such as the name itself or
+     * the description of an exception whose message holds the name's path: every ISO control character and the
+     * Unicode line and paragraph separators, which some log viewers render as a line break, are replaced with
+     * {@code _}, so the text can neither break its log line nor forge another one.
+     *
+     * @param text the text to log; the callers pass a name already checked to be non-blank or an exception
+     *        description, and {@code null} is written as {@code null}
+     * @return the text with every such character replaced
+     */
+    private static String printable(@Nullable String text) {
+        var name = String.valueOf(text);
+        var logged = new StringBuilder(name.length());
+        for (var i = 0; i < name.length(); i++) {
+            var c = name.charAt(i);
+            logged.append(Character.isISOControl(c) || c == '\u2028' || c == '\u2029' ? '_' : c);
+        }
+        return logged.toString();
     }
 
     /**

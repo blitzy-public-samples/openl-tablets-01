@@ -35,11 +35,17 @@ import org.springframework.web.context.request.ServletRequestAttributes;
  * outcomes. Passwords, credentials, bearer tokens, token secrets, token names, SIDs and ACL object identifiers
  * are never logged. The name of a failed authentication attempt is logged only for a user name and password
  * attempt, because the name of any other attempt, such as a bearer, SAML or token attempt, can be the credential
- * itself. Every value is sanitized, so a crafted user name can neither break the line nor forge another event.
+ * itself. Every value is sanitized, so a crafted user name or address can neither break the line nor forge another
+ * event or pair: the quoted user value keeps no control character, quote, backslash or line separator, and an
+ * unquoted value, such as the address, additionally keeps no whitespace, Unicode space or {@code =}. A value
+ * longer than 256 characters is cut there and marked with {@code ...}, so a single request cannot write an
+ * unbounded line.
  *
- * <p>The {@code ip} value is the remote address the servlet container reports. The {@code ForwardedHeaderFilter}
- * declared in {@code web.xml} rewrites that address from the {@code X-Forwarded-*} headers of any client, so the
- * value is only as trustworthy as the proxy in front of OpenL Studio. That trust model is left as it is.
+ * <p>The {@code ip} value is the remote address the servlet container reports for the connection. Behind a reverse
+ * proxy it is the proxy's address, unless the container itself is configured to take the client address from a
+ * forwarded header, as Tomcat's {@code RemoteIpValve} or Jetty's {@code ForwardedRequestCustomizer} do. The
+ * {@code ForwardedHeaderFilter} declared in {@code web.xml} rewrites only the scheme, host, port and context prefix
+ * of a request, never its remote address.
  *
  * <p>Writing an event never fails its caller: a problem while building a line is reported with a fixed
  * message and swallowed, so auditing cannot break a login, a token request or an ACL transaction. The class is
@@ -81,6 +87,12 @@ public final class SecurityAuditLog {
      * which some log viewers render as a line break.
      */
     private static final String UNSAFE_CHARACTERS = "\"" + "\\" + "\u2028" + "\u2029";
+
+    /** The number of characters of a value that is written; a longer value is cut there and marked. */
+    private static final int MAX_VALUE_LENGTH = 256;
+
+    /** Appended to a value that was cut at {@link #MAX_VALUE_LENGTH} characters. */
+    private static final String TRUNCATION_MARKER = "...";
 
     private SecurityAuditLog() {
     }
@@ -230,19 +242,20 @@ public final class SecurityAuditLog {
                                       @Nullable String outcome,
                                       @Nullable String user,
                                       @Nullable String ip) {
+        // V11: only the user value is quoted; the outcome and the address are unquoted, so they are kept one token.
         return new StringBuilder(160).append("event=")
                 .append(event)
                 .append(" outcome=")
-                .append(clean(outcome))
+                .append(cleanToken(outcome))
                 .append(" user=\"")
                 .append(clean(user))
                 .append("\" ip=")
-                .append(clean(ip));
+                .append(cleanToken(ip));
     }
 
-    /** Appends one sanitized {@code key=value} pair. */
+    /** Appends one sanitized {@code key=value} pair, whose unquoted value is kept one token. */
     private static StringBuilder pair(StringBuilder line, String key, @Nullable String value) {
-        return line.append(' ').append(key).append('=').append(clean(value));
+        return line.append(' ').append(key).append('=').append(cleanToken(value));
     }
 
     /** The simple class name of an authentication attempt, which is code-defined and never a credential. */
@@ -290,7 +303,7 @@ public final class SecurityAuditLog {
         return request == null ? null : request.getRemoteAddr();
     }
 
-    /** Joins the sanitized elements of a set with commas, in the set's own order. */
+    /** Joins the sanitized elements of a set with commas, in the set's own order, as one unquoted token. */
     private static String join(@Nullable SortedSet<String> values) {
         if (values == null || values.isEmpty()) {
             return NONE;
@@ -300,27 +313,66 @@ public final class SecurityAuditLog {
             if (!joined.isEmpty()) {
                 joined.append(',');
             }
-            joined.append(clean(value));
+            joined.append(cleanToken(value));
         }
         return joined.toString();
     }
 
     /**
-     * Makes a value safe for one audit line: every ISO control character (including CR, LF and TAB), the Unicode
-     * line and paragraph separators, the quote and the backslash are replaced with {@code _}.
+     * Makes the quoted user value safe for one audit line: every ISO control character (including CR, LF and TAB),
+     * the Unicode line and paragraph separators, the quote and the backslash are replaced with {@code _}. Spaces
+     * and {@code =} are kept, because they cannot leave the quotes. A long value is cut as
+     * {@link #sanitize(String, boolean)} describes.
      *
      * @return the sanitized value, or {@code -} when the value is {@code null} or empty
      */
     private static String clean(@Nullable String value) {
+        return sanitize(value, false);
+    }
+
+    /**
+     * Makes an unquoted value, such as the outcome, the address or the value of a detail pair, safe for one audit
+     * line: besides the characters {@link #clean(String)} replaces, every whitespace or space character and every
+     * {@code =} is replaced with {@code _}, so the value stays one token and cannot add a pair to the line. A long
+     * value is cut as {@link #sanitize(String, boolean)} describes.
+     *
+     * @return the sanitized value, or {@code -} when the value is {@code null} or empty
+     */
+    private static String cleanToken(@Nullable String value) {
+        return sanitize(value, true);
+    }
+
+    /**
+     * Sanitizes a value as {@link #clean(String)} does, or as {@link #cleanToken(String)} does for a token. A value
+     * longer than {@link #MAX_VALUE_LENGTH} characters is cut there, one character earlier when the cut would split
+     * a surrogate pair, and {@link #TRUNCATION_MARKER} is appended.
+     */
+    private static String sanitize(@Nullable String value, boolean token) {
         if (value == null || value.isEmpty()) {
             return NONE;
         }
-        var cleaned = new StringBuilder(value.length());
-        for (var i = 0; i < value.length(); i++) {
+        // V11: the cut keeps a value that a request supplies, such as a user name, from making a line unbounded.
+        var cut = value.length() > MAX_VALUE_LENGTH;
+        var kept = cut ? MAX_VALUE_LENGTH : value.length();
+        if (cut && Character.isHighSurrogate(value.charAt(kept - 1))) {
+            kept--;
+        }
+        var cleaned = new StringBuilder(kept + (cut ? TRUNCATION_MARKER.length() : 0));
+        for (var i = 0; i < kept; i++) {
             var c = value.charAt(i);
-            cleaned.append(Character.isISOControl(c) || UNSAFE_CHARACTERS.indexOf(c) >= 0 ? REPLACEMENT : c);
+            cleaned.append(isUnsafe(c, token) ? REPLACEMENT : c);
+        }
+        if (cut) {
+            cleaned.append(TRUNCATION_MARKER);
         }
         return cleaned.toString();
+    }
+
+    /** Whether a character must be replaced in a quoted value, or, when {@code token} is set, in an unquoted one. */
+    private static boolean isUnsafe(char c, boolean token) {
+        return Character.isISOControl(c)
+                || UNSAFE_CHARACTERS.indexOf(c) >= 0
+                || (token && (Character.isWhitespace(c) || Character.isSpaceChar(c) || c == '='));
     }
 
     /** Writes one finished line, at WARN or at INFO. */

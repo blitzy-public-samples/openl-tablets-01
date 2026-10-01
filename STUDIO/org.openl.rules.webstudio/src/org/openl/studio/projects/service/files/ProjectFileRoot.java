@@ -1,15 +1,17 @@
 package org.openl.studio.projects.service.files;
 
 import java.io.IOException;
+import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
 import java.util.HashMap;
 import java.util.List;
-import java.util.Optional;
 import java.util.function.Supplier;
 
 import lombok.AccessLevel;
 import lombok.Getter;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.jspecify.annotations.Nullable;
 import org.springframework.security.acls.domain.BasePermission;
 
 import org.openl.rules.common.ProjectException;
@@ -47,6 +49,8 @@ import org.openl.util.StringUtils;
  * @author Yury Molchan
  */
 @RequiredArgsConstructor
+// V1: the logger traces a project folder boundary that cannot be resolved.
+@Slf4j
 public class ProjectFileRoot implements FileRoot {
 
     @Getter(AccessLevel.PACKAGE)
@@ -61,14 +65,27 @@ public class ProjectFileRoot implements FileRoot {
     private final DesignTimeRepository designTimeRepository;
     // V1: the project folder on disk that contains() keeps paths inside, resolved once per mount.
     /**
-     * Folder of the project on disk, resolved on first use from {@link FileRoot#projectBoundary(AProject)}.
-     * Empty when the project is not stored in a local directory. Not final, so the generated
-     * constructor keeps its six parameters.
+     * Folder of the project on disk, a lazily resolved cache that lives as long as the mount.
+     *
+     * <p>{@link #contains(String)} resolves it on its first call from
+     * {@link FileRoot#projectBoundary(AProject)} and then sets {@link #boundaryResolved}. After that,
+     * {@code null} means the project is not stored in a local directory, so every path is accepted.
+     * When resolving it fails on an unparsable project path or a denied lookup,
+     * {@link #boundaryUnresolvable} is set as well, and every path is rejected without resolving it
+     * again.
      *
      * <p>No synchronization is needed: {@link ProjectFileRootFactory} builds a new mount for each
      * request, so the mount is never shared between threads.
      */
-    private Optional<Path> boundary;
+    private @Nullable Path boundary;
+    /**
+     * Whether {@link #boundary} has been resolved, or has been found unresolvable.
+     */
+    private boolean boundaryResolved;
+    /**
+     * Whether the project folder could not be resolved, so the mount contains no path.
+     */
+    private boolean boundaryUnresolvable;
 
     @Override
     public AProjectFolder readFolder(String version) {
@@ -255,15 +272,21 @@ public class ProjectFileRoot implements FileRoot {
      */
     @Override
     public boolean contains(String path) {
-        try {
-            if (boundary == null) {
-                boundary = FileRoot.projectBoundary(project);
+        if (!boundaryResolved) {
+            // V1: resolved once per mount. An unparsable project path or a denied lookup is remembered,
+            // so the mount fails closed from then on; any other failure propagates and is retried.
+            try {
+                boundary = FileRoot.projectBoundary(project).orElse(null);
+            } catch (IllegalArgumentException | SecurityException e) {
+                boundaryUnresolvable = true;
+                log.debug("Project folder boundary not resolved, every path is rejected: {}{}", e.getClass().getName(),
+                        e instanceof InvalidPathException invalid ? " (" + invalid.getReason() + ")" : "");
             }
-            return boundary.isEmpty() || FileRoot.resolvesInside(boundary.get(), FilePaths.trimSlashes(path));
-        } catch (RuntimeException e) {
-            // V1: fail closed; the boundary is not cached, so the next call resolves it again.
-            return false;
+            boundaryResolved = true;
         }
+        var folder = boundary;
+        return !boundaryUnresolvable
+                && (folder == null || FileRoot.resolvesInside(folder, FilePaths.trimSlashes(path)));
     }
 
     /**

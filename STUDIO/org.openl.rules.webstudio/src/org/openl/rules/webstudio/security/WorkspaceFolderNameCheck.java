@@ -15,8 +15,10 @@ import org.openl.rules.webstudio.util.NameChecker;
  * {@code repository-beans.xml}. The workspace module cannot call {@link NameChecker} itself: the module that holds
  * {@code NameChecker} depends on the workspace module, so a direct call would create a module cycle.
  *
- * <p>Only the workspace directory surface uses this check. The other path surfaces keep guards of their own,
- * because V1 path checks are deliberately not shared between surfaces.
+ * <p>Its single consumer is {@code LocalWorkspaceManagerImpl.userDir}, which runs it after
+ * {@code FolderHelper.isSafeFolderName}, the check that the folder's parent is the workspace root and
+ * {@code Repository.validatePath}, and before the real-path containment check of the user's folder. A rejection
+ * becomes the {@code IllegalArgumentException} that {@code userDir} throws for every invalid user id.
  *
  * <p>A user id is accepted only if {@link NameChecker#validatePath(String)} accepts it. That rejects the characters
  * {@code \ : ; < > ? * % ' " | [ ]}, control characters, a doubled separator, a leading space, a trailing dot or

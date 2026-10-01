@@ -35,6 +35,7 @@ import com.icegreen.greenmail.store.FolderException;
 import com.icegreen.greenmail.util.GreenMail;
 import com.icegreen.greenmail.util.ServerSetup;
 import org.h2.tools.Server;
+import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
@@ -57,7 +58,7 @@ class UsersRestTest {
     private static Connection h2Connection;
     private static final String DB_DUMP_FILE = "target/dump-%s.sql".formatted(System.currentTimeMillis());
 
-    // V7: generated at runtime (AAP 0.8.3); alphanumeric, so fixtures embed the values unescaped
+    // V7: generated per run, so no literal credential is kept; alphanumeric, so fixtures embed the values unescaped
     private static final SecureRandom RANDOM = new SecureRandom();
     private static final String ALPHANUMERIC = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
     private static final int SECRET_LENGTH = 16;
@@ -77,7 +78,7 @@ class UsersRestTest {
                 .withInitParam("db.url", dbUrl)
                 .start();
 
-        // V7: credentials are generated or derived at runtime (AAP 0.8.3)
+        // V7: generated or derived per run, so neither this class nor its fixtures keeps a literal credential
         String adminName = administratorName();
         adminAuth = basic(adminName, adminName); // AdminUsers seeds each administrator with its name as password
         String jsmithPassword1 = randomSecret("jsmith", "jdoe", adminName);
@@ -107,13 +108,18 @@ class UsersRestTest {
     @AfterAll
     static void tearDown() throws Exception {
         // V7: after shutdown, fail if a generated secret was saved with a mismatching response
+        Throwable failure = null;
         try {
             client.close();
             h2Connection.close();
             h2Server.stop();
             smtpServer.stop();
+        } catch (Throwable t) {
+            // V7: the teardown failure is recorded so that a scan error is suppressed onto it instead of replacing it
+            failure = t;
+            throw t;
         } finally {
-            assertNoGeneratedSecretsSaved();
+            assertNoGeneratedSecretsSaved(failure);
         }
     }
 
@@ -191,7 +197,8 @@ class UsersRestTest {
         client.send("users-service/mail/studio-settings");
 
         // V7: the administrator header is derived at runtime
-        var mailConfig = client.getForObject("/rest/admin/settings/mail", MailConfigResponse.class, 200, "Authorization", adminAuth);
+        var mailConfig = client.getForObject("/rest/admin/settings/mail", MailConfigResponse.class, 200,
+                "Authorization", adminAuth);
         assertTrue(mailConfig.password.secret); // password must not be exposed to the user due to security reasons
         assertEquals("username@email", mailConfig.username);
         assertEquals(mailUrl, mailConfig.url);
@@ -281,7 +288,8 @@ class UsersRestTest {
 
     // V7: fails, naming only variables and counts, when a saved mismatching response holds a generated secret.
     // ADMIN_AUTH_TOCKEN is left out: it is derived, not secret, and unedited fixtures still carry it literally.
-    private static void assertNoGeneratedSecretsSaved() {
+    // A scan error is suppressed onto the teardown failure, and thrown only when the teardown itself passed.
+    private static void assertNoGeneratedSecretsSaved(@Nullable Throwable failure) {
         Path root = Path.of(System.getProperty("server.responses", "target/responses"));
         if (!Files.isDirectory(root)) {
             return;
@@ -306,7 +314,12 @@ class UsersRestTest {
         try (Stream<Path> walk = Files.walk(root)) {
             files = walk.filter(Files::isRegularFile).toList();
         } catch (IOException e) {
-            throw new UncheckedIOException(e);
+            scanFailed(new UncheckedIOException(e), failure);
+            return;
+        } catch (UncheckedIOException e) {
+            // The directory stream reports a failed traversal step unchecked
+            scanFailed(e, failure);
+            return;
         }
         Map<String, Integer> counts = new LinkedHashMap<>();
         for (Path file : files) {
@@ -315,7 +328,8 @@ class UsersRestTest {
                 // ISO-8859-1 maps every byte, and the generated values are ASCII
                 content = new String(Files.readAllBytes(file), StandardCharsets.ISO_8859_1);
             } catch (IOException e) {
-                throw new UncheckedIOException(e);
+                scanFailed(new UncheckedIOException(e), failure);
+                return;
             }
             secrets.forEach((name, value) -> {
                 if (value != null && !value.isEmpty() && content.contains(value)) {
@@ -326,8 +340,21 @@ class UsersRestTest {
         if (!counts.isEmpty()) {
             List<String> findings = new ArrayList<>();
             counts.forEach((name, count) -> findings.add(name + " found in " + count + " saved response file(s)"));
-            fail(String.join("; ", findings));
+            String message = String.join("; ", findings);
+            if (failure == null) {
+                fail(message);
+            } else {
+                failure.addSuppressed(new AssertionError(message));
+            }
         }
+    }
+
+    // V7: a scan I/O error is suppressed onto the teardown failure, and thrown only when the teardown itself passed
+    private static void scanFailed(UncheckedIOException e, @Nullable Throwable failure) {
+        if (failure == null) {
+            throw e;
+        }
+        failure.addSuppressed(e);
     }
 
     public static class MailConfigRequest {

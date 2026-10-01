@@ -61,7 +61,8 @@ public class PatGeneratorServiceImpl implements PatGeneratorService {
         this.clock = clock;
         // V8: a misconfigured lifetime fails at startup instead of producing unbounded or already-expired tokens
         if (defaultLifetime == null || defaultLifetime.isZero() || defaultLifetime.isNegative()) {
-            throw new IllegalArgumentException("security.pat.default-expiration-days must be a positive number of days");
+            throw new IllegalArgumentException(
+                    "security.pat.default-expiration-days must be a positive number of days");
         }
         if (maxLifetime == null || maxLifetime.isZero() || maxLifetime.isNegative()) {
             throw new IllegalArgumentException("security.pat.max-expiration-days must be a positive number of days");
@@ -101,7 +102,9 @@ public class PatGeneratorServiceImpl implements PatGeneratorService {
         Instant effectiveExpiresAt = expiresAt != null ? expiresAt : now.plus(defaultLifetime);
         // V8: reject an expiration beyond the configured maximum lifetime (exactly now + max is accepted)
         if (effectiveExpiresAt.isAfter(now.plus(maxLifetime))) {
-            throw new BadRequestException("pat.expires-at.max.message", new Object[]{maxLifetime.toDays()});
+            // V8: a plain string keeps MessageFormat from grouping digits ("1000 days", not "1,000 days")
+            throw new BadRequestException("pat.expires-at.max.message",
+                    new Object[]{String.valueOf(maxLifetime.toDays())});
         }
 
         // generate unique publicId (very low collision, but handle it)

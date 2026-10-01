@@ -22,7 +22,8 @@ import org.openl.itest.core.JettyServer;
 class WebStudioTest {
 
     // V7: the local users the acl fixtures create; each gets a generated password that meets the policy
-    private static final String[] USERS = {"EPBDS_14474", "EPBDS_14584", "EPBDS_14670", "jsmith", "jdoe", "jane.doe", "EPBDS_16253"};
+    private static final String[] USERS = {"EPBDS_14474", "EPBDS_14584", "EPBDS_14670", "jsmith", "jdoe",
+            "jane.doe", "EPBDS_16253"};
     private static final String ADMIN_ENV = "ADMIN_AUTH_TOCKEN";
     private static final String BASIC_PREFIX = "Basic ";
     private static final String PASSWORD_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";

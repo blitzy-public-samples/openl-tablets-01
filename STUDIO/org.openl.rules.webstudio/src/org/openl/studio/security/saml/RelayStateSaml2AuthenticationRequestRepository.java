@@ -4,8 +4,9 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Comparator;
-import java.util.Map;
+import java.util.NavigableSet;
 import java.util.Objects;
+import java.util.TreeSet;
 import java.util.concurrent.ConcurrentHashMap;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
@@ -33,12 +34,15 @@ import org.springframework.security.saml2.provider.service.web.Saml2Authenticati
  * <p>
  * Entries expire {@link #TTL} after they are saved. The store holds at most {@link #MAX_ENTRIES} entries: expired
  * entries are purged on each save, and the entry with the oldest save time is evicted when the store is still full.
- * Saves are serialized so the cap holds under concurrency; loads and removals are lock-free, and every single-key
- * update is atomic. Spring's {@code CacheSaml2AuthenticationRequestRepository} is not used because it is unbounded
- * and rejects a request without {@code RelayState}.
+ * Any visitor, anonymous ones included, triggers a save by starting a SAML login, so a save never scans the store:
+ * an index orders the entries by save time. Saves and removals are serialized on one lock, which keeps the cap and
+ * the index exact under concurrency, and each costs O(log n) plus the expired entries it purges. Loads are
+ * lock-free, and every single-key update is atomic. Spring's {@code CacheSaml2AuthenticationRequestRepository} is
+ * not used because it is unbounded and rejects a request without {@code RelayState}.
  * </p>
  */
-public final class RelayStateSaml2AuthenticationRequestRepository implements Saml2AuthenticationRequestRepository<AbstractSaml2AuthenticationRequest> {
+public final class RelayStateSaml2AuthenticationRequestRepository
+        implements Saml2AuthenticationRequestRepository<AbstractSaml2AuthenticationRequest> {
 
     /**
      * How long a saved AuthnRequest stays usable. An entry is live strictly before this duration has elapsed.
@@ -50,9 +54,27 @@ public final class RelayStateSaml2AuthenticationRequestRepository implements Sam
      */
     static final int MAX_ENTRIES = 10_000;
 
+    /**
+     * Orders entries from the oldest save to the newest. Every entry lives for the same {@link #TTL}, so expiry order
+     * is save order; the unique sequence orders entries saved at the same instant and keeps distinct entries apart.
+     */
+    private static final Comparator<Entry> SAVE_ORDER = Comparator.comparing(Entry::expiresAt)
+            .thenComparingLong(Entry::sequence);
+
     private final Clock clock;
     private final ConcurrentHashMap<String, Entry> entries = new ConcurrentHashMap<>();
     private final Object saveLock = new Object();
+
+    /**
+     * Exactly the values of {@link #entries}, in {@link #SAVE_ORDER}, whenever {@link #saveLock} is free. Guarded by
+     * {@link #saveLock}, like every change to {@link #entries}.
+     */
+    private final NavigableSet<Entry> saveOrder = new TreeSet<>(SAVE_ORDER);
+
+    /**
+     * The sequence of the next saved entry. Guarded by {@link #saveLock}.
+     */
+    private long nextSequence;
 
     /**
      * Creates a repository that measures expiry with the system UTC clock.
@@ -87,10 +109,12 @@ public final class RelayStateSaml2AuthenticationRequestRepository implements Sam
     }
 
     /**
-     * Saves the AuthnRequest under its own {@code RelayState}. A request without a {@code RelayState} cannot be
-     * matched at the callback and is not stored.
+     * Saves the AuthnRequest under its own {@code RelayState}, replacing an entry saved under the same value and
+     * restarting its expiry. A request without a {@code RelayState} cannot be matched at the callback and is not
+     * stored. A {@code null} AuthnRequest removes the entry keyed by the request's {@code RelayState} parameter, as
+     * the session repository removes its saved request; nothing is removed when the request carries none.
      *
-     * @param authenticationRequest the AuthnRequest sent to the IdP
+     * @param authenticationRequest the AuthnRequest sent to the IdP, or {@code null} to remove the saved one
      * @param request the request that initiated the login; its session is never used
      * @param response the response of the initiating request; not used
      */
@@ -99,6 +123,7 @@ public final class RelayStateSaml2AuthenticationRequestRepository implements Sam
                                           HttpServletRequest request,
                                           HttpServletResponse response) {
         if (authenticationRequest == null) {
+            removeAuthenticationRequest(request, response);
             return;
         }
         String relayState = nonBlank(authenticationRequest.getRelayState());
@@ -107,13 +132,16 @@ public final class RelayStateSaml2AuthenticationRequestRepository implements Sam
         }
         synchronized (saveLock) {
             Instant now = clock.instant();
-            // The values view removes a mapping only while it still holds the tested value, so it never drops a
-            // value it did not test, and a concurrent lock-free removal of the same key is harmless.
-            entries.values().removeIf(entry -> !entry.isLive(now));
+            purgeExpired(now);
             if (!entries.containsKey(relayState) && entries.size() >= MAX_ENTRIES) {
-                evictOldest();
+                discard(saveOrder.first());
             }
-            entries.put(relayState, new Entry(authenticationRequest, now));
+            Entry saved = new Entry(relayState, authenticationRequest, now.plus(TTL), nextSequence++);
+            Entry replaced = entries.put(relayState, saved);
+            if (replaced != null) {
+                saveOrder.remove(replaced);
+            }
+            saveOrder.add(saved);
         }
     }
 
@@ -133,7 +161,14 @@ public final class RelayStateSaml2AuthenticationRequestRepository implements Sam
         if (relayState == null) {
             return null;
         }
-        return liveRequest(entries.remove(relayState));
+        Entry removed;
+        synchronized (saveLock) {
+            removed = entries.remove(relayState);
+            if (removed != null) {
+                saveOrder.remove(removed);
+            }
+        }
+        return liveRequest(removed);
     }
 
     /**
@@ -146,15 +181,30 @@ public final class RelayStateSaml2AuthenticationRequestRepository implements Sam
     }
 
     /**
-     * Removes the entry with the oldest save time. Called only while {@link #saveLock} is held, so no other save can
-     * replace that entry concurrently. Like the purge in {@code saveAuthenticationRequest}, it is a linear scan: saves
-     * happen only when a login starts, and the store never holds more than {@link #MAX_ENTRIES} entries.
+     * Removes the expired entries, oldest first. Expiry follows save order, so the walk stops at the first live entry
+     * and costs O(log n) per purged entry. Called only while {@link #saveLock} is held.
+     *
+     * @param now the current instant
      */
-    private void evictOldest() {
-        entries.entrySet()
-                .stream()
-                .min(Map.Entry.comparingByValue(Comparator.comparing(Entry::savedAt)))
-                .ifPresent(oldest -> entries.remove(oldest.getKey(), oldest.getValue()));
+    private void purgeExpired(Instant now) {
+        while (!saveOrder.isEmpty()) {
+            Entry oldest = saveOrder.first();
+            if (oldest.isLive(now)) {
+                return;
+            }
+            discard(oldest);
+        }
+    }
+
+    /**
+     * Removes the entry from the store and from the save-order index. Called only while {@link #saveLock} is held, so
+     * no other save or removal can replace that entry concurrently.
+     *
+     * @param entry an entry currently held
+     */
+    private void discard(Entry entry) {
+        saveOrder.remove(entry);
+        entries.remove(entry.relayState(), entry);
     }
 
     private @Nullable AbstractSaml2AuthenticationRequest liveRequest(@Nullable Entry entry) {
@@ -170,12 +220,17 @@ public final class RelayStateSaml2AuthenticationRequestRepository implements Sam
     }
 
     /**
-     * A saved AuthnRequest and the instant it was saved.
+     * A saved AuthnRequest, its key, when it expires and its position among saves.
      *
+     * @param relayState the {@code RelayState} the request is stored under
      * @param request the saved AuthnRequest
-     * @param savedAt the instant the request was saved
+     * @param expiresAt the instant {@link #TTL} after the request was saved
+     * @param sequence the unique, increasing number of the save that stored the request
      */
-    private record Entry(AbstractSaml2AuthenticationRequest request, Instant savedAt) {
+    private record Entry(String relayState,
+                         AbstractSaml2AuthenticationRequest request,
+                         Instant expiresAt,
+                         long sequence) {
 
         /**
          * Tells whether the entry is still usable: strictly before {@link #TTL} has elapsed since it was saved.
@@ -184,7 +239,7 @@ public final class RelayStateSaml2AuthenticationRequestRepository implements Sam
          * @return {@code true} if the entry has not expired
          */
         boolean isLive(Instant now) {
-            return now.isBefore(savedAt.plus(TTL));
+            return now.isBefore(expiresAt);
         }
     }
 }

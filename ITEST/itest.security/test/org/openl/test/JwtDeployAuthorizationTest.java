@@ -42,6 +42,16 @@ class JwtDeployAuthorizationTest {
     // the module directory the tests run in. JWTValidator reads it once, when the webapp starts.
     private static final Path JWKS = Path.of("target", "jwt-deploy", "jwks.json");
     private static final String TEST_RESOURCES = "test-resources-jwt-deploy";
+    // V2: the request fixtures of TEST_RESOURCES, each without its .req extension.
+    private static final List<String> REQUESTS = List.of("010-deploy-no-token",
+            "020-deploy-openapi-no-token",
+            "030-services-no-token",
+            "040-deploy-with-token",
+            "050-healthcheck",
+            "060-info-sys",
+            "070-config",
+            "080-service-openapi",
+            "900-delete");
 
     private static String token;
 
@@ -79,6 +89,14 @@ class JwtDeployAuthorizationTest {
 
     @Test
     void test() throws Exception {
+        // V2: HttpClient.test passes on a folder that holds no requests, so this check stops the class passing
+        // without its fixtures. It runs before the server starts.
+        var missing = REQUESTS.stream()
+                .map(name -> name + ".req")
+                .filter(file -> !Files.isRegularFile(Path.of(TEST_RESOURCES, file)))
+                .toList();
+        assertEquals(List.of(), missing, "Request fixtures missing from " + TEST_RESOURCES);
+
         try (var client = JettyServer.get().withProfile("jwt-deploy").start()) {
             // The fixtures send the token as Authorization: Bearer ${JWT_TOKEN}.
             client.localEnv.put("JWT_TOKEN", token);

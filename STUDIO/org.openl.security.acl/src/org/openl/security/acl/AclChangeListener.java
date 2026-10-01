@@ -1,14 +1,9 @@
 package org.openl.security.acl;
 
-import java.util.Collections;
 import java.util.Objects;
 import java.util.SortedSet;
-import java.util.TreeSet;
 
 import org.jspecify.annotations.Nullable;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 /**
@@ -82,19 +77,20 @@ public interface AclChangeListener {
         if (listener == null) {
             return;
         }
-        var safeKind = Objects.requireNonNullElse(kind, Accumulator.UNKNOWN);
+        var safeKind = Objects.requireNonNullElse(kind, AclChangeAccumulator.UNKNOWN);
         var type = simpleType(objectType);
         if (!TransactionSynchronizationManager.isSynchronizationActive()) {
-            var once = new Accumulator(listener);
+            var once = new AclChangeAccumulator(listener);
             once.add(safeKind, type, failed);
-            Accumulator.notifySafely(listener, failed ? FAILURE : SUCCESS, once.changes, once.kinds, once.objectTypes);
+            AclChangeAccumulator
+                .notifySafely(listener, failed ? FAILURE : SUCCESS, once.changes, once.kinds, once.objectTypes);
             return;
         }
         // One accumulator per transaction, keyed by the listener: bound and registered on the first mutation only,
         // because bindResource rejects a key that is already bound.
-        var accumulator = (Accumulator) TransactionSynchronizationManager.getResource(listener);
+        var accumulator = (AclChangeAccumulator) TransactionSynchronizationManager.getResource(listener);
         if (accumulator == null) {
-            accumulator = new Accumulator(listener);
+            accumulator = new AclChangeAccumulator(listener);
             TransactionSynchronizationManager.bindResource(listener, accumulator);
             TransactionSynchronizationManager.registerSynchronization(accumulator);
         }
@@ -107,82 +103,6 @@ public interface AclChangeListener {
      */
     private static String simpleType(@Nullable String type) {
         var simple = type == null ? "" : type.substring(type.lastIndexOf('.') + 1);
-        return simple.isBlank() ? Accumulator.UNKNOWN : simple;
-    }
-
-    /**
-     * Gathers the mutations of one transaction and notifies the listener once, after completion.
-     *
-     * <p>Its state belongs to the one thread that runs the transaction, so it needs no locking.
-     */
-    final class Accumulator implements TransactionSynchronization {
-
-        private static final Logger LOG = LoggerFactory.getLogger(AclChangeListener.class);
-        private static final String UNKNOWN = "unknown";
-
-        private final AclChangeListener listener;
-        private final TreeSet<String> kinds = new TreeSet<>();
-        private final TreeSet<String> objectTypes = new TreeSet<>();
-        private int changes;
-        private boolean anyFailed;
-
-        private Accumulator(AclChangeListener listener) {
-            this.listener = listener;
-        }
-
-        private void add(String kind, String objectType, boolean failed) {
-            changes++;
-            kinds.add(kind);
-            objectTypes.add(objectType);
-            anyFailed |= failed;
-        }
-
-        /**
-         * Releases the key while an inner {@code REQUIRES_NEW} transaction runs. Spring suspends synchronizations
-         * but not foreign resources, so without this the inner transaction would join this accumulator.
-         */
-        @Override
-        public void suspend() {
-            TransactionSynchronizationManager.unbindResourceIfPossible(listener);
-        }
-
-        /**
-         * Takes the key back once the inner transaction has completed and unbound its own accumulator.
-         */
-        @Override
-        public void resume() {
-            TransactionSynchronizationManager.bindResource(listener, this);
-        }
-
-        /**
-         * Unbinds the key first, so nothing leaks into the thread's next transaction, then notifies the listener.
-         * A rollback and an unknown status both count as a failure. {@code afterCommit} is not used, because it is
-         * skipped on rollback.
-         */
-        @Override
-        public void afterCompletion(int status) {
-            TransactionSynchronizationManager.unbindResourceIfPossible(listener);
-            var outcome = (status == STATUS_COMMITTED && !anyFailed) ? SUCCESS : FAILURE;
-            notifySafely(listener, outcome, changes, kinds, objectTypes);
-        }
-
-        /**
-         * The only route to {@link AclChangeListener#aclChanged}. It hands out unmodifiable copies and contains a
-         * listener failure, logging fixed text that carries no ACL data.
-         */
-        private static void notifySafely(AclChangeListener listener,
-                                         String outcome,
-                                         int changes,
-                                         SortedSet<String> kinds,
-                                         SortedSet<String> objectTypes) {
-            try {
-                listener.aclChanged(outcome,
-                    changes,
-                    Collections.unmodifiableSortedSet(new TreeSet<>(kinds)),
-                    Collections.unmodifiableSortedSet(new TreeSet<>(objectTypes)));
-            } catch (RuntimeException e) {
-                LOG.warn("ACL change listener failed.", e);
-            }
-        }
+        return simple.isBlank() ? AclChangeAccumulator.UNKNOWN : simple;
     }
 }

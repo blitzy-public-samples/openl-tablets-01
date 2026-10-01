@@ -14,8 +14,8 @@ import java.io.File;
 import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.UncheckedIOException;
-import java.nio.file.DirectoryNotEmptyException;
 import java.nio.file.Files;
+import java.nio.file.InvalidPathException;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.util.List;
@@ -38,6 +38,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.EnumSource;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.junitpioneer.jupiter.RestoreSystemProperties;
 import org.springframework.core.env.PropertyResolver;
 
 import org.openl.rules.project.impl.local.DummyLockEngine;
@@ -45,7 +46,6 @@ import org.openl.rules.repository.api.UserInfo;
 import org.openl.rules.workspace.WorkspaceUserImpl;
 import org.openl.rules.workspace.dtr.DesignTimeRepository;
 import org.openl.rules.workspace.lw.LocalWorkspace;
-import org.openl.util.FileUtils;
 
 class LocalWorkspaceManagerImplTest {
     @TempDir
@@ -115,8 +115,26 @@ class LocalWorkspaceManagerImplTest {
         assertSame(workspace.getMetainfoRegistry(), manager.getWorkspace("user.1").getMetainfoRegistry());
     }
 
-    // V1: surface A path-containment matrix (AAP 0.6.2.1)
+    // V1: path-containment matrix of the workspace folder that a user id names
     private static final String INVALID_ID = "The user id is not a valid workspace folder name.";
+
+    /**
+     * A test-private folder that holds the workspace home two levels down, at {@code sandbox/a/home}. An id that
+     * escapes the home lexically, such as {@code ..} or {@code a/../../outside}, still lands inside this folder, so
+     * a snapshot of it catches a regression, and the reconciliation can never reach the shared temporary folder.
+     */
+    @TempDir
+    Path sandbox;
+    private Path root;
+    private LocalWorkspaceManagerImpl sandboxed;
+
+    @BeforeEach
+    void initSandboxed() throws Exception {
+        root = sandbox.resolve("a").resolve("home");
+        sandboxed = new LocalWorkspaceManagerImpl();
+        sandboxed.setWorkspaceHome(root.toString());
+        sandboxed.init();
+    }
 
     /**
      * The two public operations that turn a user id into a workspace folder.
@@ -144,13 +162,13 @@ class LocalWorkspaceManagerImplTest {
     }
 
     /**
-     * Ids that leave the root lexically: dot segments, absolute paths, separators and their encoded forms
-     * (A1-A8, A14, A15). The labels render every payload in ASCII.
+     * Ids that leave the root lexically: dot segments, a drive path, separators and their encoded forms (A1, A2,
+     * A4-A8, A14, A15). The labels render every payload in ASCII. The absolute path A3 names a folder of the sandbox,
+     * so it has its own test.
      */
     static Stream<Arguments> lexicallyEscapingIds() {
         return crossOperations(Named.of("A1 ..", ".."),
                 Named.of("A2 .", "."),
-                Named.of("A3 /etc", "/etc"),
                 Named.of("A4 C:\\Windows", "C:\\Windows"),
                 Named.of("A5 ..\\outside", "..\\outside"),
                 Named.of("A6 a//b", "a//b"),
@@ -162,10 +180,11 @@ class LocalWorkspaceManagerImplTest {
     }
 
     /**
-     * Ids that stay a single name right under the root and that only the web module's name check rejects (A4, A10,
-     * A11, A15). With the default accept-all check they name an ordinary folder under the root.
+     * Ids that stay a single name right under the root (A4, A10, A11, A15). The web module's name check rejects the
+     * A4, A10 and A11 ids, but accepts the A15 look-alikes as ordinary names. With the default accept-all check each
+     * of them names an ordinary folder under the root.
      */
-    static Stream<Arguments> namesOnlyTheNameCheckerRejects() {
+    static Stream<Arguments> singleNamesUnderTheRoot() {
         return crossOperations(Named.of("A4 C:x", "C:x"),
                 Named.of("A10 user\\u0007x", "user\u0007x"),
                 Named.of("A10 user\\nx", "user\nx"),
@@ -187,147 +206,131 @@ class LocalWorkspaceManagerImplTest {
 
     @ParameterizedTest
     @MethodSource("lexicallyEscapingIds")
-    void rejectsLexicallyEscapingIds(String payload, Operation op, @TempDir Path outside) {
-        var rootBefore = snapshot(tempFolder.toPath());
-        var outsideBefore = snapshot(outside);
-        var candidatesBefore = outsideCandidates();
+    void rejectsLexicallyEscapingIds(String payload, Operation op) {
+        var before = snapshot(sandbox);
 
-        assertRejected(() -> op.apply(manager, payload));
+        assertRejected(() -> op.apply(sandboxed, payload));
 
-        assertEquals(rootBefore, snapshot(tempFolder.toPath()), "Nothing may change under the workspace root.");
-        assertEquals(outsideBefore, snapshot(outside), "Nothing may change outside the workspace root.");
-        assertEquals(candidatesBefore, outsideCandidates(), "Nothing may be created beside the workspace root.");
+        assertEquals(before, snapshot(sandbox), "Nothing may change under or beside the workspace root.");
     }
 
-    @ParameterizedTest
+    @ParameterizedTest(name = "[{index}] A3 absolute path, {0}")
     @EnumSource(Operation.class)
-    void rejectsUserIdWithNulByte(Operation op, @TempDir Path outside) {
-        // A9: the JDK path parser refuses the NUL byte, so no folder can be derived from the id
-        var rootBefore = snapshot(tempFolder.toPath());
-        var outsideBefore = snapshot(outside);
-        var candidatesBefore = outsideCandidates();
+    void rejectsAnAbsolutePathId(Operation op) throws IOException {
+        // A3: a folder of the sandbox with content stands in for a system folder such as /etc
+        var etc = sandbox.resolve("etc");
+        Files.createDirectories(etc.resolve("stray"));
+        Files.writeString(etc.resolve("hosts"), "content-" + UUID.randomUUID());
+        var before = snapshot(sandbox);
 
-        assertThrows(IllegalArgumentException.class, () -> op.apply(manager, "user\u0000x"));
+        assertRejected(() -> op.apply(sandboxed, etc.toAbsolutePath().toString()));
 
-        assertEquals(rootBefore, snapshot(tempFolder.toPath()), "No entry may be created under the workspace root.");
-        assertEquals(outsideBefore, snapshot(outside));
-        assertEquals(candidatesBefore, outsideCandidates());
+        assertEquals(before, snapshot(sandbox), "Nothing may change in the folder the absolute path names.");
+        assertTrue(Files.isDirectory(etc.resolve("stray")));
     }
 
     @ParameterizedTest
-    @MethodSource("namesOnlyTheNameCheckerRejects")
-    void keepsNamesOnlyTheNameCheckerRejectsRightUnderTheRoot(String payload,
-                                                             Operation op,
-                                                             @TempDir Path outside) throws IOException {
-        var rootBefore = snapshot(tempFolder.toPath());
-        var outsideBefore = snapshot(outside);
-        var candidatesBefore = outsideCandidates();
+    @MethodSource("singleNamesUnderTheRoot")
+    void keepsSingleNamesRightUnderTheRoot(String payload, Operation op) throws IOException {
+        var before = snapshot(sandbox);
 
         try {
             if (op == Operation.GET_WORKSPACE) {
-                assertDirectChildOfRoot(manager.getWorkspace(payload), payload);
+                assertDirectChildOfRoot(sandboxed.getWorkspace(payload), payload);
             } else {
-                op.apply(manager, payload);
+                op.apply(sandboxed, payload);
             }
         } catch (IllegalArgumentException platformRejection) {
-            // A path parser that refuses ':' or control characters, as on Windows, rejects the id. That keeps it
-            // inside the root too, and the checks below still apply.
+            // The Windows path parser refuses ':' and control characters, which keeps the id inside the root too, so
+            // the checks below still apply. Elsewhere the default check must accept every one of these ids.
+            if (!OS.WINDOWS.isCurrentOs()) {
+                throw platformRejection;
+            }
         }
 
-        // Neither operation creates the user folder, so the root stays exactly as it was
-        assertEquals(rootBefore, snapshot(tempFolder.toPath()));
-        assertEquals(outsideBefore, snapshot(outside));
-        assertEquals(candidatesBefore, outsideCandidates());
+        // Neither operation creates the user folder, so the sandbox stays exactly as it was
+        assertEquals(before, snapshot(sandbox));
     }
 
     @ParameterizedTest
     @EnumSource(Operation.class)
     @DisabledOnOs(OS.WINDOWS)
-    void rejectsUserFolderLinkedOutsideTheRoot(Operation op, @TempDir Path outside) throws IOException {
+    void rejectsUserFolderLinkedOutsideTheRoot(Operation op) throws IOException {
         // A12: the folder of user 'victim' is a link to a folder outside the root
+        var outside = sandbox.resolve("outside");
         Files.createDirectories(outside.resolve("stray"));
         Files.writeString(outside.resolve("keep.txt"), "content-" + UUID.randomUUID());
-        Files.createSymbolicLink(tempFolder.toPath().resolve("victim"), outside);
-        var rootBefore = snapshot(tempFolder.toPath());
-        var outsideBefore = snapshot(outside);
-        var candidatesBefore = outsideCandidates();
+        Files.createSymbolicLink(root.resolve("victim"), outside);
+        var before = snapshot(sandbox);
 
-        assertRejected(() -> op.apply(manager, "victim"));
+        assertRejected(() -> op.apply(sandboxed, "victim"));
 
-        assertEquals(outsideBefore, snapshot(outside), "Nothing outside the root may be deleted through the link.");
+        assertEquals(before, snapshot(sandbox), "Nothing outside the root may be deleted through the link.");
         assertTrue(Files.isDirectory(outside.resolve("stray")));
-        assertEquals(rootBefore, snapshot(tempFolder.toPath()));
-        assertEquals(candidatesBefore, outsideCandidates());
     }
 
     @ParameterizedTest
     @EnumSource(Operation.class)
     @DisabledOnOs(OS.WINDOWS)
-    void rejectsUserFolderThatIsADanglingLink(Operation op, @TempDir Path outside) throws IOException {
+    void rejectsUserFolderThatIsADanglingLink(Operation op) throws IOException {
         // A13: the folder of user 'ghost' is a link to a path outside the root that does not exist
-        var missing = outside.resolve("missing");
-        Files.createSymbolicLink(tempFolder.toPath().resolve("ghost"), missing);
-        var rootBefore = snapshot(tempFolder.toPath());
-        var outsideBefore = snapshot(outside);
-        var candidatesBefore = outsideCandidates();
+        var missing = Files.createDirectories(sandbox.resolve("outside")).resolve("missing");
+        Files.createSymbolicLink(root.resolve("ghost"), missing);
+        var before = snapshot(sandbox);
 
-        assertRejected(() -> op.apply(manager, "ghost"));
+        assertRejected(() -> op.apply(sandboxed, "ghost"));
 
         assertFalse(Files.exists(missing, LinkOption.NOFOLLOW_LINKS), "The link target must not be created.");
-        assertEquals(outsideBefore, snapshot(outside));
-        assertEquals(rootBefore, snapshot(tempFolder.toPath()));
-        assertEquals(candidatesBefore, outsideCandidates());
+        assertEquals(before, snapshot(sandbox));
     }
 
     @ParameterizedTest
     @EnumSource(Operation.class)
     @DisabledOnOs(OS.WINDOWS)
-    void rejectsUserFolderLinkedToAnotherUsersFolder(Operation op, @TempDir Path outside) throws IOException {
+    void rejectsUserFolderLinkedToAnotherUsersFolder(Operation op) throws IOException {
         // A16: the folder of user 'alice' is a link to the folder of user 'bob'. 'bob' itself is never reconciled
         // here, because that would legitimately delete his stray folder.
-        var root = tempFolder.toPath();
         Files.createDirectories(root.resolve("bob").resolve("stray"));
         Files.createSymbolicLink(root.resolve("alice"), root.resolve("bob"));
-        var rootBefore = snapshot(root);
-        var outsideBefore = snapshot(outside);
-        var candidatesBefore = outsideCandidates();
+        var before = snapshot(sandbox);
 
-        assertRejected(() -> op.apply(manager, "alice"));
+        assertRejected(() -> op.apply(sandboxed, "alice"));
 
-        assertEquals(rootBefore, snapshot(root), "Nothing of another user's folder may be deleted through a link.");
+        assertEquals(before, snapshot(sandbox), "Nothing of another user's folder may be deleted through a link.");
         assertTrue(Files.isDirectory(root.resolve("bob").resolve("stray")));
-        assertEquals(outsideBefore, snapshot(outside));
-        assertEquals(candidatesBefore, outsideCandidates());
     }
 
     @Test
     void givesANewUserAWorkspaceRightUnderTheRoot() throws IOException {
         var userId = "user-" + UUID.randomUUID();
-        var candidatesBefore = outsideCandidates();
+        var before = snapshot(sandbox);
 
-        var workspace = manager.getWorkspace(userId);
+        var workspace = sandboxed.getWorkspace(userId);
 
         assertDirectChildOfRoot(workspace, userId);
         assertFalse(workspace.getLocation().exists(), "The first access must not create the folder.");
-        assertEquals(candidatesBefore, outsideCandidates());
+        assertEquals(before, snapshot(sandbox));
     }
 
     @Test
     void reconcilesTheRealFolderOfAnExistingUser() throws IOException {
         var userId = "user-" + UUID.randomUUID();
-        var userDir = tempFolder.toPath().resolve(userId);
+        var userDir = root.resolve(userId);
         Files.createDirectories(userDir.resolve("stray"));
 
-        manager.refreshMetainfoRegistry(userId);
+        sandboxed.refreshMetainfoRegistry(userId);
 
         assertFalse(Files.exists(userDir.resolve("stray")), "A real user folder is still reconciled.");
         assertTrue(Files.isDirectory(userDir));
-        assertDirectChildOfRoot(manager.getWorkspace(userId), userId);
+        assertDirectChildOfRoot(sandboxed.getWorkspace(userId), userId);
     }
 
     @Test
     @DisabledOnOs(OS.WINDOWS)
-    void trustsLinksInTheConfiguredWorkspaceHome(@TempDir Path realHome, @TempDir Path linkParent) throws IOException {
+    void trustsLinksInTheConfiguredWorkspaceHome() throws IOException {
+        // Both the real home and the link sit two levels inside the sandbox
+        var realHome = Files.createDirectories(sandbox.resolve("real").resolve("home"));
+        var linkParent = Files.createDirectories(sandbox.resolve("links"));
         var link = Files.createSymbolicLink(linkParent.resolve("home-link"), realHome);
         var linked = new LocalWorkspaceManagerImpl();
         linked.setWorkspaceHome(link.toString());
@@ -361,20 +364,17 @@ class LocalWorkspaceManagerImplTest {
     }
 
     @Test
-    void initUsesTheTemporaryFolderWhenTheHomeIsNotSet() throws IOException {
-        var expected = Path.of(FileUtils.getTempDirectoryPath(), "rules-workspaces").toAbsolutePath().normalize();
-        var existedBefore = Files.exists(expected);
+    @RestoreSystemProperties
+    void initUsesTheTemporaryFolderWhenTheHomeIsNotSet(@TempDir Path tmp) throws IOException {
+        // The default home lives in java.io.tmpdir, so that property points into a private folder for this test
+        System.setProperty("java.io.tmpdir", tmp.toString());
+        var expected = tmp.resolve("rules-workspaces").toAbsolutePath().normalize();
         var defaults = new LocalWorkspaceManagerImpl();
-        try {
-            defaults.init();
 
-            assertEquals(expected, defaults.getWorkspaceHome());
-            assertTrue(Files.isDirectory(expected));
-        } finally {
-            if (!existedBefore) {
-                deleteIfEmpty(expected);
-            }
-        }
+        defaults.init();
+
+        assertEquals(expected, defaults.getWorkspaceHome());
+        assertTrue(Files.isDirectory(expected));
     }
 
     @Test
@@ -419,7 +419,7 @@ class LocalWorkspaceManagerImplTest {
         assertEquals(dir.toAbsolutePath().normalize(), configured.getWorkspaceHome());
     }
 
-    // V1: fix-only cases for setFolderNameCheck (AAP 0.3.2.2)
+    // V1: cases for the user-id check injected through setFolderNameCheck
     private static final Set<String> RESERVED_NAMES = Set.of("CON", "NUL", "COM1");
 
     /**
@@ -449,17 +449,13 @@ class LocalWorkspaceManagerImplTest {
 
     @ParameterizedTest
     @MethodSource("namesTheInjectedCheckRejects")
-    void rejectsIdsTheInjectedCheckRejects(String payload, Operation op, @TempDir Path outside) {
-        manager.setFolderNameCheck(recordingCheck(new CopyOnWriteArrayList<>()));
-        var rootBefore = snapshot(tempFolder.toPath());
-        var outsideBefore = snapshot(outside);
-        var candidatesBefore = outsideCandidates();
+    void rejectsIdsTheInjectedCheckRejects(String payload, Operation op) {
+        sandboxed.setFolderNameCheck(recordingCheck(new CopyOnWriteArrayList<>()));
+        var before = snapshot(sandbox);
 
-        assertRejected(() -> op.apply(manager, payload));
+        assertRejected(() -> op.apply(sandboxed, payload));
 
-        assertEquals(rootBefore, snapshot(tempFolder.toPath()));
-        assertEquals(outsideBefore, snapshot(outside));
-        assertEquals(candidatesBefore, outsideCandidates());
+        assertEquals(before, snapshot(sandbox));
     }
 
     @ParameterizedTest
@@ -468,9 +464,9 @@ class LocalWorkspaceManagerImplTest {
     void asksTheInjectedCheckAboutTheExactId(String payload, Operation op) {
         // The path parser of Windows can refuse these ids before the check is asked, so this runs elsewhere only
         var seen = new CopyOnWriteArrayList<String>();
-        manager.setFolderNameCheck(recordingCheck(seen));
+        sandboxed.setFolderNameCheck(recordingCheck(seen));
 
-        assertRejected(() -> op.apply(manager, payload));
+        assertRejected(() -> op.apply(sandboxed, payload));
 
         assertTrue(seen.contains(payload), "The injected check must receive the id unchanged.");
     }
@@ -478,70 +474,81 @@ class LocalWorkspaceManagerImplTest {
     @Test
     void givesAWorkspaceToAnIdTheInjectedCheckAccepts() throws IOException {
         var seen = new CopyOnWriteArrayList<String>();
-        manager.setFolderNameCheck(recordingCheck(seen));
+        sandboxed.setFolderNameCheck(recordingCheck(seen));
         var userId = "user-" + UUID.randomUUID();
 
-        assertDirectChildOfRoot(manager.getWorkspace(userId), userId);
+        assertDirectChildOfRoot(sandboxed.getWorkspace(userId), userId);
         assertTrue(seen.contains(userId));
     }
 
     @Test
     void nullRestoresTheAcceptAllCheck() throws IOException {
-        manager.setFolderNameCheck(name -> false);
+        sandboxed.setFolderNameCheck(name -> false);
         var rejected = "user-" + UUID.randomUUID();
-        assertRejected(() -> manager.getWorkspace(rejected));
+        assertRejected(() -> sandboxed.getWorkspace(rejected));
 
-        manager.setFolderNameCheck(null);
+        sandboxed.setFolderNameCheck(null);
 
         var userId = "user-" + UUID.randomUUID();
-        assertDirectChildOfRoot(manager.getWorkspace(userId), userId);
-        assertDirectChildOfRoot(manager.getWorkspace(rejected), rejected);
+        assertDirectChildOfRoot(sandboxed.getWorkspace(userId), userId);
+        assertDirectChildOfRoot(sandboxed.getWorkspace(rejected), rejected);
     }
 
     @Test
     @DisabledOnOs(OS.WINDOWS)
     void nullRestoresTheAcceptAllCheckForReservedNames() throws IOException {
-        manager.setFolderNameCheck(recordingCheck(new CopyOnWriteArrayList<>()));
-        assertRejected(() -> manager.getWorkspace("CON"));
+        sandboxed.setFolderNameCheck(recordingCheck(new CopyOnWriteArrayList<>()));
+        assertRejected(() -> sandboxed.getWorkspace("CON"));
 
-        manager.setFolderNameCheck(null);
+        sandboxed.setFolderNameCheck(null);
 
-        assertDirectChildOfRoot(manager.getWorkspace("CON"), "CON");
+        assertDirectChildOfRoot(sandboxed.getWorkspace("CON"), "CON");
     }
 
     @ParameterizedTest
     @EnumSource(Operation.class)
     void rejectsTheIdWhenTheInjectedCheckFails(Operation op) {
-        manager.setFolderNameCheck(name -> {
+        sandboxed.setFolderNameCheck(name -> {
             throw new IllegalArgumentException("check-" + UUID.randomUUID());
         });
 
-        assertRejected(() -> op.apply(manager, "user-" + UUID.randomUUID()));
+        assertRejected(() -> op.apply(sandboxed, "user-" + UUID.randomUUID()));
     }
 
     @ParameterizedTest
     @EnumSource(Operation.class)
-    void rejectsUserIdWithNulByteWithTheExistingMessage(Operation op, @TempDir Path outside) {
-        // A9: the parser failure is reported as the existing rejection, not as the JDK message
-        var rootBefore = snapshot(tempFolder.toPath());
-        var outsideBefore = snapshot(outside);
-        var candidatesBefore = outsideCandidates();
+    void rejectsUserIdWithNulByteWithTheExistingMessage(Operation op) {
+        // A9: the JDK path parser refuses the NUL byte. Its failure is the cause of the existing rejection, whose
+        // message is not the JDK one.
+        var before = snapshot(sandbox);
 
-        assertRejected(() -> op.apply(manager, "user\u0000x"));
+        var e = assertRejected(() -> op.apply(sandboxed, "user\u0000x"));
 
-        assertEquals(rootBefore, snapshot(tempFolder.toPath()));
-        assertEquals(outsideBefore, snapshot(outside));
-        assertEquals(candidatesBefore, outsideCandidates());
+        assertInstanceOf(InvalidPathException.class, e.getCause(), "The parser failure must be kept as the cause.");
+        assertEquals(before, snapshot(sandbox), "No entry may be created under or beside the workspace root.");
+    }
+
+    @ParameterizedTest
+    @EnumSource(Operation.class)
+    void rejectsTheIdWhenTheInjectedCheckIsDenied(Operation op) {
+        sandboxed.setFolderNameCheck(name -> {
+            throw new SecurityException("denied-" + UUID.randomUUID());
+        });
+        var before = snapshot(sandbox);
+
+        assertRejected(() -> op.apply(sandboxed, "user-" + UUID.randomUUID()));
+
+        assertEquals(before, snapshot(sandbox));
     }
 
     @Test
     void runsTheInjectedCheckOnlyAfterTheLexicalChecks() {
         var seen = new CopyOnWriteArrayList<String>();
-        manager.setFolderNameCheck(recordingCheck(seen));
+        sandboxed.setFolderNameCheck(recordingCheck(seen));
 
         for (var op : Operation.values()) {
-            assertRejected(() -> op.apply(manager, ".."));
-            assertRejected(() -> op.apply(manager, "a/b"));
+            assertRejected(() -> op.apply(sandboxed, ".."));
+            assertRejected(() -> op.apply(sandboxed, "a/b"));
         }
 
         assertTrue(seen.isEmpty(), "The lexical checks must reject the id before the injected check is asked.");
@@ -575,40 +582,18 @@ class LocalWorkspaceManagerImplTest {
         }
     }
 
-    /**
-     * Tells whether the names an escaping id would reach exist beside the root. The parent is the shared temporary
-     * folder, which other tests use at the same time, so only these names are checked, never the whole folder.
-     */
-    private Map<String, Boolean> outsideCandidates() {
-        var candidates = new TreeMap<String, Boolean>();
-        for (var name : List.of("outside", "other")) {
-            candidates.put(name, Files.exists(tempFolder.toPath().resolveSibling(name), LinkOption.NOFOLLOW_LINKS));
-        }
-        return candidates;
-    }
-
-    private static void assertRejected(Executable call) {
+    private static IllegalArgumentException assertRejected(Executable call) {
         var e = assertThrows(IllegalArgumentException.class, call);
         assertEquals(INVALID_ID, e.getMessage());
+        return e;
     }
 
     /**
-     * Asserts that the workspace folder is named by the id and sits right under the root. Real paths are compared,
-     * because the temporary folder may itself be reached through a link, such as /var on macOS.
+     * Asserts that the workspace folder is named by the id and sits right under the sandboxed root. Real paths are
+     * compared, because the temporary folder may itself be reached through a link, such as /var on macOS.
      */
     private void assertDirectChildOfRoot(LocalWorkspace workspace, String userId) throws IOException {
         assertEquals(userId, workspace.getLocation().getName());
-        assertEquals(tempFolder.toPath().toRealPath(), workspace.getLocation().getParentFile().toPath().toRealPath());
-    }
-
-    /**
-     * Deletes the folder unless something else in the shared temporary folder has put content into it.
-     */
-    private static void deleteIfEmpty(Path dir) throws IOException {
-        try {
-            Files.deleteIfExists(dir);
-        } catch (DirectoryNotEmptyException inUse) {
-            // Another user of the shared temporary folder keeps its workspaces there, so the folder stays
-        }
+        assertEquals(root.toRealPath(), workspace.getLocation().getParentFile().toPath().toRealPath());
     }
 }
