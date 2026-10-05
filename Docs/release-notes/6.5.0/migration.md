@@ -57,6 +57,18 @@ browser.
 * **In `oauth2` mode an unauthenticated API call now answers `401` with `WWW-Authenticate: Bearer`** instead
   of a bare `401`. A `Bearer` challenge raises no browser credential dialog, so a browser client is
   unaffected; a scripted client that inspects the header should expect it.
+* **SAML and OIDC logins rotate the session ID.** A client must use the `JSESSIONID` set by the login callback,
+  not the one it received before logging in.
+  <!-- V5: session ID rotation on SAML and OIDC login -->
+* **The OWASP and Trivy scans now fail on high-severity findings.** `mvn -Powasp` fails for any dependency finding
+  with a CVSS score of 7.0 or higher (`failBuildOnCVSS` 7.0 in the `owasp` profile). The nightly or manually started
+  Trivy workflow fails on fixable `HIGH` or `CRITICAL` findings in the scanned image, and still produces its JSON and
+  HTML reports. Neither gate runs on merge or publish. The root `pom.xml` adds `tomcat.version` (10.1.59), which
+  overrides the `tomcat-embed-core`, `tomcat-embed-el` and `tomcat-embed-websocket` 10.1.55 that Spring Boot 3.5.16
+  manages, for CVE-2026-53404, CVE-2026-53434, CVE-2026-55276, CVE-2026-59083, CVE-2026-59084, CVE-2026-65182,
+  CVE-2026-65183, CVE-2026-65637, CVE-2026-65905, CVE-2026-65927, CVE-2026-66422, CVE-2026-68525, CVE-2026-68569
+  and CVE-2026-68763. Remove the override once Spring Boot manages a fixed Tomcat version.
+  <!-- V13: OWASP and Trivy scanning gates -->
 
 ## Administrators
 
@@ -82,6 +94,32 @@ browser.
   `/webstudio` context path the link previously lost that path and did not resolve. No action is required
   beyond upgrading; a link sent by an earlier version stays broken.
 
+* **Rule Services `/admin/` endpoints need a JWT once `ruleservice.authentication.enabled=true`.** Only
+  `/admin/healthcheck/`, `/admin/info/` and `/admin/config/` stay open. `/admin/deploy`, `/admin/services`,
+  `/admin/ui/info`, `/admin/swagger-ui.json` and any OpenAPI document under `/admin/` answer `401` without an
+  `Authorization` header and `403` with an invalid token, so scripts must send `Authorization: Bearer ${JWT_TOKEN}`.
+  Service OpenAPI documents outside `/admin/` stay public. The built-in Rule Services web page cannot attach a token,
+  so its service list, service errors, `MANIFEST.MF` and deployment upload, download and delete stop working while
+  authentication is on, and its Swagger UI page cannot list the services. Nothing changes with authentication off,
+  the default.
+  <!-- V2: Rule Services /admin/ paths require a JWT -->
+
+* **Workspace folders, project files, new projects and uploaded archives are kept inside their own folders.** A
+  user's workspace folder under `user.workspace.home` must be a real folder of its own: one that is a symbolic link
+  into another user's folder or out of the workspace home, or a dangling link, is refused, and so is the folder of a
+  user whose login name is a reserved name such as `CON`, `NUL` or `COM1` in upper case. OpenL Studio does not open
+  the workspace of such a user. In user workspaces and in a `repo-file` design repository, the project files API no
+  longer follows a symbolic link that leads out of the project folder, outside the repository or into another
+  project: listings and searches leave the entry out, and reading, updating, copying, moving, exporting or writing
+  through it answers `400` with `openl.error.400.file.path.invalid.message`. In a `repo-file` design repository,
+  creating or copying a project answers the same `400` when the new project folder would be reached through such a
+  link. Creating a project from uploaded files and copying a project also answer that `400` for a project name or
+  path holding a control character, which was previously removed silently. A project archive with an entry name
+  that is not a valid relative path, such as one with a `..` segment or a leading `/`, is refused before anything
+  is written. Git and the other non-file repositories get the name checks only. Before upgrading, replace such links
+  with regular folders or copies of their content.
+  <!-- V1: path containment on the workspace, file, project and upload surfaces (A, B, C, D) -->
+
   <!-- V1: opening a file-repository project leaves out the files that links place outside the project folder -->
 * **Opening a project from a file design repository no longer copies files that links place outside the project
   folder.** In a `repo-file` design repository, a file that a symbolic link places outside the project folder —
@@ -104,6 +142,85 @@ browser.
   into another project, or to nothing. Nothing is written, no commit is made, and the uploaded files are discarded.
   Links that stay inside the project folder do not stop the upload. Before upgrading, replace such a link with a
   regular copy of its content inside the project, or remove it, so the project can be overwritten.
+
+* **The OpenL Studio session cookie is now `SameSite=Lax`.** SAML login keeps working, but the identity provider's
+  response must reach OpenL Studio within 5 minutes of the login request, and after a cross-site SAML callback the
+  user lands on `/` instead of the page first requested. An IdP-initiated SAML logout sent by HTTP-POST can no
+  longer end the Studio session, so configure the HTTP-Redirect binding for front-channel logout. CSRF tokens stay
+  disabled.
+  <!-- V3: SameSite=Lax session cookie -->
+
+* **SAML, OIDC and static-resource responses now carry the default security headers.** They send what the `multi`,
+  `ad` and `single` modes already sent: `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`,
+  `Cache-Control: no-cache, no-store, max-age=0, must-revalidate` with `Pragma: no-cache` and `Expires: 0`,
+  `X-XSS-Protection: 0`, and `Strict-Transport-Security` on HTTPS requests. OpenL Studio therefore cannot be shown
+  in a frame in the `saml` and `oauth2` modes either. Static assets that set no cache headers of their own are no
+  longer cached. No Content-Security-Policy is added.
+  <!-- V4: default security headers on SAML, OIDC and static chains -->
+
+* **Local passwords must have at least 12 characters and at most 72 bytes in UTF-8.** The rule replaces the
+  25-character maximum and applies when a local user is created, when an administrator changes a user's password and
+  when users change their own password in their profile. A violation answers `400` with
+  `openl.constraints.password.min-length.message` or `openl.constraints.password.max-bytes.message`. Existing
+  passwords and their hashes are untouched, so a shorter password keeps working until it is next changed.
+  <!-- V7: local password length policy -->
+
+* **New personal access tokens always expire.** A token created without `expiresAt`, including through the "No
+  expiration" option of the token dialog, expires after `security.pat.default-expiration-days` (default `90`). An
+  expiration date more than `security.pat.max-expiration-days` (default `365`) ahead answers `400` with
+  `openl.error.400.pat.expires-at.max.message`. A value that is not positive, or a default above the maximum, stops
+  OpenL Studio at startup. Tokens created before the upgrade without an expiry keep working and never expire.
+  <!-- V8: PAT default and maximum expiration -->
+
+* **Five failed logins lock a login name for 15 minutes in the `multi` and `ad` modes.** Five consecutive failed form
+  or HTTP Basic logins within 15 minutes lock that name, compared case-insensitively, for 15 minutes. During the lock
+  even the correct password gets the ordinary failed-login response, and a successful login resets the count.
+  Unknown names are counted and locked exactly like existing ones. The counters live in the memory of each OpenL
+  Studio instance and are cleared on restart. SSO, Bearer and personal access token logins are not counted. Anyone
+  who knows an account name can lock it on purpose, and Active Directory name variants such as `user`,
+  `DOMAIN\user` and `user@domain` are counted separately.
+  <!-- V9: failed-login lockout -->
+
+* **Stored secrets are encrypted with AES-256-GCM.** When the settings are saved, each setting whose name ends in
+  `password`, `secret` or `token`, except `secret.key`, is written as `ENC(v2:...)`: AES-256-GCM under a
+  PBKDF2-derived key, with a random salt and nonce per value. Legacy `ENC(...)` and plain-text values of such
+  settings are still read and are rewritten in the new format on the next save. With the default blank
+  `secret.key`, the first such save creates the instance key file `${openl.home.shared}/.openl-secret-key`: back it
+  up and move it together with the settings file, or set `secret.key` before the first save. Once their key file is
+  lost, the values read as empty and an ERROR is logged. OpenL Rule Services versions older than 6.5.0 cannot read
+  `ENC(v2:...)` values. Settings ending in `secret-key`, `account-key` or `local-key`, such as
+  `security.saml.local-key`, stay plain text.
+  <!-- V6: AES-256-GCM encryption of stored secrets -->
+
+* **`/rest/public/info/sys.json` and `/rest/public/info/http.json` now require authentication.** In the `multi`,
+  `ad`, `saml` and `oauth2` modes they answer `401` to a request that is not authenticated, as the rest of `/rest`
+  does; in `single` mode they are unchanged. `openl.json`, `build.json` and `/rest/settings` stay public. Monitoring
+  that polls the two endpoints must authenticate.
+  <!-- V10: sys.json and http.json require authentication -->
+
+* **Security events are logged to `org.openl.security.audit`.** The logger writes one line per authentication
+  success or failure, lockout, personal access token creation and revocation, and committed ACL change. Each line
+  starts with `event`, `outcome`, `user` and `ip`, followed by the event's details: `method`, the token's public ID
+  (`pat`), or the ACL change count, kinds and object types (`changes`, `kinds`, `objectTypes`). No line contains a
+  password, token, token name, ACL object identifier or SID. Successes are logged at INFO, failures and lockouts at
+  WARN, through the existing appenders; route the logger to an appender of its own to keep the trail apart. `ip` is
+  the remote address the servlet container reports, so behind a reverse proxy it is the proxy's address unless the
+  container takes the client address from a forwarded header, as Tomcat's `RemoteIpValve` or Jetty's
+  `ForwardedRequestCustomizer` do. Each request authenticated by HTTP Basic, a Bearer token or a personal access
+  token adds a line.
+  <!-- V11: security audit logger -->
+
+* **A WARN flags an identity-provider group that grants `ADMIN` by its name.** At each AD, SAML, OIDC or
+  bearer-token login, OpenL Studio logs a WARN when an external group name matches an OpenL group that holds
+  `ADMIN`, because the user gains administrator rights through that name match alone. The mapping is unchanged, and
+  requests authenticated by a personal access token do not warn. If the grant is unintended, rename one of the
+  groups.
+  <!-- V12: warning for IdP groups that grant ADMIN by name -->
+
+* **A WARN at startup flags a deployment without authentication.** OpenL Studio logs it when it runs with
+  `user.mode=single`, and OpenL Rule Services when `ruleservice.authentication.enabled` is `false`, blank or not
+  set. The defaults are unchanged.
+  <!-- V14: startup warning when authentication is off -->
 
 ## Testing Recommendations
 
