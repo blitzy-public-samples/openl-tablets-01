@@ -35,6 +35,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.stream.Stream;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
@@ -44,12 +45,18 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.DisabledOnOs;
 import org.junit.jupiter.api.condition.OS;
+import org.junit.jupiter.api.function.Executable;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.EnumSource;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.NullAndEmptySource;
+import org.junit.jupiter.params.provider.NullSource;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.mockito.MockedConstruction;
 import org.mockito.Mockito;
+import org.springframework.http.HttpStatus;
 
 import org.openl.rules.common.ProjectException;
 import org.openl.rules.project.abstraction.AProject;
@@ -68,10 +75,13 @@ import org.openl.rules.repository.api.FileItem;
 import org.openl.rules.repository.api.Repository;
 import org.openl.rules.repository.file.FileSystemRepository;
 import org.openl.rules.rest.acl.service.AclProjectsHelper;
+import org.openl.rules.webstudio.util.NameChecker;
 import org.openl.rules.webstudio.web.repository.project.ProjectFile;
+import org.openl.rules.webstudio.web.repository.upload.ProjectUploader;
 import org.openl.rules.webstudio.web.repository.upload.zip.ZipCharsetDetector;
 import org.openl.rules.workspace.WorkspaceUser;
 import org.openl.rules.workspace.dtr.DesignTimeRepository;
+import org.openl.rules.workspace.dtr.impl.FileMappingData;
 import org.openl.rules.workspace.dtr.impl.MappedRepository;
 import org.openl.rules.workspace.filter.PathFilter;
 import org.openl.rules.workspace.lw.LocalWorkspace;
@@ -85,6 +95,7 @@ import org.openl.studio.common.exception.ConflictException;
 import org.openl.studio.common.exception.ForbiddenException;
 import org.openl.studio.common.exception.NotFoundException;
 import org.openl.studio.tags.service.TagAssignmentValidator;
+import org.openl.util.StringUtils;
 
 class ProjectCreationServiceTest {
 
@@ -119,6 +130,8 @@ class ProjectCreationServiceTest {
     @TempDir
     Path tmp;
     private final List<Closeable> closeables = new ArrayList<>();
+    // V1-C: the constructor arguments of every upload the uploader mock stood in for, in construction order
+    private final List<List<?>> uploads = new ArrayList<>();
 
     @BeforeEach
     void setUp() {
@@ -983,6 +996,606 @@ class ProjectCreationServiceTest {
     private static void write(Path file, String content) throws IOException {
         Files.createDirectories(file.getParent());
         Files.writeString(file, content, StandardCharsets.UTF_8);
+    }
+
+    // V1-C: the entry points through which the folder of a new project is chosen (0.6.2.3)
+    private enum Route {
+        TEMPLATE,
+        FILES,
+        COPY
+    }
+
+    // V1-C: the design repository a new project is written to, reached the way the REST route receives it
+    private enum Backend {
+        /** A repository without a local directory, such as Git, JDBC, S3 or Azure Blob: lexical checks only. */
+        MOCK,
+        /** A flat file repository in {@code tmp/repo} behind {@code SecureRepository}. */
+        FLAT,
+        /** A mapped file repository in {@code tmp/repo} behind {@code SecureMappedRepository}. */
+        MAPPED
+    }
+
+    // V1-C: where a link inside the design repository points the folder of a new project (0.6.2.3 C12, C16)
+    private enum LinkTarget {
+        /** A directory outside the repository root (C12). */
+        OUTSIDE,
+        /** The folder of another project in the same repository (C16). */
+        SIBLING,
+        /** A path that does not exist, so the link resolves nowhere. */
+        DANGLING
+    }
+
+    // V1-C: payloads rejected as received on every backend (0.6.2.3 C1, C2, C4-C10, C13)
+    private static Stream<Arguments> rejectedPayloads() {
+        return onEveryRoute(new Backend[]{Backend.MOCK, Backend.FLAT},
+                new String[]{"C1", "NewProject", "../../outside"},
+                new String[]{"C2", "NewProject", "./p"},
+                new String[]{"C2", "NewProject", "a/./p"},
+                new String[]{"C4", "NewProject", "C:\\p"},
+                new String[]{"C4", "C:p", null},
+                new String[]{"C5", "NewProject", "a\\..\\..\\p"},
+                new String[]{"C6", "NewProject", "a//p"},
+                new String[]{"C7", "NewProject", "..%2Fp"},
+                new String[]{"C7", "..%2Fp", null},
+                new String[]{"C8", "%252e%252e", null},
+                new String[]{"C9", "NewProject", "p\u0000"},
+                new String[]{"C10", "NewProject", "p\u0007"},
+                new String[]{"C10", "p\n", null},
+                new String[]{"C13", "../../p", null});
+    }
+
+    // V1-C: Windows reserved names, held to the verdict NameChecker gives them today (0.6.2.3 C11)
+    private static Stream<Arguments> reservedNamePayloads() {
+        return onEveryRoute(new Backend[]{Backend.MOCK, Backend.FLAT},
+                new String[]{"C11", "CON", null},
+                new String[]{"C11", "NUL", null},
+                new String[]{"C11", "NewProject", "NUL"});
+    }
+
+    // V1-C: payloads the write itself keeps inside the repository: the leading slash is dropped (C3), and look-alike
+    // separators are ordinary characters (C14), so each is either rejected or written inside (0.6.2.3). The service
+    // checks the path as the write places it; the REST route keeps its existing 400 for C3 through @PathConstraint.
+    private static Stream<Arguments> containedPayloads() {
+        return onEveryRoute(Backend.values(),
+                new String[]{"C3", "NewProject", "/etc/p"},
+                new String[]{"C14", "..\u2215p", null},
+                new String[]{"C14", "\uFF0E\uFF0E", null})
+                .filter(ProjectCreationServiceTest::isWritable);
+    }
+
+    // V1-C: a '.git' segment stays inside the repository root, so its outcome is recorded only (0.6.2.3 C15, 0.6.5)
+    private static Stream<Arguments> gitMetadataPayloads() {
+        return onEveryRoute(Backend.values(), new String[]{"C15", "NewProject", ".git/hooks"})
+                .filter(ProjectCreationServiceTest::isWritable);
+    }
+
+    // V1-C: every link a new project folder could be redirected through, on each route and file layout
+    private static Stream<Arguments> linkedProjectFolders() {
+        return Stream.of(LinkTarget.values())
+                .flatMap(link -> Stream.of(Route.values())
+                        .flatMap(route -> Stream.of(Backend.FLAT, Backend.MAPPED)
+                                .map(backend -> Arguments.of(link, route, backend))));
+    }
+
+    // V1-C: valid new projects at the rules-location root, at the repository root and in a nested folder
+    private static Stream<Arguments> validNewProjects() {
+        return Stream.of(Route.TEMPLATE, Route.FILES)
+                .flatMap(route -> Stream.of(Backend.values())
+                        .flatMap(backend -> Stream.of(null, "", "a/b").map(path -> Arguments.of(route, backend, path))));
+    }
+
+    // V1-C: valid copy targets on both file layouts, with and without a path
+    private static Stream<Arguments> validCopyTargets() {
+        return Stream.of(Backend.FLAT, Backend.MAPPED)
+                .flatMap(backend -> Stream.of(null, "a/b").map(path -> Arguments.of(backend, path)));
+    }
+
+    // V1-C: each payload row {id, name, path} on every route and each given backend
+    private static Stream<Arguments> onEveryRoute(Backend[] backends, String[]... rows) {
+        return Stream.of(rows)
+                .flatMap(row -> Stream.of(Route.values())
+                        .flatMap(route -> Stream.of(backends)
+                                .map(backend -> Arguments.of(row[0], route, backend, row[1], row[2]))));
+    }
+
+    // V1-C: a copy is written for real, so it needs a file target; template and file routes run on every backend
+    private static boolean isWritable(Arguments arguments) {
+        return !(arguments.get()[1] == Route.COPY && arguments.get()[2] == Backend.MOCK);
+    }
+
+    // V1-C: a traversal payload never reaches the upload or the copy, and nothing is written (0.6.2.3)
+    @ParameterizedTest(name = "{0} {1} on {2}")
+    @MethodSource("rejectedPayloads")
+    void rejects_a_traversal_payload_before_the_new_project_folder_is_written(String row, Route route,
+                                                                              Backend backend, String name,
+                                                                              String path) throws IOException {
+        creatingUser();
+        var target = target(backend);
+        var source = sourceWithoutLocalDirectory();
+        var before = snapshot(tmp);
+
+        try (var uploaders = uploaders()) {
+            assertPathRejected(() -> attempt(route, target, name, path, source));
+            assertTrue(uploaders.constructed().isEmpty(), row + ": the upload never runs");
+        }
+
+        assertEquals(before, snapshot(tmp), row + ": nothing is created in the temporary directory");
+        if (backend == Backend.MOCK) {
+            verifyNothingSaved(target);
+        }
+    }
+
+    // V1-C: a reserved name keeps today's NameChecker verdict, never a looser one (0.6.2.3 C11)
+    @ParameterizedTest(name = "{0} {1} on {2}")
+    @MethodSource("reservedNamePayloads")
+    void keeps_the_name_checker_verdict_on_a_reserved_name(String row, Route route, Backend backend, String name,
+                                                           String path) throws IOException {
+        creatingUser();
+        var target = target(backend);
+        var source = sourceWithoutLocalDirectory();
+        var effective = path == null || path.isEmpty() ? name : path + "/" + name;
+
+        try (var uploaders = uploaders()) {
+            if (isRejectedByNameChecker(effective)) {
+                assertPathRejected(() -> attempt(route, target, name, path, source));
+                assertTrue(uploaders.constructed().isEmpty(), row + ": the upload never runs");
+            } else {
+                assertFalse(outcomeOf(() -> attempt(route, target, name, path, source)) instanceof BadRequestException,
+                        row + ": a name NameChecker accepts is not rejected as a path");
+            }
+        }
+    }
+
+    // V1-C: a payload the write keeps inside the repository is rejected or written inside it (0.6.2.3 C3, C14)
+    @ParameterizedTest(name = "{0} {1} on {2}")
+    @MethodSource("containedPayloads")
+    void rejects_or_contains_a_payload_the_write_keeps_inside_the_repository(String row, Route route,
+                                                                             Backend backend, String name,
+                                                                             String path) throws IOException {
+        creatingUser();
+        var target = target(backend);
+        var source = route == Route.COPY ? sourceInFlatFileRepository() : null;
+        var created = new FileData();
+
+        try (var uploaders = uploaders(created)) {
+            var outcome = outcomeOf(() -> attempt(route, target, name, path, source));
+            if (outcome instanceof BadRequestException rejected) {
+                assertEquals("openl.error.400.file.path.invalid.message", rejected.getErrorCode());
+                assertTrue(uploaders.constructed().isEmpty(), row + ": the upload never runs");
+            } else if (outcome != null) {
+                throw new AssertionError(row + ": the call fails", outcome);
+            } else if (route == Route.COPY) {
+                assertCopiedInside(backend, name, path);
+            } else {
+                assertUploaded(target, name, path);
+            }
+        }
+        assertNothingOutside("repo", "design");
+    }
+
+    // V1-C: a '.git' path is recorded only: no failure but a 400, and nothing outside the repositories (C15)
+    @ParameterizedTest(name = "{0} {1} on {2}")
+    @MethodSource("gitMetadataPayloads")
+    void records_a_git_metadata_path_without_writing_outside_the_repository(String row, Route route,
+                                                                            Backend backend, String name,
+                                                                            String path) throws IOException {
+        creatingUser();
+        var target = target(backend);
+        var source = route == Route.COPY ? sourceInFlatFileRepository() : null;
+
+        try (var ignored = uploaders()) {
+            var outcome = outcomeOf(() -> attempt(route, target, name, path, source));
+            if (outcome != null && !(outcome instanceof BadRequestException)) {
+                throw new AssertionError(row + ": the call fails", outcome);
+            }
+        }
+        assertNothingOutside("repo", "design");
+    }
+
+    // V1-C: a link in the design repository never redirects the new project folder: flat, the project is named after
+    // the link in the rules location; mapped, the link is the parent path of project 'p' (0.6.2.3 C12, C16, dangling)
+    @ParameterizedTest(name = "{0} {1} on {2}")
+    @MethodSource("linkedProjectFolders")
+    @DisabledOnOs(OS.WINDOWS)
+    void rejects_a_new_project_folder_a_link_redirects(LinkTarget link, Route route, Backend backend)
+            throws IOException {
+        creatingUser();
+        var flat = backend == Backend.FLAT;
+        var root = Files.createDirectories(tmp.resolve("repo"));
+        var outside = Files.createDirectories(tmp.resolve("outside"));
+        var sibling = root.resolve(flat ? "DESIGN/rules/Sibling" : "projects/Sibling");
+        write(sibling.resolve("rules.xml"), descriptor("Sibling"));
+        var target = secureFileRepository(root, !flat);
+        var linkName = link == LinkTarget.DANGLING ? "ghost" : "link";
+        var linkFolder = Files.createDirectories(flat ? root.resolve("DESIGN/rules") : root);
+        Files.createSymbolicLink(linkFolder.resolve(linkName), switch (link) {
+            case OUTSIDE -> outside;
+            case SIBLING -> sibling;
+            case DANGLING -> outside.resolve("missing");
+        });
+        var name = flat ? linkName : "p";
+        var path = flat ? null : linkName;
+        var source = route == Route.COPY ? sourceInFlatFileRepository() : null;
+        var rootBefore = snapshot(root);
+        var siblingBefore = snapshot(sibling);
+
+        try (var uploaders = uploaders()) {
+            assertPathRejected(() -> attempt(route, target, name, path, source));
+            assertTrue(uploaders.constructed().isEmpty(), "The upload never runs");
+        }
+
+        assertEquals(List.of(), snapshot(outside), "Nothing is written through the link");
+        assertEquals(siblingBefore, snapshot(sibling), "The sibling project is unchanged");
+        assertEquals(rootBefore, snapshot(root), "Nothing is written to the repository");
+    }
+
+    // V1-C: a valid new project reaches the upload unchanged, also before the rules location exists (0.3.3.3)
+    @ParameterizedTest(name = "{0} on {1} with path {2}")
+    @MethodSource("validNewProjects")
+    void hands_a_valid_new_project_to_the_upload(Route route, Backend backend, String path) throws IOException {
+        creatingUser();
+        var target = target(backend);
+        assertFalse(Files.exists(tmp.resolve("repo/DESIGN")), "The rules location does not exist yet");
+        var created = new FileData();
+
+        try (var ignored = uploaders(created)) {
+            assertSame(created, attempt(route, target, "NewProject", path, null));
+        }
+
+        assertUploaded(target, "NewProject", path);
+    }
+
+    // V1-C: the check walks up from the deepest existing folder, so a repository root not created yet is accepted
+    @ParameterizedTest
+    @EnumSource(value = Route.class, names = {"TEMPLATE", "FILES"})
+    void hands_a_new_project_to_the_upload_before_the_repository_root_exists(Route route) throws IOException {
+        creatingUser();
+        var target = secureFileRepository(tmp.resolve("absent/repo"), false);
+        var created = new FileData();
+
+        try (var ignored = uploaders(created)) {
+            assertSame(created, attempt(route, target, "NewProject", null, null));
+        }
+
+        assertUploaded(target, "NewProject", null);
+        assertFalse(Files.exists(tmp.resolve("absent"), LinkOption.NOFOLLOW_LINKS), "The check creates nothing");
+    }
+
+    // V1-C: a valid copy target passes the checks on a backend without a local directory, with and without a path
+    @ParameterizedTest
+    @NullSource
+    @ValueSource(strings = {"a/b"})
+    void copy_project_passes_a_valid_target_on_a_backend_without_a_local_directory(String path) throws IOException {
+        var workspace = creatingUser();
+        var repository = mock(Repository.class);
+        when(repository.getId()).thenReturn("design");
+        when(repository.supports()).thenReturn(new FeaturesBuilder(repository).setVersions(true).build());
+        when(repository.check("DESIGN/Source")).thenReturn(fileData("9"));
+        when(repository.checkHistory("DESIGN/Source", "5")).thenReturn(fileData("5"));
+        var source = mock(RulesProject.class);
+        when(source.getRepository()).thenReturn(repository);
+        when(source.getFolderPath()).thenReturn("DESIGN/Source");
+        var target = targetRepositoryMock();
+
+        // The mocked target is not set up for a write, so the copy may fail after the checks, but never as a 400.
+        var outcome = outcomeOf(() -> service.copyProject(target, "NewProject", path, source, "comment", "5"));
+
+        assertFalse(outcome instanceof BadRequestException, "A valid target is not rejected as a path");
+        verify(repository).checkHistory("DESIGN/Source", "5");
+        // The user is looked up only after the path checks, so the copy got past them.
+        verify(workspace).getUser();
+    }
+
+    // V1-C: a valid copy is written into its own physical folder of a flat or mapped file repository
+    @ParameterizedTest(name = "{0} with path {1}")
+    @MethodSource("validCopyTargets")
+    void copy_project_writes_a_valid_copy_into_its_own_folder(Backend backend, String path) throws IOException {
+        creatingUser();
+        var target = target(backend);
+        var source = sourceInFlatFileRepository();
+
+        assertNotNull(service.copyProject(target, "NewProject", path, source, "comment", null));
+
+        var copied = assertCopiedInside(backend, "NewProject", path);
+        assertEquals(Files.readString(tmp.resolve("design/DESIGN/rules/Src/src.txt")),
+                Files.readString(copied.resolve("src.txt")));
+        assertNothingOutside("repo", "design");
+    }
+
+    // V1-C: a blank name is left to the bean validation that owns it, so the path check does not answer for it
+    @ParameterizedTest
+    @EnumSource(value = Route.class, names = {"TEMPLATE", "FILES"})
+    void leaves_a_blank_project_name_to_the_bean_validation(Route route) throws IOException {
+        creatingUser();
+        var target = target(Backend.FLAT);
+
+        try (var ignored = uploaders()) {
+            assertFalse(outcomeOf(() -> attempt(route, target, " ", null, null)) instanceof BadRequestException,
+                    "A blank name is not rejected as a path");
+        }
+
+        assertUploaded(target, " ", null);
+    }
+
+    // V1-C: a rules location that climbs out of the repository root places every new project folder outside it
+    @ParameterizedTest
+    @EnumSource(Route.class)
+    void rejects_a_new_project_folder_when_the_rules_location_climbs_out_of_the_repository(Route route)
+            throws IOException {
+        creatingUser("../elsewhere/");
+        var target = target(Backend.FLAT);
+        var source = sourceWithoutLocalDirectory();
+        var before = snapshot(tmp);
+
+        try (var uploaders = uploaders()) {
+            assertPathRejected(() -> attempt(route, target, "NewProject", null, source));
+            assertTrue(uploaders.constructed().isEmpty(), "The upload never runs");
+        }
+
+        assertEquals(before, snapshot(tmp), "Nothing is created in the temporary directory");
+    }
+
+    // V1-C: an unknown template keeps its existing 404, which is decided before the path is checked
+    @Test
+    void keeps_the_not_found_answer_for_an_unknown_template_before_the_path_is_checked() {
+        creatingUser();
+        var target = targetRepositoryMock();
+
+        try (var uploaders = uploaders()) {
+            var e = assertThrows(NotFoundException.class, () -> service.createFromTemplate(target, "NewProject",
+                    "../../outside", "predefined", "templates", "No Such Template", "comment", null));
+            assertEquals("openl.error.404.project.template.not-found.message", e.getErrorCode());
+            assertTrue(uploaders.constructed().isEmpty(), "The upload never runs");
+        }
+    }
+
+    // V1-C: a repository failure after the path checks keeps its existing 409; only the path checks answer 400
+    @ParameterizedTest
+    @EnumSource(value = Route.class, names = {"TEMPLATE", "FILES"})
+    void keeps_the_conflict_answer_for_an_upload_the_repository_fails_after_the_path_checks(Route route)
+            throws IOException {
+        creatingUser();
+        var target = target(Backend.FLAT);
+
+        try (var uploaders = Mockito.mockConstruction(ProjectUploader.class, (uploader, context) ->
+                when(uploader.uploadProject()).thenThrow(new ProjectException("The repository refused the write.")))) {
+            var e = assertThrows(ConflictException.class, () -> attempt(route, target, "NewProject", "a/b", null));
+            assertEquals("openl.error.409.project.create.failed.message", e.getErrorCode());
+            assertEquals(1, uploaders.constructed().size(), "The upload ran after the path checks");
+        }
+    }
+
+    // V1-C: a copy the file repository cannot write keeps its existing 409, raised after the path checks passed
+    @Test
+    void keeps_the_conflict_answer_for_a_copy_the_repository_fails_to_write() throws IOException {
+        creatingUser();
+        var target = target(Backend.FLAT);
+        // A regular file where the rules location belongs: inside the root, so contained, but not writable as a folder.
+        write(tmp.resolve("repo/DESIGN"), marker());
+        var source = sourceInFlatFileRepository();
+
+        var e = assertThrows(ConflictException.class,
+                () -> service.copyProject(target, "NewProject", null, source, "comment", null));
+
+        assertEquals("openl.error.409.project.copy.failed.message", e.getErrorCode());
+        assertNothingOutside("repo", "design");
+    }
+
+    // V1-C: a source folder that climbs out of its repository root is refused before anything is read from it
+    @Test
+    void copy_project_rejects_a_source_folder_that_climbs_out_of_its_repository() throws IOException {
+        layOutSource(SourceLayout.FLAT);
+        var files = spy(fileRepository(tmp.resolve("design")));
+        var target = targetRepositoryMock();
+
+        var e = assertThrows(BadRequestException.class, () -> copy(secured(files), "../escaped/Src", target));
+
+        assertEquals("openl.error.400.file.path.invalid.message", e.getErrorCode());
+        verify(files, never()).list(anyString());
+        verify(files, never()).read(anyString());
+        verifyNothingSaved(target);
+    }
+
+    // V1-C: a listed source name that climbs out of the project folder through '..' fails closed
+    @Test
+    void copy_project_rejects_a_listed_source_file_that_climbs_out_of_the_project_folder() throws IOException {
+        layOutSource(SourceLayout.FLAT);
+        var source = source(SourceLayout.FLAT);
+        var stray = new FileData();
+        stray.setName("DESIGN/rules/Src/../Sib/rules.xml");
+        doReturn(List.of(stray)).when(source.files()).list(source.listing());
+        var target = targetRepositoryMock();
+
+        var e = assertThrows(BadRequestException.class, () -> copy(source, target));
+
+        assertEquals("openl.error.400.file.path.invalid.message", e.getErrorCode());
+        verify(source.files(), never()).read(anyString());
+        verifyNothingSaved(target);
+    }
+
+    // V1-C: a user who may create projects and read any source, in a workspace whose rules location is DESIGN/rules/
+    private UserWorkspace creatingUser() {
+        return creatingUser("DESIGN/rules/");
+    }
+
+    // V1-C: a user who may create projects and read any source, in a workspace with the given rules location
+    private UserWorkspace creatingUser(String rulesLocation) {
+        grantCreate();
+        var workspace = workspaceWithRulesLocation(rulesLocation);
+        service = serviceWithWorkspace(workspace);
+        return workspace;
+    }
+
+    // V1-C: lets the permission checks pass, so the path checks decide
+    private void grantCreate() {
+        when(aclProjectsHelper.hasCreateProjectPermission(anyString())).thenReturn(true);
+        var acl = mock(RepositoryAclService.class);
+        when(acl.isGranted(any(RulesProject.class), anyList())).thenReturn(true);
+        when(aclServiceProvider.getDesignRepoAclService()).thenReturn(acl);
+    }
+
+    // V1-C: a workspace whose design repository keeps projects in the given rules location, ready for a copy to be written
+    private static UserWorkspace workspaceWithRulesLocation(String rulesLocation) {
+        var designTimeRepository = mock(DesignTimeRepository.class);
+        when(designTimeRepository.getRulesLocation()).thenReturn(rulesLocation);
+        var localWorkspace = mock(LocalWorkspace.class);
+        when(localWorkspace.getRepository(anyString())).thenReturn(mock(LocalRepository.class));
+        var workspace = mock(UserWorkspace.class);
+        when(workspace.getDesignTimeRepository()).thenReturn(designTimeRepository);
+        when(workspace.getUser()).thenReturn(mock(WorkspaceUser.class));
+        when(workspace.getLocalWorkspace()).thenReturn(localWorkspace);
+        when(workspace.getProjectsLockEngine()).thenReturn(mock(LockEngine.class));
+        return workspace;
+    }
+
+    // V1-C: the design repository a new project is written to; the file repositories keep their root in tmp/repo
+    private Repository target(Backend backend) throws IOException {
+        return switch (backend) {
+            case MOCK -> targetRepositoryMock();
+            case FLAT -> secureFileRepository(Files.createDirectories(tmp.resolve("repo")), false);
+            case MAPPED -> secureFileRepository(Files.createDirectories(tmp.resolve("repo")), true);
+        };
+    }
+
+    // V1-C: a file design repository behind the secured wrapper the REST route receives, mapped onto DESIGN/rules/
+    private Repository secureFileRepository(Path root, boolean mapped) throws IOException {
+        Repository repository = fileRepository(root);
+        if (mapped) {
+            repository = MappedRepository.create(repository, "DESIGN/rules/");
+            closeables.add((Closeable) repository);
+        }
+        return secured(repository);
+    }
+
+    // V1-C: a source project in a repository without a local directory, copied at its latest state
+    private static RulesProject sourceWithoutLocalDirectory() {
+        var repository = mock(Repository.class);
+        when(repository.getId()).thenReturn("design");
+        var source = mock(RulesProject.class);
+        when(source.getRepository()).thenReturn(repository);
+        when(source.getFolderPath()).thenReturn("DESIGN/Source");
+        return source;
+    }
+
+    // V1-C: the project Src of a flat file design repository in tmp/design, the source of a real copy
+    private RulesProject sourceInFlatFileRepository() throws IOException {
+        layOutSource(SourceLayout.FLAT);
+        var copySource = source(SourceLayout.FLAT);
+        var project = mock(RulesProject.class);
+        when(project.getRepository()).thenReturn(copySource.repository());
+        when(project.getFolderPath()).thenReturn(copySource.folderPath());
+        return project;
+    }
+
+    // V1-C: chooses the folder of a new project through the given route, as the REST controller calls it
+    private FileData attempt(Route route, Repository target, String name, String path, RulesProject copySource) {
+        return switch (route) {
+            case TEMPLATE -> createFromTemplate(target, name, path);
+            case FILES -> createFromFiles(target, name, path);
+            case COPY -> service.copyProject(target, name, path, copySource, "comment", null);
+        };
+    }
+
+    // V1-C: creates a project from the bundled empty template
+    private FileData createFromTemplate(Repository repository, String name, String path) {
+        return service.createFromTemplate(repository, name, path, "predefined", "templates", "Empty Project",
+                "comment", null);
+    }
+
+    // V1-C: creates a project from uploaded files; the upload itself is the uploader mock
+    private FileData createFromFiles(Repository repository, String name, String path) {
+        return service.createFromFiles(repository, name, path, List.of(), "comment", "rules/Models.xlsx",
+                "rules/Algorithms.xlsx", "Models", "Algorithms", null);
+    }
+
+    // V1-C: the uploader mock for a call whose created project is not inspected
+    private MockedConstruction<ProjectUploader> uploaders() {
+        return uploaders(new FileData());
+    }
+
+    // V1-C: stands in for every ProjectUploader the service constructs: records its constructor arguments, releases
+    // the files handed to it as the real upload does, and returns a project carrying the given file data
+    private MockedConstruction<ProjectUploader> uploaders(FileData created) {
+        var project = mock(RulesProject.class);
+        when(project.getFileData()).thenReturn(created);
+        return Mockito.mockConstruction(ProjectUploader.class, (uploader, context) -> {
+            uploads.add(new ArrayList<>(context.arguments()));
+            for (var file : (List<?>) context.arguments().get(1)) {
+                ((ProjectFile) file).destroy();
+            }
+            when(uploader.uploadProject()).thenReturn(project);
+        });
+    }
+
+    // V1-C: exactly one upload ran, for the target, the name as given and the path as the service passes it on
+    private void assertUploaded(Repository target, String name, String path) {
+        assertEquals(1, uploads.size(), "The upload runs once");
+        var arguments = uploads.get(0);
+        assertSame(target, arguments.get(0));
+        assertEquals(name, arguments.get(2));
+        assertEquals(StringUtils.trimToEmpty(path), arguments.get(3));
+    }
+
+    // V1-C: the copy sits in its physical folder in tmp/repo, which resolves inside the real repository root
+    private Path assertCopiedInside(Backend backend, String name, String path) throws IOException {
+        var root = tmp.resolve("repo");
+        var folder = backend == Backend.MAPPED
+                ? root.resolve(FileMappingData.internalPath(path, name))
+                : root.resolve("DESIGN/rules/" + name);
+        assertTrue(Files.isRegularFile(folder.resolve("rules.xml"), LinkOption.NOFOLLOW_LINKS),
+                "The copy is written to its own folder");
+        assertTrue(folder.toRealPath().startsWith(root.toRealPath()), "The copy stays inside the repository root");
+        return folder;
+    }
+
+    // V1-C: nothing appears in the temporary directory besides the repositories the test set up
+    private void assertNothingOutside(String... roots) throws IOException {
+        try (var entries = Files.list(tmp)) {
+            var unexpected = entries.map(entry -> entry.getFileName().toString())
+                    .filter(entry -> !List.of(roots).contains(entry))
+                    .toList();
+            assertEquals(List.of(), unexpected, "Nothing is written outside the repositories");
+        }
+    }
+
+    // V1-C: the rejection every path check of a new project ends in: 400 with the existing invalid-path key
+    private static void assertPathRejected(Executable call) {
+        var e = assertThrows(BadRequestException.class, call);
+        assertEquals("openl.error.400.file.path.invalid.message", e.getErrorCode());
+        assertEquals(HttpStatus.BAD_REQUEST, e.getHttpStatus());
+    }
+
+    // V1-C: the exception a call ends with, or null when it completes
+    private static Throwable outcomeOf(Executable call) {
+        try {
+            call.execute();
+            return null;
+        } catch (Throwable e) {
+            return e;
+        }
+    }
+
+    // V1-C: today's NameChecker verdict on a path, the reference a reserved name is held to
+    private static boolean isRejectedByNameChecker(String path) {
+        try {
+            NameChecker.validatePath(path);
+            return false;
+        } catch (IOException | IllegalArgumentException e) {
+            return true;
+        }
+    }
+
+    // V1-C: every entry below a folder, relative to it and sorted, without following links; empty when it is absent
+    private static List<String> snapshot(Path dir) throws IOException {
+        if (!Files.exists(dir, LinkOption.NOFOLLOW_LINKS)) {
+            return List.of();
+        }
+        try (var paths = Files.walk(dir)) {
+            return paths.filter(entry -> !entry.equals(dir))
+                    .map(entry -> dir.relativize(entry).toString())
+                    .sorted()
+                    .toList();
+        }
     }
 
     private ProjectCreationService serviceWithWorkspace(UserWorkspace workspace) {

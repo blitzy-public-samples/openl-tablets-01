@@ -38,7 +38,9 @@ import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
+import java.util.TreeSet;
 import java.util.zip.ZipEntry;
+import java.util.zip.ZipInputStream;
 import java.util.zip.ZipOutputStream;
 
 import org.apache.commons.lang3.RandomStringUtils;
@@ -991,6 +993,74 @@ class ProjectFilesServiceTest {
         assertOutsideAndSiblingUnchanged("newdir/sub/x.txt on " + kind, mount, before);
     }
 
+    // V1: surface B payload B3 (absolute POSIX path) on the operations that take it as a path to write, delete or read:
+    // rejected with an existing key and nothing written, or kept inside P1; it is never written outside
+    @ParameterizedTest
+    @EnumSource(value = PathOperation.class, names = "UPLOAD", mode = EnumSource.Mode.EXCLUDE)
+    void b03AbsolutePathIsRejectedOrKeptInsideTheProject(PathOperation operation) throws IOException {
+        var mount = openedMount();
+        var service = service(mount.acl());
+        var row = "B3 /x.txt through " + operation;
+        var before = snapshot(mount);
+
+        try {
+            operation.apply(service, mount, "/x.txt");
+        } catch (RestRuntimeException rejected) {
+            var invalid = rejected instanceof BadRequestException && INVALID_PATH.equals(rejected.getErrorCode());
+            var notFound = rejected instanceof NotFoundException && NOT_FOUND.equals(rejected.getErrorCode());
+            assertTrue(invalid || notFound, row + " is rejected as an invalid path or not found, not "
+                    + rejected.getClass().getSimpleName() + " " + rejected.getErrorCode());
+            assertEquals(before.tree(), snapshot(mount).tree(), row + ": the rejection writes nothing");
+        }
+        assertChangesOnlyInsideTheProject(row, mount, before);
+    }
+
+    // V1: surface B payload B3 (absolute POSIX base folder of an upload): rejected as an invalid path, or kept in P1
+    @Test
+    void b03AbsoluteUploadBaseIsRejectedOrKeptInsideTheProject() throws IOException {
+        var mount = openedMount();
+        var service = service(mount.acl());
+        var row = "B3 upload base /abs";
+        var before = snapshot(mount);
+
+        try {
+            service.uploadFiles(mount.root(), "/abs", List.of(file("y.txt", marker())), ConflictPolicy.FAIL);
+        } catch (BadRequestException rejected) {
+            assertEquals(INVALID_PATH, rejected.getErrorCode(), row + " is rejected as an invalid path");
+            assertEquals(before.tree(), snapshot(mount).tree(), row + ": the rejection writes nothing");
+        }
+        assertChangesOnlyInsideTheProject(row, mount, before);
+    }
+
+    // V1: positive control on every mount: the containment checks still export contained entries and still find them
+    // by content
+    @ParameterizedTest
+    @EnumSource(MountKind.class)
+    void containedEntriesAreStillExportedAndFoundByContent(MountKind kind) throws IOException {
+        var mount = mount(kind);
+        var needle = marker();
+        write(mount.project().resolve("docs/ok.txt"), needle);
+        var service = service(mount.acl(), new FileNodeMapperImpl());
+        var before = snapshot(mount);
+        var whole = new ByteArrayOutputStream();
+        var docs = new ByteArrayOutputStream();
+
+        service.writeFolderAsZip(mount.root(), "", whole, null);
+        service.writeFolderAsZip(mount.root(), mount.path("docs"), docs, null);
+        var found = service.search(mount.root(), FileSearchQuery.builder().content(needle).recursive(true).build());
+
+        var exported = unzip(whole.toByteArray());
+        assertTrue(exported.keySet().containsAll(List.of(mount.path("rules.xml"), mount.path(SOURCE),
+                mount.path("docs/ok.txt"))), "The export of the whole mount on " + kind + " holds every file of P1");
+        assertEquals(needle, exported.get(mount.path("docs/ok.txt")),
+                "The export of the whole mount on " + kind + " carries the content of docs/ok.txt");
+        assertEquals(Map.of("ok.txt", needle), unzip(docs.toByteArray()),
+                "The export of docs on " + kind + " holds docs/ok.txt only");
+        assertEquals(List.of(mount.path("docs/ok.txt")), pathsOf(found),
+                "The content search on " + kind + " still finds docs/ok.txt");
+        assertOutsideAndSiblingUnchanged("Export and content search on " + kind, mount, before);
+    }
+
     // ---------------------------------------------------------------------------------------------
     // V1: fixtures of the surface B matrix
     // ---------------------------------------------------------------------------------------------
@@ -1244,6 +1314,23 @@ class ProjectFilesServiceTest {
         assertEquals(before.sibling(), after.sibling(), row + ": the sibling project P2 is unchanged");
     }
 
+    // V1: an accepted payload creates, modifies or deletes entries of the project P1 only.
+    private void assertChangesOnlyInsideTheProject(String row, Mount mount, Snapshot before) throws IOException {
+        assertOutsideAndSiblingUnchanged(row, mount, before);
+        var after = snapshot(mount).tree();
+        var changed = new TreeSet<String>();
+        after.forEach((path, state) -> {
+            if (!state.equals(before.tree().get(path))) {
+                changed.add(path);
+            }
+        });
+        before.tree().keySet().stream().filter(path -> !after.containsKey(path)).forEach(changed::add);
+        var project = tmp.relativize(mount.project());
+        for (var path : changed) {
+            assertTrue(Path.of(path).startsWith(project), row + " changes only entries of P1, not " + path);
+        }
+    }
+
     // V1: the destination guard's rejection, 400 with the existing key, never a conflict.
     private static void assertPathRejected(String row, Executable call) {
         var rejected = assertThrows(BadRequestException.class, call, row + " is rejected");
@@ -1318,6 +1405,17 @@ class ProjectFilesServiceTest {
             archive.closeEntry();
         }
         return new ByteArrayInputStream(bytes.toByteArray());
+    }
+
+    // V1: the entries of an exported archive, each name with its content.
+    private static Map<String, String> unzip(byte[] archive) throws IOException {
+        var entries = new TreeMap<String, String>();
+        try (var in = new ZipInputStream(new ByteArrayInputStream(archive))) {
+            for (var entry = in.getNextEntry(); entry != null; entry = in.getNextEntry()) {
+                entries.put(entry.getName(), new String(in.readAllBytes(), StandardCharsets.UTF_8));
+            }
+        }
+        return entries;
     }
 
     // V1: a payload with its control and non-ASCII characters escaped, for assertion messages.

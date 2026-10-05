@@ -1,5 +1,7 @@
 package org.openl.studio.repositories.service;
 
+// V1-D: never, LinkedHashMap, ThreadLocalRandom, ZipArchiveEntry, ZipArchiveOutputStream and Executable serve the
+// surface D link tests; the import block itself cannot hold a comment, as Spotless rewrites it.
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -13,6 +15,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -29,14 +32,18 @@ import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 import java.util.zip.ZipOutputStream;
 
+import org.apache.commons.compress.archivers.zip.ZipArchiveEntry;
+import org.apache.commons.compress.archivers.zip.ZipArchiveOutputStream;
 import org.eclipse.jgit.api.Git;
 import org.eclipse.jgit.lib.FileMode;
 import org.junit.jupiter.api.AfterEach;
@@ -45,6 +52,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.DisabledOnOs;
 import org.junit.jupiter.api.condition.OS;
+import org.junit.jupiter.api.function.Executable;
 import org.junit.jupiter.api.io.TempDir;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mockito;
@@ -434,6 +442,10 @@ class ZipProjectSaveStrategyTest {
         var project = root.resolve(BASE_RULES_LOCATION + "Fresh");
         assertTrue(Files.isRegularFile(project.resolve(ProjectDescriptor.FILE_NAME)), "The descriptor is saved");
         assertTrue(Files.isRegularFile(project.resolve("rules/Project2-Main.xlsx")), "A nested entry is saved");
+        // V1-D: the guard leaves the descriptor rewrite alone, so the archive's 'project2' becomes the upload's name
+        try (var stream = Files.newInputStream(project.resolve(ProjectDescriptor.FILE_NAME))) {
+            assertEquals("Fresh", ProjectDescriptor.read(stream).getName(), "The descriptor carries the project name");
+        }
     }
 
     @Test
@@ -863,6 +875,103 @@ class ZipProjectSaveStrategyTest {
         Assertions.assertSame(failure, e, "The failure of the repository is reported as it is");
     }
 
+    // ---------------------------------------------------------------------------------------------
+    // V1-D: the remaining upload-project link payloads of the surface D matrix, over the secured file repository the
+    // REST archive route receives
+    // ---------------------------------------------------------------------------------------------
+
+    // V1-D: the rules location itself is a link to outside, so the new project folder below it would leave the root
+    @Test
+    @DisabledOnOs(OS.WINDOWS)
+    void saveIntoAConfiguredFileRepositoryRejectsARulesLocationLinkedOutside() throws IOException {
+        var root = Files.createDirectories(tmp.resolve("repo"));
+        var outside = Files.createDirectories(tmp.resolve("outside"));
+        Files.createSymbolicLink(root.resolve(BASE_RULES_LOCATION), outside);
+        var repository = secured(configuredFileRepository(root));
+        var model = new CreateUpdateProjectModel("design", "jsmith", "Project 1", null, "c", false);
+
+        assertPathRejected(() -> saveStrategy.save(repository, model, PROJECT_ARCHIVE));
+
+        assertEquals(List.of(), snapshot(outside), "Nothing is written through a rules location linked outside");
+    }
+
+    // V1-D: an ancestor of a mapped project folder is a link to outside
+    @Test
+    @DisabledOnOs(OS.WINDOWS)
+    void saveIntoAMappedConfiguredFileRepositoryRejectsAnAncestorFolderLinkedOutside() throws IOException {
+        var root = Files.createDirectories(tmp.resolve("repo"));
+        var outside = Files.createDirectories(tmp.resolve("outside"));
+        Files.createSymbolicLink(root.resolve("link"), outside);
+        var repository = secured(mapped(configuredFileRepository(root)));
+        var model = new CreateUpdateProjectModel("design", "jsmith", "Project 1", "link/Project 1", "c", false);
+
+        assertPathRejected(() -> saveStrategy.save(repository, model, PROJECT_ARCHIVE));
+
+        assertEquals(List.of(), snapshot(outside), "Nothing is written below a mapped ancestor linked outside");
+    }
+
+    // V1-D: the new project folder is a dangling link, which can neither be resolved nor written through
+    @Test
+    @DisabledOnOs(OS.WINDOWS)
+    void saveIntoAConfiguredFileRepositoryRejectsADanglingProjectFolderLink() throws IOException {
+        var root = Files.createDirectories(tmp.resolve("repo"));
+        var missing = tmp.resolve("outside/ghost");
+        var rulesLocation = Files.createDirectories(root.resolve(BASE_RULES_LOCATION));
+        var ghost = Files.createSymbolicLink(rulesLocation.resolve("ghost"), missing);
+        var repository = secured(configuredFileRepository(root));
+        var model = new CreateUpdateProjectModel("design", "jsmith", "ghost", null, "c", false);
+
+        assertPathRejected(() -> saveStrategy.save(repository, model, PROJECT_ARCHIVE));
+
+        assertFalse(Files.exists(missing.getParent(), LinkOption.NOFOLLOW_LINKS),
+                "Nothing is created where the dangling link points");
+        assertTrue(Files.isSymbolicLink(ghost), "The dangling link is left as it was");
+    }
+
+    // V1-D: overwrite through an existing link (0.6.2.4 D15), with raw archive entry names that reach the link
+    @Test
+    @DisabledOnOs(OS.WINDOWS)
+    void overwritingAProjectRejectsARawArchiveEntryThroughAnExistingLinkAndLeavesTheProjectAsItWas()
+            throws IOException {
+        var root = Files.createDirectories(tmp.resolve("repo"));
+        var outside = Files.createDirectories(tmp.resolve("outside"));
+        var project = Files.createDirectories(root.resolve(BASE_RULES_LOCATION + "Existing"));
+        var descriptor = "<project><name>Existing</name></project>".getBytes(StandardCharsets.UTF_8);
+        Files.write(project.resolve(ProjectDescriptor.FILE_NAME), descriptor);
+        var link = Files.createSymbolicLink(project.resolve("link"), outside);
+        var before = snapshot(project);
+        var workbook = new byte[16];
+        ThreadLocalRandom.current().nextBytes(workbook);
+        var entries = new LinkedHashMap<String, byte[]>();
+        entries.put(ProjectDescriptor.FILE_NAME, descriptor);
+        entries.put("link/evil.xlsx", workbook);
+        var archive = zip(tmp.resolve("overwrite-through-link.zip"), entries);
+        var repository = secured(configuredFileRepository(root));
+        var model = new CreateUpdateProjectModel("design", "jsmith", "Existing", null, "c", true);
+
+        assertPathRejected(() -> saveStrategy.save(repository, model, archive));
+
+        assertFalse(Files.exists(outside.resolve("evil.xlsx"), LinkOption.NOFOLLOW_LINKS),
+                "No entry is written through the link the existing project folder holds");
+        assertEquals(before, snapshot(project), "The existing project folder is left as it was");
+        assertTrue(Files.isSymbolicLink(link), "The link itself is left as it was");
+        assertArrayEquals(descriptor, Files.readAllBytes(project.resolve(ProjectDescriptor.FILE_NAME)),
+                "The existing descriptor is left as it was");
+    }
+
+    // V1-D: defense in depth, a climbing mapped path on a non-filesystem backend is refused lexically before saving
+    @Test
+    void saveIntoAMockedMappedRepositoryRejectsAClimbingPathBeforeSaving() throws Exception {
+        mockDesignRepository(MappedRepository.class, "design1", builder -> builder.setVersions(true));
+        var model = new CreateUpdateProjectModel("design1", "jsmith", "Project 1", "a/../../x", "c", false);
+        var repo = designTimeRepositoryMock.getRepository(model.getRepoName());
+
+        assertPathRejected(() -> saveStrategy.save(repo, model, PROJECT_ARCHIVE));
+
+        verify(repo, never()).save(any(FileData.class), any(), eq(ChangesetType.FULL));
+        verify(repo, never()).save(any(FileData.class), any(InputStream.class));
+    }
+
     private ProjectDescriptor assertProjectDescriptor(String expectedRootFolder,
                                                       String expectedName,
                                                       FileItem descriptor) {
@@ -1106,5 +1215,33 @@ class ZipProjectSaveStrategyTest {
         try (var git = Git.open(workingTree.toFile())) {
             assertEquals(branch, git.getRepository().getBranch(), "Fixture: the branch checked out");
         }
+    }
+
+    // V1-D: an archive holding the given entries under their raw names, in the given order
+    private static Path zip(Path target, Map<String, byte[]> entries) throws IOException {
+        try (var zos = new ZipArchiveOutputStream(Files.newOutputStream(target))) {
+            for (var entry : entries.entrySet()) {
+                zos.putArchiveEntry(new ZipArchiveEntry(entry.getKey()));
+                zos.write(entry.getValue());
+                zos.closeArchiveEntry();
+            }
+        }
+        return target;
+    }
+
+    // V1-D: the entries below a folder, relative to it and sorted; a link is listed and never followed
+    private static List<String> snapshot(Path dir) throws IOException {
+        if (!Files.exists(dir, LinkOption.NOFOLLOW_LINKS)) {
+            return List.of();
+        }
+        try (var paths = Files.walk(dir)) {
+            return paths.filter(p -> !p.equals(dir)).map(p -> dir.relativize(p).toString()).sorted().toList();
+        }
+    }
+
+    // V1-D: the rejection the upload destination guard raises, 400 with the existing invalid-path key
+    private static void assertPathRejected(Executable call) {
+        var e = assertThrows(BadRequestException.class, call);
+        assertEquals(INVALID_PATH, e.getErrorCode());
     }
 }
