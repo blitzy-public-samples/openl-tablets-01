@@ -13,6 +13,7 @@ import java.net.URISyntaxException;
 import java.net.UnknownHostException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -102,6 +103,7 @@ import org.eclipse.jgit.util.RawCharSequence;
 import org.eclipse.jgit.util.io.NullOutputStream;
 import org.jspecify.annotations.Nullable;
 
+import org.openl.rules.repository.LocalWorkingTree;
 import org.openl.rules.repository.api.BranchRepository;
 import org.openl.rules.repository.api.BranchStatus;
 import org.openl.rules.repository.api.BranchTreeRevision;
@@ -124,8 +126,9 @@ import org.openl.util.FileUtils;
 import org.openl.util.IOUtils;
 import org.openl.util.StringUtils;
 
+// V1: reveals the working tree saves are written through, so archive uploads can check it for links
 @Slf4j
-public class GitRepository implements BranchRepository, Closeable {
+public class GitRepository implements BranchRepository, Closeable, LocalWorkingTree {
     private String id;
     private String name;
     private String uri;
@@ -2849,6 +2852,12 @@ public class GitRepository implements BranchRepository, Closeable {
         } else {
             throw new IOException("Git repository is not initialized");
         }
+    }
+
+    // V1: the folder every save writes its files under, which may hold links the working copy was given
+    @Override
+    public @Nullable Path getLocalWorkingTree() {
+        return localGitRoot == null ? null : localGitRoot.toPath();
     }
 
     private CredentialsProvider getCredentialsProvider(GitActionType actionType) {

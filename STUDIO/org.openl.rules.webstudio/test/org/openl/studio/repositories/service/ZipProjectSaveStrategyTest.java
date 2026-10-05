@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentCaptor.forClass;
@@ -24,6 +25,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.FileSystem;
 import java.nio.file.FileSystems;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -35,7 +37,10 @@ import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 import java.util.zip.ZipOutputStream;
 
+import org.eclipse.jgit.api.Git;
+import org.eclipse.jgit.lib.FileMode;
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.DisabledOnOs;
@@ -46,13 +51,19 @@ import org.mockito.Mockito;
 
 import org.openl.rules.project.model.Module;
 import org.openl.rules.project.model.ProjectDescriptor;
+import org.openl.rules.repository.LocalWorkingTree;
 import org.openl.rules.repository.PathCheckedRepository;
 import org.openl.rules.repository.RepositoryInstatiator;
+import org.openl.rules.repository.api.BranchRepository;
 import org.openl.rules.repository.api.ChangesetType;
 import org.openl.rules.repository.api.FeaturesBuilder;
 import org.openl.rules.repository.api.FileData;
 import org.openl.rules.repository.api.FileItem;
 import org.openl.rules.repository.api.Repository;
+import org.openl.rules.repository.file.FileSystemRepository;
+import org.openl.rules.repository.folder.FileChangesFromFolder;
+import org.openl.rules.repository.git.GitRepository;
+import org.openl.rules.repository.git.GitRepositoryFactory;
 import org.openl.rules.security.SimpleUser;
 import org.openl.rules.webstudio.service.UserManagementService;
 import org.openl.rules.webstudio.web.repository.upload.zip.ZipCharsetDetector;
@@ -72,6 +83,8 @@ class ZipProjectSaveStrategyTest {
     private static final String BASE_RULES_LOCATION = "DESIGN/";
     // V1: the archive and the rejection the upload destination guard tests share
     private static final Path PROJECT_ARCHIVE = Path.of("test-resources/upload/zip/project.zip");
+    // V1: the archive a Git project is first saved from, so the overwrite tests can place a link at 'rules'
+    private static final Path EXCEL_ONLY_ARCHIVE = Path.of("test-resources/upload/zip/excel-only-project.zip");
     private static final String INVALID_PATH = "openl.error.400.file.path.invalid.message";
 
     private ZipProjectSaveStrategy saveStrategy;
@@ -239,6 +252,25 @@ class ZipProjectSaveStrategyTest {
         assertEquals("*.xlsx", modulePaths.getFirst());
         assertTrue(modulePaths.contains("Legacy.xls"));
         assertTrue(modulePaths.contains("Macro.xlsm"));
+    }
+
+    // V1: the descriptor a save generates, and the guard checks, lists no AppleDouble companion of a workbook
+    @Test
+    void testSaveNotFolderRepoSkipsAppleDoubleCompanionsOfExcelModules(@TempDir Path tempFolder) throws Exception {
+        mockDesignRepository(Repository.class, "design2", builder -> builder.setVersions(true));
+        var model = new CreateUpdateProjectModel("design2", "jsmith", "Project 2", null, null, false);
+        var repo = designTimeRepositoryMock.getRepository(model.getRepoName());
+        var actualStream = captureStream(repo);
+
+        var source = tempFolder.resolve("apple-double-project.zip");
+        try (var zip = new ZipOutputStream(Files.newOutputStream(source))) {
+            zip.putNextEntry(new ZipEntry("Legacy.xls"));
+            zip.putNextEntry(new ZipEntry("._Legacy.xls"));
+        }
+        saveStrategy.save(repo, model, source);
+
+        var modulePaths = descriptor(actualStream.get()).getModules().stream().map(Module::getRulesRootPath).toList();
+        assertEquals(List.of("*.xlsx", "Legacy.xls"), modulePaths);
     }
 
     @Test
@@ -432,6 +464,405 @@ class ZipProjectSaveStrategyTest {
         assertFalse(Files.exists(stale), "A file the archive does not hold is removed by the full save");
     }
 
+    // ---------------------------------------------------------------------------------------------
+    // V1: the same guard over a Git repository built from its settings, which writes the files it
+    // saves through its local working tree, so a link in that tree leads a write wherever it points
+    // ---------------------------------------------------------------------------------------------
+
+    @Test
+    @DisabledOnOs(OS.WINDOWS)
+    void overwritingAProjectOfAConfiguredGitRepositoryRejectsAnEntryThroughAnUntrackedOutsideLink() throws IOException {
+        var root = tmp.resolve("design");
+        var outside = Files.createDirectories(tmp.resolve("outside"));
+        var repository = secured(configuredGitRepository(root));
+        saveNewProject(repository, "Existing", null);
+        // The archive holds rules/Project2-Main.xlsx, so the save would write it through this link.
+        var link = Files.createSymbolicLink(root.resolve(BASE_RULES_LOCATION + "Existing/rules"), outside);
+        var model = new CreateUpdateProjectModel("design", "jsmith", "Existing", null, null, true);
+
+        var e = assertThrows(BadRequestException.class, () -> saveStrategy.save(repository, model, PROJECT_ARCHIVE));
+
+        assertEquals(INVALID_PATH, e.getErrorCode());
+        assertEmpty(outside, "No entry is written through an untracked link in the working tree");
+        assertTrue(Files.isSymbolicLink(link), "The existing project folder is left as it was");
+    }
+
+    @Test
+    @DisabledOnOs(OS.WINDOWS)
+    void overwritingAProjectOfAConfiguredGitRepositoryRejectsAnEntryThroughATrackedOutsideLink() throws Exception {
+        var root = tmp.resolve("design");
+        var outside = Files.createDirectories(tmp.resolve("outside"));
+        var repository = secured(configuredGitRepository(root));
+        saveNewProject(repository, "Existing", null);
+        var linkPath = BASE_RULES_LOCATION + "Existing/rules";
+        var link = Files.createSymbolicLink(root.resolve(linkPath), outside);
+        try (var git = Git.open(root.toFile())) {
+            git.add().addFilepattern(linkPath).call();
+            git.commit()
+                    .setMessage("Track a link to outside")
+                    .setAuthor("Test", "test@example.org")
+                    .setCommitter("Test", "test@example.org")
+                    .setSign(false)
+                    .call();
+            assertEquals(FileMode.SYMLINK,
+                    git.getRepository().readDirCache().getEntry(linkPath).getFileMode(),
+                    "Fixture: the link is tracked as a link");
+        }
+        var model = new CreateUpdateProjectModel("design", "jsmith", "Existing", null, null, true);
+
+        var e = assertThrows(BadRequestException.class, () -> saveStrategy.save(repository, model, PROJECT_ARCHIVE));
+
+        assertEquals(INVALID_PATH, e.getErrorCode());
+        assertEmpty(outside, "No entry is written through a tracked link in the working tree");
+        assertTrue(Files.isSymbolicLink(link), "The existing project folder is left as it was");
+    }
+
+    @Test
+    @DisabledOnOs(OS.WINDOWS)
+    void overwritingAProjectOfAMappedConfiguredGitRepositoryRejectsAnEntryThroughAnOutsideLink() throws IOException {
+        var root = tmp.resolve("design");
+        var outside = Files.createDirectories(tmp.resolve("outside"));
+        var repository = secured(mapped(configuredGitRepository(root)));
+        saveNewProject(repository, "Existing", "linked/Existing");
+        var link = Files.createSymbolicLink(root.resolve("linked/Existing/rules"), outside);
+        var model = new CreateUpdateProjectModel("design", "jsmith", "Existing", "linked/Existing", null, true);
+
+        var e = assertThrows(BadRequestException.class, () -> saveStrategy.save(repository, model, PROJECT_ARCHIVE));
+
+        assertEquals(INVALID_PATH, e.getErrorCode());
+        assertEmpty(outside, "No entry is written through a link in a mapped project of the working tree");
+        assertTrue(Files.isSymbolicLink(link), "The existing project folder is left as it was");
+    }
+
+    @Test
+    @DisabledOnOs(OS.WINDOWS)
+    void overwritingAProjectOfAnUnwrappedGitRepositoryRejectsAnEntryThroughAnOutsideLink() throws IOException {
+        var root = tmp.resolve("design");
+        var outside = Files.createDirectories(tmp.resolve("outside"));
+        // The factory itself returns the Git repository without the path-checked wrapper.
+        var bare = new GitRepositoryFactory().create(Map.of("uri", root.toString())::get);
+        closeables.add(bare);
+        assertInstanceOf(GitRepository.class, bare, "Fixture: the Git repository is not wrapped");
+        var repository = secured(bare);
+        saveNewProject(repository, "Existing", null);
+        var link = Files.createSymbolicLink(root.resolve(BASE_RULES_LOCATION + "Existing/rules"), outside);
+        var model = new CreateUpdateProjectModel("design", "jsmith", "Existing", null, null, true);
+
+        var e = assertThrows(BadRequestException.class, () -> saveStrategy.save(repository, model, PROJECT_ARCHIVE));
+
+        assertEquals(INVALID_PATH, e.getErrorCode());
+        assertEmpty(outside, "No entry is written through a link in the working tree of an unwrapped repository");
+        assertTrue(Files.isSymbolicLink(link), "The existing project folder is left as it was");
+    }
+
+    @Test
+    @DisabledOnOs(OS.WINDOWS)
+    void saveIntoAConfiguredGitRepositoryRejectsAProjectFolderLinkedOutside() throws IOException {
+        var root = tmp.resolve("design");
+        var outside = Files.createDirectories(tmp.resolve("outside"));
+        // The repository creates its working tree, so the link is placed in it afterwards.
+        var repository = secured(configuredGitRepository(root));
+        Files.createSymbolicLink(Files.createDirectories(root.resolve(BASE_RULES_LOCATION)).resolve("Linked"),
+                outside);
+        var model = new CreateUpdateProjectModel("design", "jsmith", "Linked", null, null, false);
+
+        var e = assertThrows(BadRequestException.class, () -> saveStrategy.save(repository, model, PROJECT_ARCHIVE));
+
+        assertEquals(INVALID_PATH, e.getErrorCode());
+        assertEmpty(outside, "Nothing is written through a project folder of the working tree linked outside");
+    }
+
+    @Test
+    void anOrdinaryUploadIntoAConfiguredGitRepositorySucceeds() throws IOException {
+        var root = tmp.resolve("design");
+        var repository = secured(configuredGitRepository(root));
+        var model = new CreateUpdateProjectModel("design", "jsmith", "Fresh", null, null, false);
+
+        assertNotNull(saveStrategy.save(repository, model, PROJECT_ARCHIVE), "The saved project folder is reported");
+
+        var project = root.resolve(BASE_RULES_LOCATION + "Fresh");
+        assertTrue(Files.isRegularFile(project.resolve(ProjectDescriptor.FILE_NAME)), "The descriptor is saved");
+        assertTrue(Files.isRegularFile(project.resolve("rules/Project2-Main.xlsx")), "A nested entry is saved");
+        assertNotNull(repository.check(BASE_RULES_LOCATION + "Fresh/rules/Project2-Main.xlsx"),
+                "The nested entry is committed");
+    }
+
+    @Test
+    void overwritingAnOrdinaryProjectOfAConfiguredGitRepositorySucceeds() throws IOException {
+        var root = tmp.resolve("design");
+        var repository = secured(configuredGitRepository(root));
+        saveNewProject(repository, "Existing", null);
+        var project = root.resolve(BASE_RULES_LOCATION + "Existing");
+        assertTrue(Files.isRegularFile(project.resolve("Main.xlsx")), "Fixture: the first save wrote the workbook");
+        var model = new CreateUpdateProjectModel("design", "jsmith", "Existing", null, null, true);
+
+        assertNotNull(saveStrategy.save(repository, model, PROJECT_ARCHIVE), "The saved project folder is reported");
+
+        assertTrue(Files.isRegularFile(project.resolve("rules/Project2-Main.xlsx")), "The new entry is saved");
+        assertNotNull(repository.check(BASE_RULES_LOCATION + "Existing/rules/Project2-Main.xlsx"),
+                "The new entry is committed");
+        assertFalse(Files.exists(project.resolve("Main.xlsx")), "A file the archive does not hold is removed");
+        assertNull(repository.check(BASE_RULES_LOCATION + "Existing/Main.xlsx"),
+                "The removal of a file the archive does not hold is committed");
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // V1: a Git repository checks out the branch it saves to only once it writes, and that branch may
+    // hold a link the tree checked out before did not, so every entry is checked in the tree it is
+    // written through
+    // ---------------------------------------------------------------------------------------------
+
+    @Test
+    @DisabledOnOs(OS.WINDOWS)
+    void overwritingOnTheBaseBranchWhileAnotherIsCheckedOutRejectsAnEntryThroughALinkOfTheBaseBranch()
+            throws Exception {
+        var root = tmp.resolve("design");
+        var outside = Files.createDirectories(tmp.resolve("outside"));
+        var repository = (BranchRepository) secured(configuredGitRepository(root));
+        saveNewProject(repository, "Existing", null);
+        repository.createRepositoryBranch("B", null);
+        var linkPath = BASE_RULES_LOCATION + "Existing/rules";
+        commitLink(root, linkPath, outside);
+        // An ordinary save on the branch leaves it checked out, and the branch holds no link.
+        saveNewProject(repository.forBranch("B"), "Other", null);
+        assertCheckedOut(root, "B");
+        assertFalse(Files.isSymbolicLink(root.resolve(linkPath)), "Fixture: the checked-out tree holds no link");
+        var model = new CreateUpdateProjectModel("design", "jsmith", "Existing", null, null, true);
+
+        var e = assertThrows(BadRequestException.class, () -> saveStrategy.save(repository, model, PROJECT_ARCHIVE));
+
+        assertEquals(INVALID_PATH, e.getErrorCode());
+        assertEmpty(outside, "No entry is written through a link of the branch the save checks out");
+        assertNotNull(repository.check(BASE_RULES_LOCATION + "Existing/Main.xlsx"), "The project is left as it was");
+    }
+
+    @Test
+    @DisabledOnOs(OS.WINDOWS)
+    void overwritingThroughABranchWhoseTreeHoldsALinkRejectsTheEntryWhileTheBaseBranchIsCheckedOut()
+            throws Exception {
+        var root = tmp.resolve("design");
+        var outside = Files.createDirectories(tmp.resolve("outside"));
+        var repository = (BranchRepository) secured(configuredGitRepository(root));
+        var baseBranch = repository.getBranch();
+        saveNewProject(repository, "Existing", null);
+        repository.createRepositoryBranch("B", null);
+        var onBranch = repository.forBranch("B");
+        var linkPath = BASE_RULES_LOCATION + "Existing/rules";
+        saveNewProject(onBranch, "Other", null);
+        commitLink(root, linkPath, outside);
+        // An ordinary save on the base branch leaves it checked out, with the project folder and without the link.
+        saveNewProject(repository, "Another", null);
+        assertCheckedOut(root, baseBranch);
+        assertFalse(Files.isSymbolicLink(root.resolve(linkPath)), "Fixture: the checked-out tree holds no link");
+        assertTrue(Files.isDirectory(root.resolve(BASE_RULES_LOCATION + "Existing")),
+                "Fixture: the checked-out tree holds the project folder");
+        var model = new CreateUpdateProjectModel("design", "jsmith", "Existing", null, null, true);
+
+        var e = assertThrows(BadRequestException.class, () -> saveStrategy.save(onBranch, model, PROJECT_ARCHIVE));
+
+        assertEquals(INVALID_PATH, e.getErrorCode());
+        assertEmpty(outside, "No entry is written through a link of the branch the save checks out");
+        assertNotNull(onBranch.check(BASE_RULES_LOCATION + "Existing/Main.xlsx"), "The project is left as it was");
+    }
+
+    @Test
+    @DisabledOnOs(OS.WINDOWS)
+    void overwritingThroughABranchRejectsAnEntryThroughItsLinkWhenTheCheckedOutTreeLacksTheProjectFolder()
+            throws Exception {
+        var root = tmp.resolve("design");
+        var outside = Files.createDirectories(tmp.resolve("outside"));
+        var repository = (BranchRepository) secured(configuredGitRepository(root));
+        var baseBranch = repository.getBranch();
+        saveNewProject(repository, "Other", null);
+        repository.createRepositoryBranch("B", null);
+        var onBranch = repository.forBranch("B");
+        var linkPath = BASE_RULES_LOCATION + "Existing/rules";
+        saveNewProject(onBranch, "Existing", null);
+        commitLink(root, linkPath, outside);
+        // The base branch has no such project, so the folder is missing once that branch is checked out again.
+        saveNewProject(repository, "Another", null);
+        assertCheckedOut(root, baseBranch);
+        assertFalse(Files.exists(root.resolve(BASE_RULES_LOCATION + "Existing"), LinkOption.NOFOLLOW_LINKS),
+                "Fixture: the checked-out tree lacks the project folder");
+        var model = new CreateUpdateProjectModel("design", "jsmith", "Existing", null, null, true);
+
+        var e = assertThrows(BadRequestException.class, () -> saveStrategy.save(onBranch, model, PROJECT_ARCHIVE));
+
+        assertEquals(INVALID_PATH, e.getErrorCode());
+        assertEmpty(outside, "No entry is written through a link of a project folder only the target branch holds");
+        assertNotNull(onBranch.check(BASE_RULES_LOCATION + "Existing/Main.xlsx"), "The project is left as it was");
+    }
+
+    @Test
+    @DisabledOnOs(OS.WINDOWS)
+    void overwritingThroughABranchOfAMappedGitRepositoryRejectsAnEntryThroughALinkOfThatBranch() throws Exception {
+        var root = tmp.resolve("design");
+        var outside = Files.createDirectories(tmp.resolve("outside"));
+        var repository = (BranchRepository) secured(mapped(configuredGitRepository(root)));
+        var baseBranch = repository.getBranch();
+        saveNewProject(repository, "Existing", "linked/Existing");
+        repository.createRepositoryBranch("B", null);
+        var onBranch = repository.forBranch("B");
+        var linkPath = "linked/Existing/rules";
+        saveNewProject(onBranch, "Other", "linked/Other");
+        commitLink(root, linkPath, outside);
+        saveNewProject(repository, "Another", "linked/Another");
+        assertCheckedOut(root, baseBranch);
+        assertFalse(Files.isSymbolicLink(root.resolve(linkPath)), "Fixture: the checked-out tree holds no link");
+        assertTrue(Files.isDirectory(root.resolve("linked/Existing")),
+                "Fixture: the checked-out tree holds the project folder");
+        var model = new CreateUpdateProjectModel("design", "jsmith", "Existing", "linked/Existing", null, true);
+
+        var e = assertThrows(BadRequestException.class, () -> saveStrategy.save(onBranch, model, PROJECT_ARCHIVE));
+
+        assertEquals(INVALID_PATH, e.getErrorCode());
+        assertEmpty(outside, "No entry is written through a link of a mapped project on the target branch");
+        try (var git = Git.open(root.toFile())) {
+            assertNotNull(git.getRepository().resolve("B:linked/Existing/Main.xlsx"), "The project is left as it was");
+        }
+    }
+
+    @Test
+    @DisabledOnOs(OS.WINDOWS)
+    void aRefusalAFileRepositoryLetsThroughIsTheRejection() throws IOException {
+        var root = Files.createDirectories(tmp.resolve("design"));
+        var outside = Files.createDirectories(tmp.resolve("outside"));
+        var project = root.resolve(BASE_RULES_LOCATION + "Existing");
+        // The link appears once the save has begun, after the checks made before it, as a checkout would place it.
+        var fileRepository = new FileSystemRepository() {
+            @Override
+            public FileData save(FileData folderData,
+                                 Iterable<FileItem> files,
+                                 ChangesetType changesetType) throws IOException {
+                Files.createSymbolicLink(Files.createDirectories(project).resolve("rules"), outside);
+                return super.save(folderData, files, changesetType);
+            }
+        };
+        fileRepository.setRoot(root);
+        closeables.add(fileRepository);
+        var repository = secured(fileRepository);
+        var model = new CreateUpdateProjectModel("design", "jsmith", "Existing", null, null, true);
+
+        var e = assertThrows(BadRequestException.class, () -> saveStrategy.save(repository, model, PROJECT_ARCHIVE));
+
+        assertEquals(INVALID_PATH, e.getErrorCode());
+        assertEmpty(outside, "No entry is written through a link that appeared once the save began");
+    }
+
+    @Test
+    void aChangeNamedOutsideTheProjectFolderIsRefused() throws IOException {
+        var root = Files.createDirectories(tmp.resolve("design"));
+        var repository = secured(configuredFileRepository(root));
+        var stray = new FileItem(BASE_RULES_LOCATION + "Other/rules.xml", new ByteArrayInputStream(new byte[] { 1 }));
+        var model = new CreateUpdateProjectModel("design", "jsmith", "Existing", null, null, false);
+
+        var e = assertThrows(BadRequestException.class, () -> saveWithChange(repository, model, stray));
+
+        assertEquals(INVALID_PATH, e.getErrorCode());
+        assertFalse(Files.exists(root.resolve(BASE_RULES_LOCATION + "Other")), "Nothing is written to another folder");
+    }
+
+    @Test
+    void aChangeClimbingOutOfTheProjectFolderIsRefused() throws IOException {
+        var root = Files.createDirectories(tmp.resolve("design"));
+        var repository = secured(configuredFileRepository(root));
+        var climbing = new FileItem(BASE_RULES_LOCATION + "Existing/../Other/rules.xml",
+                new ByteArrayInputStream(new byte[] { 1 }));
+        var model = new CreateUpdateProjectModel("design", "jsmith", "Existing", null, null, false);
+
+        var e = assertThrows(BadRequestException.class, () -> saveWithChange(repository, model, climbing));
+
+        assertEquals(INVALID_PATH, e.getErrorCode());
+        assertFalse(Files.exists(root.resolve(BASE_RULES_LOCATION + "Other")), "Nothing is written to another folder");
+    }
+
+    @Test
+    @DisabledOnOs(OS.WINDOWS)
+    void overwritingAProjectOfAConfiguredFileRepositoryRejectsAGeneratedDescriptorThroughAnOutsideLink()
+            throws IOException {
+        var root = tmp.resolve("design");
+        var project = Files.createDirectories(root.resolve(BASE_RULES_LOCATION + "Existing"));
+        var outside = Files.writeString(Files.createDirectories(tmp.resolve("outside")).resolve("leak.xml"), "kept");
+        // The archive holds no descriptor, so the save generates one and would write it through this link.
+        Files.createSymbolicLink(project.resolve(ProjectDescriptor.FILE_NAME), outside);
+        var repository = secured(configuredFileRepository(root));
+        var model = new CreateUpdateProjectModel("design", "jsmith", "Existing", null, null, true);
+
+        var e = assertThrows(BadRequestException.class,
+                () -> saveStrategy.save(repository, model, EXCEL_ONLY_ARCHIVE));
+
+        assertEquals(INVALID_PATH, e.getErrorCode());
+        assertEquals("kept", Files.readString(outside), "The generated descriptor is not written through the link");
+    }
+
+    @Test
+    void overwritingAProjectOfAConfiguredFileRepositoryWithAnArchiveWithoutADescriptorSucceeds() throws IOException {
+        var root = tmp.resolve("design");
+        var project = root.resolve(BASE_RULES_LOCATION + "Existing");
+        Files.write(Files.createDirectories(project).resolve(ProjectDescriptor.FILE_NAME), new byte[] { 1 });
+        var repository = secured(configuredFileRepository(root));
+        var model = new CreateUpdateProjectModel("design", "jsmith", "Existing", null, null, true);
+
+        assertNotNull(saveStrategy.save(repository, model, EXCEL_ONLY_ARCHIVE), "The saved project folder is reported");
+
+        assertTrue(Files.isRegularFile(project.resolve("Main.xlsx")), "The archive entry is saved");
+        try (var stream = Files.newInputStream(project.resolve(ProjectDescriptor.FILE_NAME))) {
+            var descriptor = ProjectDescriptor.read(stream);
+            assertNotNull(descriptor, "The generated descriptor replaces the old one");
+            assertEquals("Existing", descriptor.getName());
+        }
+    }
+
+    @Test
+    void saveRejectsAProjectNameTheNameCheckerRefuses() throws IOException {
+        var root = Files.createDirectories(tmp.resolve("design"));
+        var repository = secured(configuredFileRepository(root));
+        var model = new CreateUpdateProjectModel("design", "jsmith", "Bad:Name", null, null, false);
+
+        var e = assertThrows(BadRequestException.class, () -> saveStrategy.save(repository, model, PROJECT_ARCHIVE));
+
+        assertEquals(INVALID_PATH, e.getErrorCode());
+        assertEmpty(root, "Nothing is written for a refused project name");
+    }
+
+    @Test
+    @DisabledOnOs(OS.WINDOWS)
+    void overwritingAProjectOfAConfiguredFileRepositoryRejectsAnEntryThroughADanglingLink() throws IOException {
+        var root = tmp.resolve("design");
+        var project = Files.createDirectories(root.resolve(BASE_RULES_LOCATION + "Existing"));
+        var missing = tmp.resolve("outside/missing");
+        Files.createSymbolicLink(project.resolve("rules"), missing);
+        var repository = secured(configuredFileRepository(root));
+        var model = new CreateUpdateProjectModel("design", "jsmith", "Existing", null, null, true);
+
+        var e = assertThrows(BadRequestException.class, () -> saveStrategy.save(repository, model, PROJECT_ARCHIVE));
+
+        assertEquals(INVALID_PATH, e.getErrorCode());
+        assertFalse(Files.exists(missing.getParent()), "Nothing is created where the dangling link points");
+    }
+
+    @Test
+    void aFailureOfTheRepositoryItselfPropagatesUnchanged() throws IOException {
+        var root = Files.createDirectories(tmp.resolve("design"));
+        var repository = mock(Repository.class, Mockito.withSettings().extraInterfaces(LocalWorkingTree.class));
+        when(((LocalWorkingTree) repository).getLocalWorkingTree()).thenReturn(root);
+        when(repository.supports()).thenReturn(new FeaturesBuilder(repository).setFolders(true).build());
+        var failure = new IOException("The repository cannot record the save", new IllegalStateException("Busy"));
+        when(repository.save(any(FileData.class), any(), eq(ChangesetType.FULL))).thenAnswer(a -> {
+            // Every change is inside the project folder and is taken, then the repository fails on its own.
+            // noinspection unchecked
+            for (FileItem change : (Iterable<FileItem>) a.getArguments()[1]) {
+                IOUtils.closeQuietly(change.getStream());
+            }
+            throw failure;
+        });
+        var model = new CreateUpdateProjectModel("design", "jsmith", "Fresh", null, null, false);
+
+        var e = assertThrows(IOException.class, () -> saveStrategy.save(repository, model, PROJECT_ARCHIVE));
+
+        Assertions.assertSame(failure, e, "The failure of the repository is reported as it is");
+    }
+
     private ProjectDescriptor assertProjectDescriptor(String expectedRootFolder,
                                                       String expectedName,
                                                       FileItem descriptor) {
@@ -596,6 +1027,30 @@ class ZipProjectSaveStrategyTest {
         return configured;
     }
 
+    // V1: a Git design repository over a local folder, built from its settings as the application builds it
+    /**
+     * A {@code repo-git} design repository whose local Git repository and working tree are the folder, built from
+     * its settings the way the application builds it, and therefore behind {@link PathCheckedRepository}. It is
+     * closed after the test.
+     */
+    private Repository configuredGitRepository(Path root) {
+        var settings = Map.of("repository.design.factory", "repo-git", "repository.design.uri", root.toString());
+        var configured = RepositoryInstatiator.newRepository("repository.design", settings::get);
+        closeables.add(configured);
+        assertInstanceOf(PathCheckedRepository.class, configured, "Fixture: the settings build a path-checked wrapper");
+        return configured;
+    }
+
+    // V1: a project the strategy saved first, holding Main.xlsx and its generated descriptor but no rules folder
+    /**
+     * Saves the archive that holds only {@code Main.xlsx} as a new project, so a later overwrite with
+     * {@link #PROJECT_ARCHIVE} writes {@code rules/Project2-Main.xlsx} into a folder the project does not hold yet.
+     */
+    private void saveNewProject(Repository repository, String projectName, String path) throws IOException {
+        var model = new CreateUpdateProjectModel("design", "jsmith", projectName, path, null, false);
+        assertNotNull(saveStrategy.save(repository, model, EXCEL_ONLY_ARCHIVE), "Fixture: the project is saved");
+    }
+
     // V1: the mapped layout of a design repository, whose projects sit where their file mapping places them
     private Repository mapped(Repository delegate) throws IOException {
         var mapped = MappedRepository.create(delegate, BASE_RULES_LOCATION);
@@ -616,6 +1071,40 @@ class ZipProjectSaveStrategyTest {
     private static void assertEmpty(Path folder, String message) throws IOException {
         try (var entries = Files.list(folder)) {
             assertEquals(0, entries.count(), message);
+        }
+    }
+
+    // V1: a link to outside committed on the checked-out branch of the working tree, as a push from elsewhere does
+    private static void commitLink(Path workingTree, String linkPath, Path target) throws Exception {
+        Files.createSymbolicLink(workingTree.resolve(linkPath), target);
+        try (var git = Git.open(workingTree.toFile())) {
+            git.add().addFilepattern(linkPath).call();
+            git.commit()
+                    .setMessage("Track a link to outside")
+                    .setAuthor("Test", "test@example.org")
+                    .setCommitter("Test", "test@example.org")
+                    .setSign(false)
+                    .call();
+            assertEquals(FileMode.SYMLINK,
+                    git.getRepository().readDirCache().getEntry(linkPath).getFileMode(),
+                    "Fixture: the link is tracked as a link");
+        }
+    }
+
+    // V1: an upload whose archive yields the one given change, for a change no real archive entry can name
+    private FileData saveWithChange(Repository repository,
+                                    CreateUpdateProjectModel model,
+                                    FileItem change) throws IOException {
+        try (var ignored = Mockito.mockConstruction(FileChangesFromFolder.class,
+                (changes, context) -> when(changes.iterator()).thenReturn(List.of(change).iterator()))) {
+            return saveStrategy.save(repository, model, PROJECT_ARCHIVE);
+        }
+    }
+
+    // V1: the branch the working tree holds, which is the one the last save checked out
+    private static void assertCheckedOut(Path workingTree, String branch) throws IOException {
+        try (var git = Git.open(workingTree.toFile())) {
+            assertEquals(branch, git.getRepository().getBranch(), "Fixture: the branch checked out");
         }
     }
 }

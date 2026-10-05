@@ -10,6 +10,7 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.withSettings;
 
 import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
@@ -51,6 +52,23 @@ class PathCheckedRepositoryTest {
         var delegate = mock(BranchRepository.class);
 
         assertNull(new PathCheckedRepository(delegate).getLocalRoot());
+        verifyNoInteractions(delegate);
+    }
+
+    // V1: the archive upload check locates the working tree a Git repository writes through, and nothing else
+    @Test
+    void revealsTheWorkingTreeOfAWrappedLocalWorkingTree(@TempDir Path workingTree) {
+        var delegate = mock(BranchRepository.class, withSettings().extraInterfaces(LocalWorkingTree.class));
+        when(((LocalWorkingTree) delegate).getLocalWorkingTree()).thenReturn(workingTree);
+
+        assertEquals(workingTree, new PathCheckedRepository(delegate).getLocalWorkingTree());
+    }
+
+    @Test
+    void revealsNoWorkingTreeForOtherBackends() {
+        var delegate = mock(BranchRepository.class);
+
+        assertNull(new PathCheckedRepository(delegate).getLocalWorkingTree());
         verifyNoInteractions(delegate);
     }
 }

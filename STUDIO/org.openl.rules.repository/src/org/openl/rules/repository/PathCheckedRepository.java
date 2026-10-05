@@ -265,4 +265,20 @@ public class PathCheckedRepository implements BranchRepository {
         return delegate instanceof FileSystemRepository fileSystem ? fileSystem.getRoot() : null;
     }
 
+    // V1: lets the archive upload check find the working tree a Git repository writes saved files through
+    /**
+     * Working tree of the wrapped repository, when that repository writes the files it saves under a local
+     * directory before it records them.
+     *
+     * <p>Only the directory is revealed, never the wrapped repository itself, so every read and write still passes
+     * the path checks of this wrapper. Callers use the directory to compare a path's real location with its
+     * lexical one.
+     *
+     * @return the working tree of a wrapped {@link LocalWorkingTree}, or {@code null} for any other backend or
+     *         when the wrapped repository is not initialized
+     */
+    public @Nullable Path getLocalWorkingTree() {
+        return delegate instanceof LocalWorkingTree tree ? tree.getLocalWorkingTree() : null;
+    }
+
 }

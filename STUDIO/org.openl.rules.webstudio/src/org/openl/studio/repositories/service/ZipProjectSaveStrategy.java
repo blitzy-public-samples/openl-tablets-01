@@ -1,8 +1,8 @@
 package org.openl.studio.repositories.service;
 
-// V1: LinkOption, PathCheckedRepository, RepositoryDelegate, FileSystemRepository, NameChecker, FolderMapper and
-// BadRequestException serve the upload destination guard; the import block itself cannot hold a comment, as
-// Spotless rewrites it.
+// V1: Iterator, LinkOption, Nullable, LocalWorkingTree, PathCheckedRepository, RepositoryDelegate,
+// FileSystemRepository, NameChecker, FolderMapper and BadRequestException serve the upload destination guard; the
+// import block itself cannot hold a comment, as Spotless rewrites it.
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
@@ -12,6 +12,7 @@ import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Iterator;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
@@ -21,11 +22,13 @@ import java.util.stream.StreamSupport;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
+import org.jspecify.annotations.Nullable;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Component;
 
 import org.openl.rules.project.model.Module;
 import org.openl.rules.project.model.ProjectDescriptor;
+import org.openl.rules.repository.LocalWorkingTree;
 import org.openl.rules.repository.PathCheckedRepository;
 import org.openl.rules.repository.api.AdditionalData;
 import org.openl.rules.repository.api.ChangesetType;
@@ -108,7 +111,11 @@ public class ZipProjectSaveStrategy {
                     var projectChanges = generatedRulesXml.isPresent()
                             ? appendProjectDescriptor(changes, projectData.getName(), generatedRulesXml.orElseThrow())
                             : changes;
-                    return repository.save(projectData, projectChanges, ChangesetType.FULL);
+                    // V1: each entry is checked again as the repository writes it, in the tree of its target branch
+                    var savedChanges = boundary == null
+                            ? projectChanges
+                            : containedChanges(boundary, projectData.getName(), projectChanges);
+                    return saveContained(repository, projectData, savedChanges);
                 }
             }
 
@@ -203,10 +210,10 @@ public class ZipProjectSaveStrategy {
      * @param repository the repository the project is saved to, possibly behind secured wrappers
      * @param model      the upload request
      * @return the project folder on the local file system, or {@code null} when the repository keeps no local
-     *         folder (Git, JDBC, S3, Azure Blob) and only the lexical checks apply
+     *         folder (JDBC, S3, Azure Blob) and only the lexical checks apply
      * @throws BadRequestException {@code file.path.invalid.message} when the destination is rejected
      */
-    private Path requireContainedDestination(Repository repository, CreateUpdateProjectModel model) {
+    private @Nullable Path requireContainedDestination(Repository repository, CreateUpdateProjectModel model) {
         try {
             boolean mapped = repository.supports().mappedFolders();
             var input = mapped ? model.getFullPath() : model.getProjectName();
@@ -237,19 +244,20 @@ public class ZipProjectSaveStrategy {
         }
     }
 
-    // V1: finds the local root of a file-system repository behind its secured and mapping wrappers
+    // V1: finds the local root of a file-system or Git repository behind its secured and mapping wrappers
     /**
-     * Returns the root folder of the file-system repository the given repository writes to.
+     * Returns the local folder the given repository writes saved files to: the root folder of a file-system
+     * repository, or the working tree of a {@link LocalWorkingTree} such as a Git repository.
      *
      * <p>The secured wrappers are unwrapped through {@link RepositoryDelegate}, then a {@link FolderMapper} through
      * its delegate. A repository built from its settings ends there in a {@link PathCheckedRepository}, which is
-     * not a delegate and reveals only the root of a file repository it wraps. The unwrapped repository is only
-     * asked for its root: every write still goes through the wrapper the caller passed, so no access check is
-     * bypassed.
+     * not a delegate and reveals only the root of a file repository or the working tree of a repository it wraps.
+     * The unwrapped repository is only asked for that folder: every write still goes through the wrapper the
+     * caller passed, so no access check is bypassed.
      *
-     * @return the root folder, or {@code null} when the repository does not store its files in a local folder
+     * @return the local folder, or {@code null} when the repository does not write its files to a local folder
      */
-    private static Path localRoot(Repository repository) {
+    private static @Nullable Path localRoot(Repository repository) {
         var current = repository;
         while (current instanceof RepositoryDelegate delegate) {
             current = delegate.getOriginal();
@@ -257,9 +265,13 @@ public class ZipProjectSaveStrategy {
         if (current instanceof FolderMapper mapper) {
             current = mapper.getDelegate();
         }
-        // V1: a repository built from its settings is path-checked, and that wrapper reveals only a file root
+        // V1: a Git repository writes saved files through its local working tree, which may hold links
         if (current instanceof PathCheckedRepository pathChecked) {
-            return pathChecked.getLocalRoot();
+            var fileRoot = pathChecked.getLocalRoot();
+            return fileRoot != null ? fileRoot : pathChecked.getLocalWorkingTree();
+        }
+        if (current instanceof LocalWorkingTree workingTree) {
+            return workingTree.getLocalWorkingTree();
         }
         return current instanceof FileSystemRepository fileSystem ? fileSystem.getRoot() : null;
     }
@@ -320,6 +332,96 @@ public class ZipProjectSaveStrategy {
         } catch (IOException | IllegalArgumentException e) {
             // A dangling link or a name the local file system cannot represent is a rejection, not a 500.
             throw new BadRequestException("file.path.invalid.message");
+        }
+    }
+
+    // V1: the entries of an upload, each checked against the project folder right before the repository writes it
+    /**
+     * The changes of the save, each checked against the project folder when the repository takes it.
+     *
+     * <p>A Git repository checks out the branch it saves to only once it holds its write lock, and that branch may
+     * hold links the tree checked out before did not. So a change is checked when the repository asks for it, which
+     * is right before the repository writes it, against the tree it writes the change through. The changes are read
+     * out of the archive in one pass, so they are passed on one at a time and never collected. A refused change has
+     * its stream closed and ends the save with an {@link EntryRefused}.
+     *
+     * @param boundary      the project folder, at its own place below the repository root
+     * @param projectFolder the name of the project folder in the repository, which every change is named under
+     * @param changes       the changes of the save
+     * @return the same changes in the same order, each checked as it is taken
+     */
+    private static Iterable<FileItem> containedChanges(Path boundary,
+                                                       String projectFolder,
+                                                       Iterable<FileItem> changes) {
+        var prefix = projectFolder + "/";
+        return () -> new Iterator<>() {
+            private final Iterator<FileItem> source = changes.iterator();
+
+            @Override
+            public boolean hasNext() {
+                return source.hasNext();
+            }
+
+            @Override
+            public FileItem next() {
+                var change = source.next();
+                try {
+                    requireContainedEntry(boundary, entryName(change));
+                    return change;
+                } catch (BadRequestException e) {
+                    IOUtils.closeQuietly(change.getStream());
+                    throw new EntryRefused(e);
+                }
+            }
+
+            // V1: only the project folder is checked, so a change named anywhere else is refused
+            private String entryName(FileItem change) {
+                var name = change.getData().getName();
+                if (!name.startsWith(prefix)) {
+                    throw new BadRequestException("file.path.invalid.message");
+                }
+                return name.substring(prefix.length());
+            }
+        };
+    }
+
+    // V1: a refused entry ends the save with that refusal, however the repository reported it
+    /**
+     * Saves the changes as the full content of the project folder, and reports a change refused while the repository
+     * was taking them as the rejection it is.
+     *
+     * <p>A file repository lets the refusal through as it is. A Git repository resets its working tree and reports it
+     * as a failure of its own, so the refusal is looked for among the causes. Only a refusal raised by
+     * {@link #containedChanges} counts: any other failure is the repository's own and propagates unchanged.
+     *
+     * @throws BadRequestException {@code file.path.invalid.message} when a change is refused
+     * @throws IOException         if the repository fails to save the changes
+     */
+    private static FileData saveContained(Repository repository,
+                                          FileData projectData,
+                                          Iterable<FileItem> changes) throws IOException {
+        try {
+            return repository.save(projectData, changes, ChangesetType.FULL);
+        } catch (EntryRefused e) {
+            throw e.refusal;
+        } catch (IOException e) {
+            for (Throwable cause = e.getCause(); cause != null; cause = cause.getCause()) {
+                if (cause instanceof EntryRefused refused) {
+                    throw refused.refusal;
+                }
+            }
+            throw e;
+        }
+    }
+
+    // V1: marks a refusal raised while the repository takes the entries, to tell it apart from the repository's own
+    /** A change refused by {@link #containedChanges} while the repository was already taking the changes. */
+    private static final class EntryRefused extends RuntimeException {
+        private final BadRequestException refusal;
+
+        private EntryRefused(BadRequestException refusal) {
+            super(refusal);
+            this.refusal = refusal;
         }
     }
 }
