@@ -19,7 +19,10 @@ public class SecurityConfig {
 
     @Bean(initMethod = "afterPropertiesSet", destroyMethod = "destroy")
     public FilterChainProxy filterChainProxy(List<SecurityFilterChain> securityFilterChains) {
-        return new FilterChainProxy(securityFilterChains);
+        var filterChainProxy = new FilterChainProxy(securityFilterChains);
+        // V4: every chain also writes its response-independent security headers before an early-committed body
+        filterChainProxy.setFilterChainDecorator(new EagerSecurityHeadersChainDecorator());
+        return filterChainProxy;
     }
 
     @Bean

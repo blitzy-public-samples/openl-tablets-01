@@ -1,0 +1,2 @@
+GET /application.properties HTTP/1.1
+

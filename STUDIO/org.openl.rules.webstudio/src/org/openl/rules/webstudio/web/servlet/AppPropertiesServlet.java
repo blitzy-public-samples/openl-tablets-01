@@ -1,5 +1,6 @@
 package org.openl.rules.webstudio.web.servlet;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import jakarta.servlet.annotation.WebServlet;
 import jakarta.servlet.http.HttpServlet;
@@ -24,7 +25,11 @@ public class AppPropertiesServlet extends HttpServlet {
         resp.setContentType("text/plain");
         resp.setCharacterEncoding("UTF-8");
         try {
-            DefaultPropertySource.transferAllOpenLDefaultProperties(resp.getOutputStream());
+            // V4: a known length lets the security header writer add its headers before the body goes out
+            var body = new ByteArrayOutputStream();
+            DefaultPropertySource.transferAllOpenLDefaultProperties(body);
+            resp.setContentLength(body.size());
+            body.writeTo(resp.getOutputStream());
         } catch (IOException e) {
             log.error("Failed to write the OpenL default properties.", e);
             failed(resp);

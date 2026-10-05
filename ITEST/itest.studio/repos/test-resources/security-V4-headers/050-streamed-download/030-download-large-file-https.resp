@@ -1,0 +1,9 @@
+HTTP/1.1 200
+Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet
+Content-Length:
+X-Content-Type-Options: nosniff
+X-Frame-Options: DENY
+X-XSS-Protection: 0
+Strict-Transport-Security: max-age=31536000 ; includeSubDomains
+
+***
