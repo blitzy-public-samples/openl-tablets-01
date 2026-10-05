@@ -1,8 +1,10 @@
 package org.openl.itest;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.net.http.HttpResponse;
 import java.security.SecureRandom;
 import java.util.Collections;
 import java.util.LinkedHashMap;
@@ -147,5 +149,46 @@ abstract class AbstractKeycloakTest {
      */
     protected void assertRestUnauthorized(SsoBrowser browser) throws Exception {
         assertEquals(HttpStatus.SC_UNAUTHORIZED, browser.get("/rest/users/profile").statusCode());
+    }
+
+    // V4: the Spring Security default header set that the SAML, OIDC and static chains must send
+    /**
+     * Asserts that {@code response} carries the Spring Security default security headers, and no
+     * {@code Strict-Transport-Security}, which is written only on secure requests and the tests use plain HTTP.
+     *
+     * <p>Every failure message names the URL and the header only; the response body is never printed.
+     *
+     * @param response the response to check
+     * @param url the requested URL, used in the failure messages
+     */
+    protected static void assertSecurityHeaders(HttpResponse<?> response, String url) {
+        var headers = response.headers();
+        assertEquals("nosniff", headers.firstValue("X-Content-Type-Options").orElse(null),
+                url + ": X-Content-Type-Options");
+        assertEquals("DENY", headers.firstValue("X-Frame-Options").orElse(null), url + ": X-Frame-Options");
+        assertEquals("no-cache, no-store, max-age=0, must-revalidate",
+                headers.firstValue("Cache-Control").orElse(null),
+                url + ": Cache-Control");
+        assertEquals("no-cache", headers.firstValue("Pragma").orElse(null), url + ": Pragma");
+        assertEquals("0", headers.firstValue("Expires").orElse(null), url + ": Expires");
+        assertEquals("0", headers.firstValue("X-XSS-Protection").orElse(null), url + ": X-XSS-Protection");
+        assertFalse(headers.firstValue("Strict-Transport-Security").isPresent(),
+                url + ": Strict-Transport-Security must be absent on plain HTTP");
+    }
+
+    // V10: sys.json and http.json are authenticated by the browser's session cookie alone
+    /**
+     * Asserts the status of {@code /rest/public/info/sys.json} and {@code /rest/public/info/http.json} for the
+     * browser's current session. No {@code Authorization} header is sent: only the session cookie in the
+     * browser's jar can authenticate the requests.
+     *
+     * @param browser the browser whose cookie jar carries the session, if any
+     * @param expectedStatus the status both endpoints must answer, 401 before login and 200 after it
+     */
+    protected static void assertSysInfo(SsoBrowser browser, int expectedStatus) throws Exception {
+        assertEquals(expectedStatus, browser.get("/rest/public/info/sys.json").statusCode(),
+                "/rest/public/info/sys.json");
+        assertEquals(expectedStatus, browser.get("/rest/public/info/http.json").statusCode(),
+                "/rest/public/info/http.json");
     }
 }
