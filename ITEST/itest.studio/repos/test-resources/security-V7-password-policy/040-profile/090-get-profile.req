@@ -1,0 +1,4 @@
+GET /rest/users/profile HTTP/1.1
+Authorization: ${V7_PROFILE_BASIC_MAX_MB}
+Cookie: NO_JSESSIONID=noAuth
+

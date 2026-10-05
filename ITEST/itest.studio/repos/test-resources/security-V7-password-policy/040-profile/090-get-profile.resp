@@ -1,0 +1,53 @@
+HTTP/1.1 200
+Content-Type: application/json
+
+{
+  "username": "v7_profile",
+  "email": "v7_profile@email",
+  "displayName": "V7 Profile",
+  "firstName": "V7",
+  "lastName": "Profile",
+  "showHeader": false,
+  "showFormulas": true,
+  "testsPerPage": 20,
+  "testsFailuresOnly": true,
+  "testsFailuresPerTest": 20,
+  "showComplexResult": true,
+  "showRealNumbers": true,
+  "treeView": "type",
+  "administrator": false,
+  "externalFlags": {
+    "lastNameExternal": false,
+    "emailExternal": false,
+    "emailVerified": false,
+    "displayNameExternal": false,
+    "firstNameExternal": false
+  },
+  "profiles": [
+    {
+      "displayName": "By Type",
+      "name": "type",
+      "description": "Organize projects by component type"
+    },
+    {
+      "displayName": "By Excel Sheet",
+      "name": "excelSheet",
+      "description": "Organize projects by physical file structure"
+    },
+    {
+      "displayName": "By Category",
+      "name": "category",
+      "description": "Provides categorized view"
+    },
+    {
+      "displayName": "By Category Detailed",
+      "name": "categoryDetailed",
+      "description": "Provides more detailed categorized view"
+    },
+    {
+      "displayName": "By Category Inversed",
+      "name": "categoryInversed",
+      "description": "Provides inversed categorized view"
+    }
+  ]
+}
