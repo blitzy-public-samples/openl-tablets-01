@@ -70,6 +70,8 @@ import org.openl.rules.project.abstraction.RulesProject;
 import org.openl.rules.project.impl.local.LocalRepository;
 import org.openl.rules.project.impl.local.MetainfoRegistry;
 import org.openl.rules.project.impl.local.ProjectMetainfo;
+import org.openl.rules.repository.LocalWorkingTree;
+import org.openl.rules.repository.PathCheckedRepository;
 import org.openl.rules.repository.RepositoryInstatiator;
 import org.openl.rules.repository.api.BranchRepository;
 import org.openl.rules.repository.api.ChangesetType;
@@ -99,6 +101,7 @@ import org.openl.studio.common.exception.ConflictException;
 import org.openl.studio.common.exception.ForbiddenException;
 import org.openl.studio.common.exception.NotFoundException;
 import org.openl.studio.tags.service.TagAssignmentValidator;
+import org.openl.util.IOUtils;
 import org.openl.util.StringUtils;
 
 class ProjectCreationServiceTest {
@@ -1420,6 +1423,314 @@ class ProjectCreationServiceTest {
         verify(source.files(), never()).read(anyString());
         verifyNothingSaved(target);
     }
+
+    // V1-D: the design repository an upload overwrites project 'Existing' of, each writing through a local folder
+    enum OverwriteBackend {
+        /** A flat file repository in {@code tmp/repo} behind {@code SecureRepository}: {@code DESIGN/rules/}. */
+        FLAT,
+        /** A mapped file repository in {@code tmp/repo} behind {@code SecureMappedRepository}: {@code projects/}. */
+        MAPPED,
+        /** A file repository configured over {@code tmp/repo}, so path-checked, and secured: {@code DESIGN/rules/}. */
+        CONFIGURED_FILE,
+        /** A Git repository configured over {@code tmp/repo} and secured: {@code DESIGN/rules/} of its working tree. */
+        GIT
+    }
+
+    // V1-D: every link an existing project folder could hold, on each backend an upload writes through (0.6.2.4 D15)
+    // V1-D: each link is passed by name, so the test's signature does not expose the private LinkTarget
+    private static Stream<Arguments> linkedExistingProjects() {
+        return Stream.of(LinkTarget.values())
+                .flatMap(link -> Stream.of(OverwriteBackend.values())
+                        .map(backend -> Arguments.of(link.name(), backend)));
+    }
+
+    // V1-D: an upload over an existing project whose folder holds a link out of it is refused before anything is
+    // written, and the files it brought are released (0.6.2.4 D15)
+    @ParameterizedTest(name = "{0} on {1}")
+    @MethodSource("linkedExistingProjects")
+    @DisabledOnOs(OS.WINDOWS)
+    void rejects_an_upload_that_overwrites_a_project_through_a_link_its_folder_holds(String link,
+                                                                                    OverwriteBackend backend)
+            throws IOException {
+        creatingUser();
+        var target = overwriteTarget(backend);
+        var project = existingProject(backend);
+        var outside = Files.createDirectories(tmp.resolve("outside"));
+        write(outside.resolve("sentinel.txt"), marker());
+        var sibling = siblingProject(backend);
+        Files.createSymbolicLink(project.resolve("link"), switch (LinkTarget.valueOf(link)) {
+            case OUTSIDE -> outside;
+            case SIBLING -> sibling;
+            case DANGLING -> outside.resolve("missing");
+        });
+        var file = mock(ProjectFile.class);
+        var projectBefore = snapshot(project);
+        var siblingBefore = snapshot(sibling);
+        var outsideBefore = snapshot(outside);
+
+        try (var uploaders = uploaders()) {
+            assertPathRejected(() -> overwrite(target, backend, List.of(file)));
+            assertTrue(uploaders.constructed().isEmpty(), "The upload never runs");
+        }
+
+        verify(file).destroy();
+        assertEquals(outsideBefore, snapshot(outside), "Nothing is written through the link");
+        assertEquals(siblingBefore, snapshot(sibling), "The sibling project is unchanged");
+        assertEquals(projectBefore, snapshot(project), "The existing project is left as it was");
+    }
+
+    // V1-D: the walk reaches every depth of the existing folder, and a link to a regular file is refused as well
+    @ParameterizedTest
+    @EnumSource(OverwriteBackend.class)
+    @DisabledOnOs(OS.WINDOWS)
+    void rejects_an_upload_that_overwrites_a_project_holding_a_nested_link_to_an_outside_file(OverwriteBackend backend)
+            throws IOException {
+        creatingUser();
+        var target = overwriteTarget(backend);
+        var project = existingProject(backend);
+        var outside = tmp.resolve("outside");
+        var secret = outside.resolve("secret.txt");
+        write(secret, marker());
+        Files.createSymbolicLink(Files.createDirectories(project.resolve("rules/deep")).resolve("leak.txt"), secret);
+        var outsideBefore = snapshot(outside);
+
+        try (var uploaders = uploaders()) {
+            assertPathRejected(() -> overwrite(target, backend, List.of()));
+            assertTrue(uploaders.constructed().isEmpty(), "The upload never runs");
+        }
+
+        assertEquals(outsideBefore, snapshot(outside), "Nothing is written through the link");
+    }
+
+    // V1-D: links that stay inside the existing project folder do not stop the overwrite
+    @ParameterizedTest
+    @EnumSource(OverwriteBackend.class)
+    @DisabledOnOs(OS.WINDOWS)
+    void hands_an_overwrite_whose_links_stay_inside_the_project_to_the_upload(OverwriteBackend backend)
+            throws IOException {
+        creatingUser();
+        var target = overwriteTarget(backend);
+        var project = existingProject(backend);
+        Files.createSymbolicLink(project.resolve("alias"), project.resolve("rules"));
+        Files.createSymbolicLink(project.resolve("rules/descriptor.xml"), Path.of("../rules.xml"));
+        Files.createSymbolicLink(project.resolve("self"), Path.of("."));
+        var created = new FileData();
+
+        try (var ignored = uploaders(created)) {
+            assertSame(created, overwrite(target, backend, List.of()));
+        }
+
+        assertUploaded(target, "Existing", overwritePath(backend));
+    }
+
+    // V1-D: an existing project folder without links is overwritten as before
+    @ParameterizedTest
+    @EnumSource(OverwriteBackend.class)
+    void hands_an_overwrite_of_an_ordinary_existing_project_to_the_upload(OverwriteBackend backend)
+            throws IOException {
+        creatingUser();
+        var target = overwriteTarget(backend);
+        existingProject(backend);
+        var created = new FileData();
+
+        try (var ignored = uploaders(created)) {
+            assertSame(created, overwrite(target, backend, List.of()));
+        }
+
+        assertUploaded(target, "Existing", overwritePath(backend));
+    }
+
+    // V1-D: links in the configured root's own path are trusted, so an ordinary overwrite below such a root runs
+    @Test
+    @DisabledOnOs(OS.WINDOWS)
+    void hands_an_overwrite_below_a_repository_root_reached_through_a_link_to_the_upload() throws IOException {
+        creatingUser();
+        var physical = Files.createDirectories(tmp.resolve("physical"));
+        var root = Files.createSymbolicLink(tmp.resolve("repo"), physical);
+        var target = secureFileRepository(root, false);
+        write(physical.resolve("DESIGN/rules/Existing/rules.xml"), descriptor("Existing"));
+        var created = new FileData();
+
+        try (var ignored = uploaders(created)) {
+            assertSame(created, overwrite(target, OverwriteBackend.FLAT, List.of()));
+        }
+
+        assertUploaded(target, "Existing", "");
+    }
+
+    // V1-D: a new project has no folder to walk yet, so its upload runs and the check creates nothing
+    @ParameterizedTest
+    @EnumSource(OverwriteBackend.class)
+    void hands_a_new_project_without_a_folder_yet_to_the_upload(OverwriteBackend backend) throws IOException {
+        creatingUser();
+        var target = overwriteTarget(backend);
+        var folder = existingProject(backend).resolveSibling("Fresh");
+        var created = new FileData();
+
+        try (var ignored = uploaders(created)) {
+            assertSame(created, service.createFromFiles(target, "Fresh", overwritePath(backend), List.of(), "comment",
+                    "rules/Models.xlsx", "rules/Algorithms.xlsx", "Models", "Algorithms", Map.of()));
+        }
+
+        assertUploaded(target, "Fresh", overwritePath(backend));
+        assertFalse(Files.exists(folder, LinkOption.NOFOLLOW_LINKS), "The check creates nothing");
+    }
+
+    // V1-D: a Git repository writes through its working tree, so a project folder there that is a link is refused
+    @Test
+    @DisabledOnOs(OS.WINDOWS)
+    void rejects_an_upload_into_a_git_project_folder_that_is_a_link() throws IOException {
+        creatingUser();
+        var target = overwriteTarget(OverwriteBackend.GIT);
+        var outside = Files.createDirectories(tmp.resolve("outside"));
+        write(outside.resolve("sentinel.txt"), marker());
+        var rules = Files.createDirectories(tmp.resolve("repo/DESIGN/rules"));
+        Files.createSymbolicLink(rules.resolve("Existing"), outside);
+        var outsideBefore = snapshot(outside);
+
+        try (var uploaders = uploaders()) {
+            assertPathRejected(() -> overwrite(target, OverwriteBackend.GIT, List.of()));
+            assertTrue(uploaders.constructed().isEmpty(), "The upload never runs");
+        }
+
+        assertEquals(outsideBefore, snapshot(outside), "Nothing is written through the link");
+    }
+
+    // V1-D: a rules location that climbs out of a Git working tree places the project folder outside it
+    @Test
+    void rejects_an_upload_into_a_git_repository_whose_rules_location_climbs_out_of_it() throws IOException {
+        creatingUser("../elsewhere/");
+        var target = overwriteTarget(OverwriteBackend.GIT);
+
+        try (var uploaders = uploaders()) {
+            assertPathRejected(() -> overwrite(target, OverwriteBackend.GIT, List.of()));
+            assertTrue(uploaders.constructed().isEmpty(), "The upload never runs");
+        }
+
+        assertNothingOutside("repo");
+    }
+
+    // V1-D: a repository that is not wrapped is asked for its working tree directly
+    @Test
+    @DisabledOnOs(OS.WINDOWS)
+    void rejects_an_overwrite_through_a_link_in_the_working_tree_of_an_unwrapped_repository() throws IOException {
+        creatingUser();
+        var root = Files.createDirectories(tmp.resolve("repo"));
+        var outside = Files.createDirectories(tmp.resolve("outside"));
+        var project = existingProject(OverwriteBackend.GIT);
+        Files.createSymbolicLink(project.resolve("link"), outside);
+        var target = mock(Repository.class, Mockito.withSettings().extraInterfaces(LocalWorkingTree.class));
+        when(target.getId()).thenReturn("design");
+        when(target.supports()).thenReturn(new FeaturesBuilder(target).setVersions(false).setFolders(true).build());
+        when(((LocalWorkingTree) target).getLocalWorkingTree()).thenReturn(root);
+
+        try (var uploaders = uploaders()) {
+            assertPathRejected(() -> overwrite(target, OverwriteBackend.GIT, List.of()));
+            assertTrue(uploaders.constructed().isEmpty(), "The upload never runs");
+        }
+
+        verifyNothingSaved(target);
+        assertEquals(Map.of(), snapshot(outside), "Nothing is written through the link");
+    }
+
+    // V1-D: a backend without a local folder (JDBC, S3, Azure Blob), configured or not, gets the lexical checks only
+    @ParameterizedTest(name = "path-checked: {0}")
+    @ValueSource(booleans = {false, true})
+    void hands_an_overwrite_on_a_backend_without_a_local_folder_to_the_upload(boolean pathChecked) throws IOException {
+        var workspace = creatingUser();
+        var target = pathChecked ? pathCheckedRepositoryWithoutLocalFolder() : targetRepositoryMock();
+        var created = new FileData();
+
+        try (var ignored = uploaders(created)) {
+            assertSame(created, overwrite(target, OverwriteBackend.FLAT, List.of()));
+        }
+
+        assertUploaded(target, "Existing", "");
+        // The rules location is never looked up, so no folder was resolved and no file system call was made.
+        verify(workspace, never()).getDesignTimeRepository();
+        verifyNothingSaved(target);
+    }
+
+    // V1-D: the template route creates through the same upload, so it is refused the same way
+    @ParameterizedTest
+    @EnumSource(value = OverwriteBackend.class, names = {"FLAT", "GIT"})
+    @DisabledOnOs(OS.WINDOWS)
+    void rejects_a_template_that_overwrites_a_project_through_a_link_its_folder_holds(OverwriteBackend backend)
+            throws IOException {
+        creatingUser();
+        var target = overwriteTarget(backend);
+        var project = existingProject(backend);
+        var outside = Files.createDirectories(tmp.resolve("outside"));
+        Files.createSymbolicLink(project.resolve("link"), outside);
+
+        try (var uploaders = uploaders()) {
+            assertPathRejected(() -> createFromTemplate(target, "Existing", overwritePath(backend)));
+            assertTrue(uploaders.constructed().isEmpty(), "The upload never runs");
+        }
+
+        assertEquals(Map.of(), snapshot(outside), "Nothing is written through the link");
+    }
+
+    // V1-D: uploads files over project 'Existing' of the backend, as the REST route does with overwrite=true
+    private FileData overwrite(Repository target, OverwriteBackend backend, List<ProjectFile> files) {
+        return service.createFromFiles(target, "Existing", overwritePath(backend), files, "comment",
+                "rules/Models.xlsx", "rules/Algorithms.xlsx", "Models", "Algorithms", Map.of());
+    }
+
+    // V1-D: the repository of the backend over tmp/repo, reached the way the REST route receives it
+    private Repository overwriteTarget(OverwriteBackend backend) throws IOException {
+        var root = tmp.resolve("repo");
+        return switch (backend) {
+            case FLAT -> secureFileRepository(Files.createDirectories(root), false);
+            case MAPPED -> secureFileRepository(Files.createDirectories(root), true);
+            case CONFIGURED_FILE -> secured(configuredRepository("repo-file", Files.createDirectories(root)));
+            case GIT -> secured(configuredRepository("repo-git", root));
+        };
+    }
+
+    // V1-D: the path parameter that places a project in its folder: 'projects' when mapped, none ("") when flat
+    private static String overwritePath(OverwriteBackend backend) {
+        return backend == OverwriteBackend.MAPPED ? "projects" : "";
+    }
+
+    // V1-D: the folder of project 'Existing' on the backend, holding its descriptor and a workbook
+    private Path existingProject(OverwriteBackend backend) throws IOException {
+        var folder = projectsFolder(backend).resolve("Existing");
+        write(folder.resolve("rules.xml"), descriptor("Existing"));
+        write(folder.resolve("rules/Main.xlsx"), marker());
+        return folder;
+    }
+
+    // V1-D: the folder of project 'Sibling' beside 'Existing' on the backend
+    private Path siblingProject(OverwriteBackend backend) throws IOException {
+        var folder = projectsFolder(backend).resolve("Sibling");
+        write(folder.resolve("rules.xml"), descriptor("Sibling"));
+        return folder;
+    }
+
+    // V1-D: where the backend keeps its projects in tmp/repo
+    private Path projectsFolder(OverwriteBackend backend) {
+        return tmp.resolve(backend == OverwriteBackend.MAPPED ? "repo/projects" : "repo/DESIGN/rules");
+    }
+
+    // V1-D: a design repository of the factory over the folder, built from its settings as the application builds it
+    private Repository configuredRepository(String factory, Path root) {
+        var settings = Map.of("repository.design.factory", factory, "repository.design.uri", root.toString());
+        var configured = RepositoryInstatiator.newRepository("repository.design", settings::get);
+        closeables.add(() -> IOUtils.closeQuietly(configured));
+        assertTrue(configured instanceof PathCheckedRepository, "Fixture: the settings build a path-checked wrapper");
+        return configured;
+    }
+
+    // V1-D: a configured repository whose backend keeps no local folder, as JDBC, S3 and Azure Blob are configured
+    private static Repository pathCheckedRepositoryWithoutLocalFolder() {
+        var repository = mock(PathCheckedRepository.class);
+        when(repository.getId()).thenReturn("design");
+        when(repository.supports())
+                .thenReturn(new FeaturesBuilder(repository).setVersions(false).setFolders(true).build());
+        return repository;
+    }
+
 
     // V1-C: a user who may create projects and read any source, in a workspace whose rules location is DESIGN/rules/
     private UserWorkspace creatingUser() {

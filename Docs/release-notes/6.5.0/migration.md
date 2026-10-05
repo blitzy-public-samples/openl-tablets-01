@@ -96,6 +96,15 @@ browser.
   removed from the project in the design repository; the files they pointed to are not touched. Before upgrading,
   replace a link that a project needs for shared content with a regular copy of the file inside the project.
 
+  <!-- V1: an upload that overwrites a project whose folder holds a link out of it is refused -->
+* **An upload that overwrites a project is refused when the project folder holds a link that leads out of it.** In
+  a `repo-file` design repository, and in the working tree of a `repo-git` design repository, uploading files or a
+  template over an existing project answers `400` with `openl.error.400.file.path.invalid.message` when any entry
+  of the existing project folder is a symbolic link that resolves outside that folder — outside the repository,
+  into another project, or to nothing. Nothing is written, no commit is made, and the uploaded files are discarded.
+  Links that stay inside the project folder do not stop the upload. Before upgrading, replace such a link with a
+  regular copy of its content inside the project, or remove it, so the project can be overwritten.
+
 ## Testing Recommendations
 
 After upgrading, verify in a non-production environment:

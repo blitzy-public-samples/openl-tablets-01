@@ -1,6 +1,7 @@
 package org.openl.studio.repositories.service;
 
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
@@ -28,6 +29,7 @@ import org.openl.rules.project.abstraction.AProject;
 import org.openl.rules.project.abstraction.ProjectStatus;
 import org.openl.rules.project.abstraction.ProjectTags;
 import org.openl.rules.project.abstraction.RulesProject;
+import org.openl.rules.repository.LocalWorkingTree;
 import org.openl.rules.repository.PathCheckedRepository;
 import org.openl.rules.repository.api.BranchRepository;
 import org.openl.rules.repository.api.FileData;
@@ -122,9 +124,10 @@ public class ProjectCreationService {
      * <p>When the repository keeps its content in a local directory, the physical project folder must also
      * sit at its own lexical place under the real repository root: a link inside the repository may not
      * redirect it to another project or outside the root. The folder and the rules location need not exist
-     * yet. Other backends (Git, JDBC, S3, Azure Blob) get the lexical checks only, because they never follow
-     * a working-tree link. The unwrapped repository is only asked for its root; the write still goes through
-     * the secured wrapper, so no ACL check is bypassed.
+     * yet. Other backends (Git, JDBC, S3, Azure Blob) get the lexical checks only here. A Git repository writes
+     * an upload through its local working tree, which {@link #requireContainedOverwrite} checks. The unwrapped
+     * repository is only asked for its root; the write still goes through the secured wrapper, so no ACL check
+     * is bypassed.
      *
      * <p>A blank name is left to the bean validation that owns it. Every rejection is a 400
      * {@code file.path.invalid.message}, raised before any conflict mapping of the caller.
@@ -203,6 +206,89 @@ public class ProjectCreationService {
             }
         }
         return target;
+    }
+
+    /**
+     * V1: keeps an upload that overwrites an existing project inside that project's folder.
+     *
+     * <p>The upload writes its entries, and the descriptor it may generate, through the existing project folder,
+     * which may already hold links. The entry names are known only once the upload stages them, so every entry
+     * the folder already holds is checked instead: each must resolve inside the folder. A link to a sibling
+     * project, to a place outside the repository, or to nothing is refused; a link that stays inside the project
+     * folder is accepted. The folder itself, computed as {@link #requireContainedProjectFolder} computes it, must
+     * sit at its own lexical place under the real root. A new project's folder does not exist yet and holds no
+     * links, so it passes.
+     *
+     * <p>The check covers a file design repository and the local working tree of a Git repository, both of which
+     * the upload writes through. JDBC, S3 and Azure Blob repositories keep no local folder and get the lexical
+     * checks only. The unwrapped repository is only asked for its folder; the write still goes through the
+     * secured wrapper, so no ACL check is bypassed.
+     *
+     * <p>A blank name is left to the bean validation that owns it. Every rejection is a 400
+     * {@code file.path.invalid.message}, raised before the upload runs, so it is never mapped to a conflict.
+     *
+     * <p>The check, and {@link #localWriteRoot} with it, is private to this class: each V1 surface guards its own
+     * inputs, so it shares nothing with the archive save, which keeps its own copy. This departs from the Minimal
+     * Change Rule's clause to isolate new code in dedicated files, which the V1 instruction overrides.
+     */
+    private void requireContainedOverwrite(Repository repository, String projectName, String path) {
+        if (StringUtils.isBlank(projectName)) {
+            return;
+        }
+        var root = localWriteRoot(repository);
+        if (root == null) {
+            return;
+        }
+        try {
+            // The rules location is read only for a local folder, so other backends never need a workspace.
+            var physicalFolder = repository.supports().mappedFolders()
+                    ? FileMappingData.internalPath(path, projectName)
+                    : getUserWorkspace().getDesignTimeRepository().getRulesLocation() + projectName;
+            // V1: resolved once, before it is normalized, so a '<link>/..' in the root leads where the write leads
+            var anchorReal = realPathOf(root.toAbsolutePath()).normalize();
+            var boundary = anchorReal.resolve(physicalFolder).normalize();
+            if (!boundary.startsWith(anchorReal) || !realPathOf(boundary).startsWith(boundary)) {
+                log.debug("An overwritten project folder resolves outside its place in the design repository.");
+                throw new BadRequestException("file.path.invalid.message");
+            }
+            if (!Files.isDirectory(boundary, LinkOption.NOFOLLOW_LINKS)) {
+                return;
+            }
+            var realBoundary = boundary.toRealPath();
+            // V1: the walk never follows a link, so each link is visited once as an entry and resolved here
+            try (var entries = Files.walk(boundary)) {
+                for (var iterator = entries.iterator(); iterator.hasNext(); ) {
+                    if (!iterator.next().toRealPath().startsWith(realBoundary)) {
+                        log.debug("An entry of an overwritten project folder resolves outside the project folder.");
+                        throw new BadRequestException("file.path.invalid.message");
+                    }
+                }
+            }
+        } catch (IOException | UncheckedIOException | IllegalArgumentException e) {
+            // A link that resolves nowhere, a folder the walk cannot read, or an unparsable path is a rejection.
+            log.debug("An overwritten project folder is rejected: {}", e.getClass().getSimpleName());
+            throw new BadRequestException("file.path.invalid.message");
+        }
+    }
+
+    // V1: the local folder an upload writes through: a file repository's root or a Git working tree, else null
+    @Nullable
+    private static Path localWriteRoot(Repository repository) {
+        var current = repository;
+        while (current instanceof RepositoryDelegate delegate) {
+            current = delegate.getOriginal();
+        }
+        if (current instanceof FolderMapper mapper) {
+            current = mapper.getDelegate();
+        }
+        if (current instanceof PathCheckedRepository pathChecked) {
+            var fileRoot = pathChecked.getLocalRoot();
+            return fileRoot != null ? fileRoot : pathChecked.getLocalWorkingTree();
+        }
+        if (current instanceof LocalWorkingTree workingTree) {
+            return workingTree.getLocalWorkingTree();
+        }
+        return current instanceof FileSystemRepository fileSystem ? fileSystem.getRoot() : null;
     }
 
     /**
@@ -395,6 +481,8 @@ public class ProjectCreationService {
             requireNoControlCharacters(path, projectName);
             // V1: contain the new project folder inside the design repository root
             requireContainedProjectFolder(repository, projectName, path);
+            // V1: an overwrite writes through the existing project folder, so none of its links may lead out of it
+            requireContainedOverwrite(repository, projectName, path);
         } catch (BadRequestException e) {
             files.forEach(ProjectFile::destroy);
             throw e;
@@ -608,7 +696,7 @@ public class ProjectCreationService {
      * a place outside the root, or to nothing is refused. Links that stay inside the project folder are
      * accepted. The listing is the one the copy reads, taken through the secured wrapper; the unwrapped
      * repository is only asked for its root. A file repository keeps no history, so its current state is the
-     * one copied. Other backends (Git, JDBC, S3, Azure Blob) never follow a working-tree link and get no check.
+     * one copied. Other backends (Git, JDBC, S3, Azure Blob) never read through a working-tree link and get no check.
      *
      * <p>Every rejection is a 400 {@code file.path.invalid.message}, raised before anything is read from the
      * source or written to the target, so it is never mapped to a copy conflict.
