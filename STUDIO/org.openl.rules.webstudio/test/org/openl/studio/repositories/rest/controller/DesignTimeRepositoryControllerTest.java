@@ -1,11 +1,16 @@
 package org.openl.studio.repositories.rest.controller;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.ArgumentMatchers.nullable;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
@@ -18,14 +23,23 @@ import java.io.ByteArrayInputStream;
 import java.nio.file.Path;
 import java.util.List;
 import jakarta.validation.Valid;
+import jakarta.validation.Validation;
+import jakarta.validation.ValidatorFactory;
 
+import org.apache.commons.lang3.RandomStringUtils;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.http.HttpStatus;
+import org.springframework.security.acls.domain.BasePermission;
 import org.springframework.security.authentication.TestingAuthenticationToken;
 import org.springframework.security.core.context.SecurityContextHolder;
+import org.springframework.validation.BeanPropertyBindingResult;
+import org.springframework.validation.Validator;
+import org.springframework.validation.beanvalidation.SpringValidatorAdapter;
 import org.springframework.web.multipart.MultipartFile;
 
+import org.openl.rules.lock.LockManager;
 import org.openl.rules.project.abstraction.AProject;
 import org.openl.rules.project.abstraction.Comments;
 import org.openl.rules.project.abstraction.ProjectStatus;
@@ -36,7 +50,10 @@ import org.openl.rules.repository.api.FileData;
 import org.openl.rules.repository.api.Repository;
 import org.openl.rules.rest.acl.service.AclProjectsHelper;
 import org.openl.security.acl.repository.RepositoryAclService;
+import org.openl.studio.common.exception.BadRequestException;
 import org.openl.studio.common.exception.ConflictException;
+import org.openl.studio.common.exception.RestRuntimeException;
+import org.openl.studio.common.exception.ValidationException;
 import org.openl.studio.common.validation.BeanValidationProvider;
 import org.openl.studio.projects.converter.ProjectIdentityConverter;
 import org.openl.studio.projects.service.protection.ProtectedBranchBypassService;
@@ -52,6 +69,7 @@ import org.openl.studio.repositories.service.ZipProjectSaveStrategy;
 import org.openl.studio.repositories.validator.CreateUpdateProjectModelValidator;
 import org.openl.studio.repositories.validator.ZipArchiveValidator;
 
+// V1: new imports serve the V1-C/D rejection tests
 class DesignTimeRepositoryControllerTest {
 
     private static final String REPOSITORY_ID = "design";
@@ -114,7 +132,9 @@ class DesignTimeRepositoryControllerTest {
             }
         };
 
-        SecurityContextHolder.getContext().setAuthentication(new TestingAuthenticationToken("user", "password"));
+        // V1: generated credential (secret hygiene)
+        var credential = RandomStringUtils.secure().nextAlphanumeric(16);
+        SecurityContextHolder.getContext().setAuthentication(new TestingAuthenticationToken("user", credential));
     }
 
     @AfterEach
@@ -290,6 +310,251 @@ class DesignTimeRepositoryControllerTest {
         assertTrue(requestParameter.isAnnotationPresent(Valid.class));
     }
 
+    // V1-C: a '/'-leading path keeps its bean-validation rejection (openl.constraints.path.1.message) before creation
+    @Test
+    void createWithALeadingSlashPathKeepsItsPathConstraintRejection() throws Exception {
+        try (var factory = Validation.buildDefaultValidatorFactory()) {
+            var validating = controllerValidatingWith(factory);
+
+            var ex = assertThrows(ValidationException.class,
+                    () -> validating.createProject(repository, "Project", "/etc/p", "comment", null, "predefined",
+                            "templates", "Sample Project", "Models", "rules/Models.xlsx", "Algorithms",
+                            "rules/Algorithms.xlsx", false, null, null, false));
+
+            var error = ex.getBindingResult().getFieldError("path");
+            assertNotNull(error);
+            assertEquals("The path in the repository cannot start with '/'.", error.getDefaultMessage());
+            verify(projectCreationService, never()).createFromTemplate(any(Repository.class), any(), any(), any(),
+                    any(), any(), any(), any());
+            verify(projectCreationService, never()).createFromFiles(any(Repository.class), any(), any(), anyList(),
+                    any(), any(), any(), any(), any(), any());
+            verify(projectCreationService, never()).copyProject(any(Repository.class), any(), any(),
+                    any(RulesProject.class), any(), any());
+        }
+    }
+
+    // V1-C: a '..' segment in the path (payload C1) keeps its NameChecker bean-validation rejection before creation
+    @Test
+    void createWithADotDotPathKeepsItsNameCheckerRejection() throws Exception {
+        try (var factory = Validation.buildDefaultValidatorFactory()) {
+            var validating = controllerValidatingWith(factory);
+
+            var ex = assertThrows(ValidationException.class,
+                    () -> validating.createProject(repository, "Project", "../../outside", "comment", null,
+                            "predefined", "templates", "Sample Project", "Models", "rules/Models.xlsx",
+                            "Algorithms", "rules/Algorithms.xlsx", false, null, null, false));
+
+            var error = ex.getBindingResult().getFieldError("path");
+            assertNotNull(error);
+            var message = error.getDefaultMessage();
+            assertNotNull(message);
+            assertTrue(message.contains("Name cannot contain forbidden characters"));
+            verify(projectCreationService, never()).createFromTemplate(any(Repository.class), any(), any(), any(),
+                    any(), any(), any(), any());
+            verify(projectCreationService, never()).createFromFiles(any(Repository.class), any(), any(), anyList(),
+                    any(), any(), any(), any(), any(), any());
+            verify(projectCreationService, never()).copyProject(any(Repository.class), any(), any(),
+                    any(RulesProject.class), any(), any());
+        }
+    }
+
+    // V1-C: a from-project copy to a '/'-leading path keeps its bean-validation rejection before any copy
+    @Test
+    void copyToALeadingSlashPathKeepsItsPathConstraintRejection() throws Exception {
+        sourceProject("Source");
+        try (var factory = Validation.buildDefaultValidatorFactory()) {
+            var validating = controllerValidatingWith(factory);
+            var request = new CreateFromProjectModel(REPOSITORY_ID, "Source", "/etc/p", "comment", null);
+
+            var ex = assertThrows(ValidationException.class,
+                    () -> validating.createProjectFromProject(repository, "Copy", request));
+
+            var error = ex.getBindingResult().getFieldError("path");
+            assertNotNull(error);
+            assertEquals("The path in the repository cannot start with '/'.", error.getDefaultMessage());
+            verify(projectCreationService, never()).createFromTemplate(any(Repository.class), any(), any(), any(),
+                    any(), any(), any(), any());
+            verify(projectCreationService, never()).createFromFiles(any(Repository.class), any(), any(), anyList(),
+                    any(), any(), any(), any(), any(), any());
+            verify(projectCreationService, never()).copyProject(any(Repository.class), any(), any(),
+                    any(RulesProject.class), any(), any());
+        }
+    }
+
+    // V1-C: a repository failure on the template route keeps its 409 project.create.failed.message
+    @Test
+    void templateCreationFailureKeepsItsConflict() throws Exception {
+        when(projectCreationService.createFromTemplate(eq(repository), eq("Project"), any(), any(), any(), any(),
+                any(), any())).thenThrow(new ConflictException("project.create.failed.message"));
+
+        var ex = assertThrows(ConflictException.class,
+                () -> controller.createProject(repository, "Project", null, "comment", null, "predefined",
+                        "templates", "Sample Project", "Models", "rules/Models.xlsx", "Algorithms",
+                        "rules/Algorithms.xlsx", false, null, null, false));
+
+        assertEquals("openl.error.409.project.create.failed.message", ex.getErrorCode());
+        assertEquals(HttpStatus.CONFLICT, ex.getHttpStatus());
+    }
+
+    // V1-C: a repository failure on the from-project route keeps its 409 project.copy.failed.message
+    @Test
+    void projectCopyFailureKeepsItsConflict() throws Exception {
+        var source = sourceProject("Source");
+        when(projectCreationService.copyProject(repository, "Copy", null, source, "comment", null))
+                .thenThrow(new ConflictException("project.copy.failed.message"));
+        var request = new CreateFromProjectModel(REPOSITORY_ID, "Source", null, "comment", null);
+
+        var ex = assertThrows(ConflictException.class,
+                () -> controller.createProjectFromProject(repository, "Copy", request));
+
+        assertEquals("openl.error.409.project.copy.failed.message", ex.getErrorCode());
+        assertEquals(HttpStatus.CONFLICT, ex.getHttpStatus());
+    }
+
+    // V1-D: a rejected archive entry keeps its zip-archive.unknown.archive.path.message error and saves nothing
+    @Test
+    void archiveEntryRejectionKeepsItsZipArchiveKey() throws Exception {
+        var archive = mock(MultipartFile.class);
+        when(archive.getOriginalFilename()).thenReturn("Project.zip");
+        when(archive.getInputStream()).thenReturn(new ByteArrayInputStream(new byte[0]));
+        var errors = new BeanPropertyBindingResult(new Object(), "archive");
+        errors.reject("zip-archive.unknown.archive.path.message");
+        var rejection = new ValidationException(errors);
+        doThrow(rejection).when(validationProvider).validate(any(Path.class), any(Validator.class));
+        var archives = List.of(archive);
+
+        var ex = assertThrows(ValidationException.class,
+                () -> controller.createProject(repository, "Project", null, "comment", archives, null, null, null,
+                        "Models", "rules/Models.xlsx", "Algorithms", "rules/Algorithms.xlsx", false, null, null,
+                        false));
+
+        assertSame(rejection, ex);
+        var globalError = ex.getBindingResult().getGlobalError();
+        assertNotNull(globalError);
+        assertEquals("zip-archive.unknown.archive.path.message", globalError.getCode());
+        verify(zipProjectSaveStrategy, never()).save(any(), any(), any());
+        verify(designRepositoryAclService, never()).createAcl(any(AProject.class), anyList(), any(Boolean.class));
+    }
+
+    // V1-C: the template route surfaces the new path guard as 400 file.path.invalid.message, never as a 409
+    @Test
+    void templateRoutePathGuardRejectionIsABadRequest() throws Exception {
+        when(projectCreationService.createFromTemplate(eq(repository), eq("link"), any(), any(), any(), any(), any(),
+                any())).thenThrow(new BadRequestException("file.path.invalid.message"));
+
+        var ex = assertThrows(RestRuntimeException.class,
+                () -> controller.createProject(repository, "link", null, "comment", null, "predefined", "templates",
+                        "Sample Project", "Models", "rules/Models.xlsx", "Algorithms", "rules/Algorithms.xlsx",
+                        false, null, null, false));
+
+        assertPathRejected(ex);
+        verify(projectCreationService, never()).applyStatusAfterCreate(any(Repository.class), any(), any());
+    }
+
+    // V1-C: the files route surfaces the new path guard as 400 file.path.invalid.message, never as a 409
+    @Test
+    void filesRoutePathGuardRejectionIsABadRequest() throws Exception {
+        var file = mock(MultipartFile.class);
+        when(file.getOriginalFilename()).thenReturn("notes.txt");
+        when(file.getInputStream()).thenReturn(new ByteArrayInputStream(new byte[0]));
+        when(projectCreationService.createFromFiles(eq(repository), eq("link"), any(), anyList(), any(), any(), any(),
+                any(), any(), any())).thenThrow(new BadRequestException("file.path.invalid.message"));
+        var files = List.of(file);
+
+        var ex = assertThrows(RestRuntimeException.class,
+                () -> controller.createProject(repository, "link", null, "comment", files, null, null, null,
+                        "Models", "rules/Models.xlsx", "Algorithms", "rules/Algorithms.xlsx", false, null, null,
+                        false));
+
+        assertPathRejected(ex);
+        verify(projectCreationService, never()).applyStatusAfterCreate(any(Repository.class), any(), any());
+    }
+
+    // V1-D: the archive route surfaces the new destination guard as 400, finalizes nothing and releases its lock
+    @Test
+    void archiveRoutePathGuardRejectionIsABadRequestAndReleasesTheLock() throws Exception {
+        var archive = mock(MultipartFile.class);
+        when(archive.getOriginalFilename()).thenReturn("Project.zip");
+        when(archive.getInputStream()).thenReturn(new ByteArrayInputStream(new byte[0]));
+        var data = new FileData();
+        data.setName("Project");
+        when(zipProjectSaveStrategy.save(eq(repository), any(CreateUpdateProjectModel.class), any(Path.class)))
+                .thenThrow(new BadRequestException("file.path.invalid.message"))
+                .thenReturn(data);
+        var archives = List.of(archive);
+
+        var ex = assertThrows(RestRuntimeException.class,
+                () -> controller.createProject(repository, "Project", null, "comment", archives, null, null, null,
+                        "Models", "rules/Models.xlsx", "Algorithms", "rules/Algorithms.xlsx", false, null, null,
+                        false));
+
+        assertPathRejected(ex);
+        verify(designRepositoryAclService, never()).createAcl(any(AProject.class), anyList(), any(Boolean.class));
+        verify(projectCreationService, never()).registerExtensibleTags(any(AProject.class));
+        verify(projectCreationService, never()).awaitProjectVisibility(any(Repository.class));
+        verify(projectCreationService, never()).refreshWorkspaceAfterDesignChange();
+        verify(projectCreationService, never()).applyStatusAfterCreate(any(Repository.class), any(), any());
+        // The same user may take a lock it already holds, so only the lock file itself proves the release.
+        assertFalse(new LockManager(Path.of("target").resolve("locks/api"))
+                .getLock("design/[branches]/main/Project")
+                .info()
+                .isLocked());
+
+        controller.createProject(repository, "Project", null, "comment", archives, null, null, null, "Models",
+                "rules/Models.xlsx", "Algorithms", "rules/Algorithms.xlsx", false, null, null, false);
+
+        verify(projectCreationService).applyStatusAfterCreate(repository, "Project", null);
+    }
+
+    // V1-D: an archive overwrite (payload D15 route) passes its WRITE check, then surfaces the new guard as 400
+    @Test
+    void archiveOverwritePathGuardRejectionIsABadRequest() throws Exception {
+        var archive = mock(MultipartFile.class);
+        when(archive.getOriginalFilename()).thenReturn("Project.zip");
+        when(archive.getInputStream()).thenReturn(new ByteArrayInputStream(new byte[0]));
+        when(designRepositoryAclService.isGranted(eq(REPOSITORY_ID), any(), eq(List.of(BasePermission.WRITE))))
+                .thenReturn(true);
+        when(zipProjectSaveStrategy.save(eq(repository), any(CreateUpdateProjectModel.class), any(Path.class)))
+                .thenThrow(new BadRequestException("file.path.invalid.message"));
+        var archives = List.of(archive);
+
+        var ex = assertThrows(RestRuntimeException.class,
+                () -> controller.createProject(repository, "Project", null, "comment", archives, null, null, null,
+                        "Models", "rules/Models.xlsx", "Algorithms", "rules/Algorithms.xlsx", true, null, null,
+                        false));
+
+        assertPathRejected(ex);
+        verify(designRepositoryAclService).isGranted(REPOSITORY_ID, "Project", List.of(BasePermission.WRITE));
+    }
+
+    // V1-C: the from-project route surfaces the new path guard as 400 file.path.invalid.message, never as a 409
+    @Test
+    void copyRoutePathGuardRejectionIsABadRequest() throws Exception {
+        var source = sourceProject("Source");
+        when(projectCreationService.copyProject(repository, "link", null, source, "comment", null))
+                .thenThrow(new BadRequestException("file.path.invalid.message"));
+        var request = new CreateFromProjectModel(REPOSITORY_ID, "Source", null, "comment", null);
+
+        var ex = assertThrows(RestRuntimeException.class,
+                () -> controller.createProjectFromProject(repository, "link", request));
+
+        assertPathRejected(ex);
+    }
+
+    // V1-C: a '..' copy target (payload C13) that reaches the service is refused there as 400, never as a 409
+    @Test
+    void copyToADotDotTargetIsABadRequest() throws Exception {
+        var source = sourceProject("Source");
+        when(projectCreationService.copyProject(eq(repository), eq("link"), eq("../../p"), eq(source),
+                eq("comment"), isNull())).thenThrow(new BadRequestException("file.path.invalid.message"));
+        var request = new CreateFromProjectModel(REPOSITORY_ID, "Source", "../../p", "comment", null);
+
+        var ex = assertThrows(RestRuntimeException.class,
+                () -> controller.createProjectFromProject(repository, "link", request));
+
+        assertPathRejected(ex);
+    }
+
     /** The project the request names as its source, as the identity converter resolves it. */
     private RulesProject sourceProject(String identifier) {
         var source = mock(RulesProject.class);
@@ -303,6 +568,39 @@ class DesignTimeRepositoryControllerTest {
         doThrow(new ConflictException("repository.branch.message"))
                 .when(bypassService)
                 .requireBypassOrThrow(repository, branch, REPOSITORY_ID, false);
+    }
+
+    // V1-C: controller with real bean validation, built like setUp, so a request model meets its constraints
+    private DesignTimeRepositoryController controllerValidatingWith(ValidatorFactory factory) {
+        return new DesignTimeRepositoryController(
+                designRepositoryAclService,
+                new BeanValidationProvider(List.<Validator>of(new SpringValidatorAdapter(factory.getValidator()))),
+                mock(CreateUpdateProjectModelValidator.class),
+                mock(ZipArchiveValidator.class),
+                zipProjectSaveStrategy,
+                "target",
+                aclProjectsHelper,
+                mock(DesignTimeRepositoryService.class),
+                mock(ProjectRevisionService.class),
+                bypassService,
+                projectCreationService,
+                projectCreationTargetResolver,
+                repositoryConfigService,
+                projectIdentityConverter) {
+            // The comment service is a @Lookup bean, absent outside a Spring context.
+            @Override
+            protected Comments getCommentsService(String repoName) {
+                return comments;
+            }
+        };
+    }
+
+    // V1-C/D: a path guard rejection is a 400 with the existing file.path.invalid.message key, never a 409
+    private static void assertPathRejected(RestRuntimeException ex) {
+        assertInstanceOf(BadRequestException.class, ex);
+        assertFalse(ex instanceof ConflictException);
+        assertEquals(HttpStatus.BAD_REQUEST, ex.getHttpStatus());
+        assertEquals("openl.error.400.file.path.invalid.message", ex.getErrorCode());
     }
 
 }

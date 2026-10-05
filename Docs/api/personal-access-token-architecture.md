@@ -39,10 +39,12 @@ The Personal Access Token (PAT) feature provides a secure, token-based authentic
 ### Key Features
 
 - **Token Lifecycle Management**: Create, list, retrieve, and delete tokens
-- **Expiration Support**: Optional token expiration for time-limited access
+- **Expiration Support**: Every new token expires. A token created without an expiration date expires after `security.pat.default-expiration-days` (default 90) days, and an expiration date more than `security.pat.max-expiration-days` (default 365) days ahead is refused; both values are configurable. Tokens created before 6.5.0 with `expiresAt = null` are unchanged and never expire
 - **User Isolation**: Users manage only their own tokens
 - **Audit Trail**: Creation and expiration timestamps for all tokens
 - **Security Hardening**: Multiple layers of protection against common attacks
+
+<!-- V8: every new token expires; the default lifetime and the maximum are configurable. -->
 
 ---
 
@@ -295,14 +297,26 @@ openl_pat_<publicId>.<secret>
            Base62     Base62
 ```
 
+<!-- V8: generateToken applies the default lifetime and rejects dates beyond the maximum. -->
+
 **Generation Process**:
 
 1. **Validate Expiration**:
    ```java
-   if (expiresAt != null && expiresAt.isBefore(Instant.now(clock))) {
+   Instant now = Instant.now(clock);
+
+   if (expiresAt != null && expiresAt.isBefore(now)) {
        throw new IllegalArgumentException("expiresAt must be in the future");
    }
+
+   Instant effectiveExpiresAt = expiresAt != null ? expiresAt : now.plus(defaultLifetime);
+   if (effectiveExpiresAt.isAfter(now.plus(maxLifetime))) {
+       throw new BadRequestException("pat.expires-at.max.message",
+               new Object[]{String.valueOf(maxLifetime.toDays())});
+   }
    ```
+   - `defaultLifetime` and `maxLifetime` are `Duration` constructor parameters that `PatSecurityConfiguration.patGeneratorService(...)` builds from `security.pat.default-expiration-days` (default `90`) and `security.pat.max-expiration-days` (default `365`); a non-positive value, or a default greater than the maximum, fails Studio at startup
+   - A date later than now + `maxLifetime` is rejected with 400 `openl.error.400.pat.expires-at.max.message`; a date of exactly now + the maximum is accepted
 
 2. **Generate Unique Public ID**:
    ```java
@@ -329,7 +343,7 @@ openl_pat_<publicId>.<secret>
    token.setLoginName(loginName);
    token.setName(name);
    token.setCreatedAt(Instant.now(clock));
-   token.setExpiresAt(expiresAt);
+   token.setExpiresAt(effectiveExpiresAt);  // resolved value: default applied, maximum checked
 
    crudService.save(token);
    ```

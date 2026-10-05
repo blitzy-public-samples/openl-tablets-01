@@ -26,7 +26,7 @@ between two of its `client.test` calls belongs to the folder that ran.
 | `030-lockout` | Sends five requests with HTTP Basic and a wrong password for `audit_lock`. The fifth engages the lock | Five `auth.failure` and one `auth.lockout` (`outcome=locked`) for `audit_lock` |
 | `040-pat-use` | `010` presents the administrator's valid token without a session. HTTP Basic opens no session, so `020` opens the administrator's session with a form login. `030` presents the same token on that session of the same user, which the token does not replace. `040` presents, without a session, a generated token that parses but matches no stored token, and gets `401` | Two `auth.success` lines with `method=pat` and the token's public ID, and one `auth.failure` with `method=pat`, `user="-"` and the public ID of the invalid token |
 | `050-pat-revoke` | Deletes the token by its public ID `{PAT_PUBLIC_ID}` | One `pat.revoke` with that public ID |
-| `060-project-create` | Creates the project `${SECRET_LOOKING_PROJECT}` from an archive in the `design` database repository, with the default grant. The archive is `test-resources/task_EPBDS-15595/project.zip`, referenced and not copied. A database repository is not wrapped in `MappedRepository`, whose WARN lines name project paths | One `acl.change` with `changes` ≥ 1, listing `createAcl` or `updateAcl` |
+| `060-project-create` | Creates the project `{SECRET_LOOKING_PROJECT}` from an archive in the `design` database repository, with the default grant. The archive is `test-resources/task_EPBDS-15595/project.zip`, referenced and not copied. A database repository is not wrapped in `MappedRepository`, whose WARN lines name project paths | One `acl.change` with `changes` ≥ 1, listing `createAcl` or `updateAcl` |
 | `070-project-acl-put` | Grants `VIEWER` on the project to `audit_basic` | One `acl.change` with `changes` ≥ 1, listing `updateAcl` or `createAcl` |
 | `080-project-acl-delete` | Revokes that `VIEWER` grant of `audit_basic` | One `acl.change` with `changes` ≥ 1, listing `updateAcl` or `deleteAcl` |
 | `090-bulk-acl` | `010` reads the ACL configuration. `020` overwrites it with one `POST /rest/acls` of 4 entries on the `design` repository: `audit_basic`, `audit_form`, `audit_delete` and the group `${SECRET_LOOKING_GROUP}`, which the overwrite creates. An overwrite removes the SID of every user it does not list, and deleting a user writes `acl.change` only while its SID holds an entry, so `audit_delete` is listed to keep an entry for `110` | Exactly one `acl.change`, with `changes` ≥ 4, the number of entries the test counts in `020` |
@@ -36,13 +36,16 @@ between two of its `client.test` calls belongs to the folder that ran.
 
 ## Environment values
 
-The test generates these 16 values at runtime and puts them into `localEnv`. None is ever written to a file:
+The test puts these 16 values into `localEnv` at runtime. It derives the two `ADMIN_*` values from the configured
+administrator, takes `PAT_TOKEN` and `PAT_PUBLIC_ID` from the token it creates, and generates the rest. None is ever
+written to a file:
 `ADMIN_AUTH_TOCKEN`, `ADMIN_PASSWORD`, `AUDIT_FORM_PASSWORD`, `AUDIT_FORM_WRONG_PASSWORD`, `AUDIT_BASIC_PASSWORD`,
 `AUDIT_BASIC_BASIC`, `AUDIT_BASIC_WRONG_BASIC`, `AUDIT_LOCK_PASSWORD`, `AUDIT_LOCK_WRONG_BASIC`,
 `AUDIT_DELETE_PASSWORD`, `PAT_TOKEN`, `PAT_PUBLIC_ID`, `INVALID_PAT_TOKEN`, `SECRET_LOOKING_PROJECT`,
 `SECRET_LOOKING_PROJECT_ID` and `SECRET_LOOKING_GROUP`.
 
-- Headers and bodies read a value as `${NAME}`, request paths as `{NAME}`.
+- Headers and JSON or form-urlencoded bodies read a value as `${NAME}`, request paths as `{NAME}`. A multipart body
+  is sent as written, so `060-project-create` names its project in the path only.
 - A `{…}` value is inserted into the URL verbatim, without encoding, so it must be URL-safe and hold no `$` or `\`.
 - `SECRET_LOOKING_PROJECT_ID` is the Base64 of `design:<project name>`, and holds no `/` or `+`.
 - `SECRET_LOOKING_GROUP` is also inserted into a JSON body, so it must be safe there as well.

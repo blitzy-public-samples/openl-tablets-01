@@ -147,13 +147,12 @@ class UsersValidatorTest extends AbstractConstraintValidatorTest {
         assertNull(validateAndGetResult(userEditModel));
     }
 
-    @Test
-    void testEditUser_password_notValid() {
-        var userEditModel = getValidUserEditModel();
-        String wrongPassword = RandomStringUtils.random(26, "pass");
-        userEditModel.setPassword(wrongPassword);
-        var bindingResult = validateAndGetResult(userEditModel);
-        assertFieldError("password", MUST_BE_LESS_THAN_25, wrongPassword, bindingResult.getFieldError("password"));
+    // V7: admin edit route, boundary cases of LocalPasswordPolicy; the 25-character maximum no longer applies
+    @ParameterizedTest(name = "[{index}] {0}")
+    @MethodSource("passwordPolicyCases")
+    void testEditUser_password_policy(String label, String candidate, String expectedMessage) {
+        var model = getValidUserEditModel().setPassword(candidate);
+        assertPasswordPolicy(label, model, "password", expectedMessage, candidate);
     }
 
     @Test

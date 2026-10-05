@@ -2,15 +2,17 @@ package org.openl.rules.rest.model;
 
 import java.util.Set;
 import jakarta.validation.constraints.NotBlank;
-import jakarta.validation.constraints.Size;
 
 import io.swagger.v3.oas.annotations.Parameter;
 import lombok.Getter;
 
+import org.openl.rules.rest.validation.LocalPasswordConstraint;
+
 public class UserEditModel extends UserInfoModel {
 
     @Getter
-    @Size(max = 25, message = "{openl.constraints.size.max.message}")
+    // V7: local password policy replaces the 25-character maximum.
+    @LocalPasswordConstraint
     @Parameter(description = "Password", example = "qwerty")
     private String password;
 
