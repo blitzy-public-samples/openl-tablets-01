@@ -8,6 +8,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.CALLS_REAL_METHODS;
+import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -37,6 +38,8 @@ import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
 import org.mockito.Mockito;
+import org.springframework.security.authentication.TestingAuthenticationToken;
+import org.springframework.security.core.context.SecurityContextHolder;
 
 import org.openl.rules.lock.LockInfo;
 import org.openl.rules.project.abstraction.AProject;
@@ -48,16 +51,19 @@ import org.openl.rules.project.impl.local.ProjectMetainfo;
 import org.openl.rules.repository.PathCheckedRepository;
 import org.openl.rules.repository.RepositoryInstatiator;
 import org.openl.rules.repository.api.BranchRepository;
+import org.openl.rules.repository.api.FeaturesBuilder;
 import org.openl.rules.repository.api.FileData;
 import org.openl.rules.repository.api.Repository;
 import org.openl.rules.repository.api.RepositoryDelegate;
 import org.openl.rules.repository.api.UserInfo;
 import org.openl.rules.repository.file.FileSystemRepository;
 import org.openl.rules.rest.acl.service.AclProjectsHelper;
+import org.openl.rules.webstudio.service.UserManagementService;
 import org.openl.rules.workspace.WorkspaceUser;
 import org.openl.rules.workspace.dtr.DesignTimeRepository;
 import org.openl.rules.workspace.dtr.FolderMapper;
 import org.openl.rules.workspace.dtr.impl.MappedRepository;
+import org.openl.rules.workspace.uw.UserWorkspace;
 import org.openl.security.acl.repository.SecureBranchRepository;
 import org.openl.security.acl.repository.SecureMappedRepository;
 import org.openl.security.acl.repository.SecureRepository;
@@ -122,6 +128,21 @@ class FileRootContainmentTest {
         CLOSED_MAPPED,
         /** A repository mount over the flat configured repository, behind {@code SecureBranchRepository}. */
         REPO
+    }
+
+    // V1: the repository mount the REST routes really use, built by RepoFileRootFactory inside AuthoringRepository
+    /**
+     * The secured, configured file design repository a repository-mount route receives, which
+     * {@link RepoFileRootFactory#of(Repository, String)} mounts inside {@code AuthoringRepository}.
+     */
+    enum FactoryKind {
+        /**
+         * A mapped repository behind {@code SecureMappedRepository}; the factory mounts its {@code getDelegate()},
+         * the {@code PathCheckedRepository}.
+         */
+        MAPPED,
+        /** A flat repository behind {@code SecureBranchRepository}, which the factory mounts as it is. */
+        FLAT
     }
 
     /**
@@ -652,6 +673,34 @@ class FileRootContainmentTest {
                 "A configured file repository behind SecureMappedRepository");
     }
 
+    // V1: the repository mount holds its repository inside AuthoringRepository, which localRoot looks behind
+    @Test
+    void localRootLooksBehindTheAuthoringWrapperOfTheRepositoryMount() throws IOException {
+        var root = layOutProjects(tmp.resolve("design-authoring"));
+        var expected = Optional.of(root.toRealPath());
+        var author = new UserInfo(userName);
+        var configured = assertInstanceOf(BranchRepository.class, configuredFileRepository(root),
+                "Fixture: the path-checked wrapper is a branch repository");
+        var mapped = new AuthoringRepository(configured, author);
+        var flat = new AuthoringRepository((BranchRepository) secured(configuredFileRepository(root)), author);
+
+        assertEquals(expected, FileRoot.localRoot(mapped),
+                "A configured file repository inside AuthoringRepository, as a mapped repository is mounted");
+        assertEquals(expected, FileRoot.localRoot(flat),
+                "A secured configured file repository inside AuthoringRepository, as a flat repository is mounted");
+    }
+
+    // V1: behind AuthoringRepository, a backend that is not file-backed yields no root and is asked nothing
+    @Test
+    void localRootIsEmptyBehindTheAuthoringWrapperOfANonFileBackend() {
+        var backend = mock(BranchRepository.class);
+        var authoring = new AuthoringRepository(backend, new UserInfo(userName));
+
+        assertEquals(Optional.empty(), FileRoot.localRoot(authoring),
+                "A non-file branch repository inside AuthoringRepository");
+        verifyNoInteractions(backend);
+    }
+
     @ParameterizedTest
     @EnumSource(ConfiguredKind.class)
     @DisabledOnOs(OS.WINDOWS)
@@ -691,6 +740,75 @@ class FileRootContainmentTest {
         var root = repoMount(repository);
         assertTrue(root.contains("P1/rules.xml"), "A regular path under a root that climbs out of a link");
         assertFalse(root.contains("P1/leak.txt"), "A link outside under a root that climbs out of a link");
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // V1: the repository mount as RepoFileRootFactory builds it for the REST routes, inside AuthoringRepository
+    // ---------------------------------------------------------------------------------------------
+
+    // V1: the routes' own mount refuses every link at or above a repository path, as the directly built mount does
+    @ParameterizedTest
+    @EnumSource(FactoryKind.class)
+    @DisabledOnOs(OS.WINDOWS)
+    void factoryRepositoryMountRejectsEveryLink(FactoryKind kind) throws IOException {
+        var design = layOutProjects(tmp.resolve("design-factory"));
+        var root = factoryMount(kind, design);
+        Files.createSymbolicLink(design.resolve("P1/link"), outsideDir);
+        Files.createSymbolicLink(design.resolve("P1/leak.txt"), outsideFile);
+        Files.createSymbolicLink(design.resolve("P1/sib"), design.resolve("P2"));
+        Files.createSymbolicLink(design.resolve("rootlink"), outsideDir);
+        Files.createSymbolicLink(design.resolve("rootleak.txt"), outsideFile);
+        Files.createSymbolicLink(design.resolve("P1/inner"), design.resolve("P1/sub"));
+        Files.createSymbolicLink(design.resolve("P1/ghost"), tmp.resolve("outside/missing"));
+
+        assertFalse(root.contains("P1/link"), "An outside directory link on " + kind);
+        assertFalse(root.contains("P1/link/rules.xml"), "An existing file through an outside directory link on "
+                + kind);
+        assertFalse(root.contains("P1/link/new/deep/x.txt"), "A new deep path through an outside directory link on "
+                + kind);
+        assertFalse(root.contains("P1/leak.txt"), "A link to a regular file outside the repository on " + kind);
+        assertFalse(root.contains("P1/sib"), "A link to the sibling project folder on " + kind);
+        assertFalse(root.contains("P1/sib/rules.xml"), "A file of the sibling project through a link on " + kind);
+        assertFalse(root.contains("P1/sib/x.txt"), "A new file in the sibling project through a link on " + kind);
+        assertFalse(root.contains("rootlink"), "A directory link at the repository root on " + kind);
+        assertFalse(root.contains("rootlink/rules.xml"), "A file through a link at the repository root on " + kind);
+        assertFalse(root.contains("rootleak.txt"), "A file link at the repository root on " + kind);
+        assertFalse(root.contains("P1/inner"), "A link inside the project on " + kind);
+        assertFalse(root.contains("P1/inner/inside.txt"), "A file through a link inside the project on " + kind);
+        assertFalse(root.contains("P1/ghost"), "A dangling link on " + kind);
+        assertFalse(root.contains("P1/ghost/x.txt"), "A new file under a dangling link on " + kind);
+        assertTrue(root.contains("P1/sub/inside.txt"), "The target of the link inside the project, at its own place");
+    }
+
+    // V1: the strict check still serves regular paths and creates new ones on the routes' own mount
+    @ParameterizedTest
+    @EnumSource(FactoryKind.class)
+    void factoryRepositoryMountContainsRegularAndNewPaths(FactoryKind kind) throws IOException {
+        var root = factoryMount(kind, layOutProjects(tmp.resolve("design-factory")));
+
+        assertTrue(root.contains(""), "The repository root on " + kind);
+        assertTrue(root.contains("P1/rules.xml"), "A regular file on " + kind);
+        assertTrue(root.contains("P1/sub/inside.txt"), "A regular nested file on " + kind);
+        assertTrue(root.contains("P1/newdir/sub/x.txt"), "A new file in a new sub-folder on " + kind);
+    }
+
+    // V1: a branch repository that is not file-backed stays lexical-only behind AuthoringRepository, as Git does
+    @Test
+    void factoryRepositoryMountOverNonFileBackendAcceptsEveryPathWithoutCallingIt() {
+        var plain = mock(BranchRepository.class);
+        when(plain.supports()).thenReturn(new FeaturesBuilder(plain).build());
+        var behindSecured = mock(BranchRepository.class);
+        when(behindSecured.supports()).thenReturn(new FeaturesBuilder(behindSecured).build());
+        var plainRoot = factoryMount(plain);
+        var securedRoot = factoryMount(secured(behindSecured));
+        // Building the mount asks the backend for its features and its branch; containment asks it nothing.
+        clearInvocations(plain, behindSecured);
+
+        for (var path : linkLikePaths()) {
+            assertTrue(plainRoot.contains(path), "A non-file branch repository has no links to follow: " + path);
+            assertTrue(securedRoot.contains(path), "A secured non-file branch repository has no links: " + path);
+        }
+        verifyNoInteractions(plain, behindSecured);
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -827,6 +945,55 @@ class FileRootContainmentTest {
         var configured = RepositoryInstatiator.newRepository("repository.design", settings::get);
         closeables.add(() -> IOUtils.closeQuietly(configured));
         return configured;
+    }
+
+    // V1: the secured, configured file repository a repository-mount route receives, mounted by RepoFileRootFactory
+    /**
+     * A repository mount over a {@code repo-file} design repository built from its settings in the folder, behind
+     * the secured wrapper a repository-mount route receives, and mounted by {@link RepoFileRootFactory}.
+     */
+    private RepoFileRoot factoryMount(FactoryKind kind, Path design) throws IOException {
+        var secured = switch (kind) {
+            case MAPPED -> {
+                var mapper = assertInstanceOf(SecureMappedRepository.class,
+                        secured(mapped(configuredFileRepository(design))), "Fixture: the mapped secured wrapper");
+                assertInstanceOf(PathCheckedRepository.class, mapper.getDelegate(),
+                        "Fixture: the factory mounts the path-checked repository behind the mapping");
+                yield mapper;
+            }
+            case FLAT -> assertInstanceOf(SecureBranchRepository.class, secured(configuredFileRepository(design)),
+                    "Fixture: the flat secured wrapper");
+        };
+        return factoryMount(secured);
+    }
+
+    // V1: RepoFileRootFactory stamps the authenticated user as the author, so one is authenticated while it runs
+    /**
+     * Mounts the repository on its default branch through {@link RepoFileRootFactory#of(Repository, String)}, as
+     * the repository-mount routes do, so the mount holds the repository inside {@code AuthoringRepository}.
+     */
+    private RepoFileRoot factoryMount(Repository repository) {
+        var user = user();
+        var lockEngine = lockEngine();
+        var userWorkspace = mock(UserWorkspace.class);
+        when(userWorkspace.getUser()).thenReturn(user);
+        when(userWorkspace.getDesignTimeRepository()).thenReturn(mock(DesignTimeRepository.class));
+        when(userWorkspace.getProjectsLockEngine()).thenReturn(lockEngine);
+        var factory = new RepoFileRootFactory(mock(AclProjectsHelper.class), mock(UserManagementService.class),
+                mock(ProjectFileLookupService.class)) {
+            @Override
+            public UserWorkspace getUserWorkspace() {
+                return userWorkspace;
+            }
+        };
+        var context = SecurityContextHolder.createEmptyContext();
+        context.setAuthentication(new TestingAuthenticationToken(userName, null));
+        SecurityContextHolder.setContext(context);
+        try {
+            return assertInstanceOf(RepoFileRoot.class, factory.of(repository, null), "Fixture: a repository mount");
+        } finally {
+            SecurityContextHolder.clearContext();
+        }
     }
 
     /**

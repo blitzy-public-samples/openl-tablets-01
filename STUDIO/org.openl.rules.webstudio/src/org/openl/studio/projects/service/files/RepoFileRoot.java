@@ -147,13 +147,15 @@ public class RepoFileRoot implements FileRoot {
      * returns the real root, which the check starts from. A path that does not exist yet is accepted
      * when its deepest existing ancestor sits at its own place, so new files and folders can be created.
      *
-     * <p>Which repositories are checked: {@link RepoFileRootFactory#of(Repository, String)} passes a
-     * flat file repository as its {@code SecureRepository} wrapper, which {@code localRoot} unwraps
-     * through {@code RepositoryDelegate}, and a mapped file repository as the raw
-     * {@code FileSystemRepository} obtained from {@code SecureMappedRepository.getDelegate()}. Both
-     * engage the check. Any other backend accepts every path, including the Git branch wrapper
-     * {@code AuthoringRepository}, which implements {@code BranchRepository} only and so is not
-     * unwrapped: Git reads blobs from its object database, never through working-tree links.
+     * <p>Which repositories are checked: {@link RepoFileRootFactory#of(Repository, String)} mounts the
+     * repository inside {@code AuthoringRepository}. {@code localRoot} unwraps that wrapper itself, then
+     * every {@code RepositoryDelegate}, then reads the root of the path-checked repository it reaches. For
+     * a mapped file design repository the wrapper holds the {@code PathCheckedRepository} that
+     * {@code SecureMappedRepository.getDelegate()} returns; for a flat one it holds
+     * {@code SecureBranchRepository}, whose original is that {@code PathCheckedRepository}. Both reveal the
+     * file repository's root and engage the check. The mount itself still reads and writes through the
+     * wrapper. Any other backend accepts every path, including Git, whose {@code PathCheckedRepository}
+     * reveals no root: Git reads blobs from its object database, never through working-tree links.
      *
      * @param path repository-relative path; empty for the repository root
      * @return {@code false} when the path, or a directory above it, is a link, or when it cannot be

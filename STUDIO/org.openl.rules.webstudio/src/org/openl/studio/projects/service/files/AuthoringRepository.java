@@ -132,4 +132,19 @@ public class AuthoringRepository implements BranchRepository {
     public BranchRepository forBranch(String branch) throws IOException {
         return new AuthoringRepository(delegate.forBranch(branch), author);
     }
+
+    // V1: read only by FileRoot.localRoot, to find where a file repository behind the mount keeps its content
+    /**
+     * The wrapped repository, read only by {@link FileRoot#localRoot} to learn where a file repository keeps
+     * its content, the anchor of the repository mount's containment checks.
+     *
+     * <p>The mount still reads and writes through this wrapper. The wrapper is deliberately not a
+     * {@code RepositoryDelegate}, so code that unwraps delegates to read, such as the ancestor lookup and
+     * {@code AProject.getFileData}, keeps reading through it and through the secured wrapper behind it.
+     *
+     * @return the repository this wrapper delegates to
+     */
+    BranchRepository getDelegate() {
+        return delegate;
+    }
 }

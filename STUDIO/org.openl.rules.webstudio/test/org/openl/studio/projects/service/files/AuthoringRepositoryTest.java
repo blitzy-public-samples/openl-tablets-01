@@ -1,6 +1,7 @@
 package org.openl.studio.projects.service.files;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertSame;
@@ -14,6 +15,7 @@ import java.io.ByteArrayInputStream;
 import java.io.InputStream;
 import java.util.List;
 
+import org.apache.commons.lang3.RandomStringUtils;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -22,6 +24,7 @@ import org.openl.rules.repository.api.BranchRepository;
 import org.openl.rules.repository.api.ChangesetType;
 import org.openl.rules.repository.api.FileData;
 import org.openl.rules.repository.api.FileItem;
+import org.openl.rules.repository.api.RepositoryDelegate;
 import org.openl.rules.repository.api.UserInfo;
 
 /**
@@ -171,5 +174,32 @@ class AuthoringRepositoryTest {
         assertEquals("design-flat", repository.getId());
         verify(delegate).getName();
         verify(delegate).getId();
+    }
+
+    // V1: the wrapper reveals the repository it wraps, so the containment checks of the repository mount reach the
+    // local root of a file repository behind it.
+    @Test
+    void getDelegateReturnsTheWrappedRepository() {
+        assertSame(delegate, repository.getDelegate());
+    }
+
+    // V1: a branch of the mount is wrapped again, and that wrapper reveals the branch repository.
+    @Test
+    void forBranchWrapperReturnsTheBranchRepositoryAsItsDelegate() throws Exception {
+        var branch = RandomStringUtils.secure().nextAlphanumeric(12);
+        var branchDelegate = mock(BranchRepository.class);
+        when(delegate.forBranch(branch)).thenReturn(branchDelegate);
+
+        var branchRepository = repository.forBranch(branch);
+
+        assertSame(branchDelegate, assertInstanceOf(AuthoringRepository.class, branchRepository).getDelegate());
+    }
+
+    // V1: code that unwraps delegates to read, such as the ancestor lookup, keeps reading through this wrapper and
+    // through the secured wrapper behind it, so the wrapper must not be a delegate.
+    @Test
+    void isNotARepositoryDelegate() {
+        assertFalse(repository instanceof RepositoryDelegate,
+                "Only the containment anchor may look behind the authoring wrapper");
     }
 }

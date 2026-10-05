@@ -2,10 +2,12 @@ package org.openl.studio.projects.service.files;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.lenient;
@@ -21,6 +23,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 import org.apache.commons.lang3.RandomStringUtils;
 import org.junit.jupiter.api.BeforeEach;
@@ -31,24 +34,35 @@ import org.junit.jupiter.api.io.TempDir;
 import org.mockito.Mockito;
 import org.springframework.security.acls.domain.BasePermission;
 import org.springframework.security.acls.model.Permission;
+import org.springframework.security.authentication.TestingAuthenticationToken;
+import org.springframework.security.core.context.SecurityContextHolder;
 
 import org.openl.rules.common.ProjectException;
 import org.openl.rules.project.abstraction.AProject;
 import org.openl.rules.project.abstraction.AProjectArtefact;
 import org.openl.rules.project.abstraction.AProjectFolder;
 import org.openl.rules.project.abstraction.AProjectResource;
+import org.openl.rules.repository.PathCheckedRepository;
+import org.openl.rules.repository.RepositoryInstatiator;
 import org.openl.rules.repository.api.FeaturesBuilder;
 import org.openl.rules.repository.api.FileData;
 import org.openl.rules.repository.api.FileItem;
 import org.openl.rules.repository.api.Repository;
 import org.openl.rules.repository.file.FileSystemRepository;
 import org.openl.rules.rest.acl.service.AclProjectsHelper;
+import org.openl.rules.webstudio.service.UserManagementService;
+import org.openl.rules.workspace.WorkspaceUser;
+import org.openl.rules.workspace.dtr.impl.MappedRepository;
+import org.openl.rules.workspace.uw.UserWorkspace;
 import org.openl.security.acl.repository.RepositoryAclService;
 import org.openl.security.acl.repository.RepositoryAclServiceProvider;
+import org.openl.security.acl.repository.SecureBranchRepository;
+import org.openl.security.acl.repository.SecureMappedRepository;
 import org.openl.security.acl.repository.SecuredRepositoryFactory;
 import org.openl.security.acl.repository.SimpleRepositoryAclService;
 import org.openl.studio.projects.model.files.FileNode;
 import org.openl.studio.projects.model.files.FsNode;
+import org.openl.util.IOUtils;
 
 /**
  * Unit tests for {@link ProjectFileLookupServiceImpl} over a mocked repository: name matching up the
@@ -350,6 +364,59 @@ class ProjectFileLookupServiceImplTest {
         assertEquals(rootMarker, content(files.get(1)));
     }
 
+    // V1: B19 on the repository mount exactly as RepoFileRootFactory builds it for the REST routes: a design
+    // repository built from its settings (behind PathCheckedRepository), behind its secured wrapper, and mounted
+    // inside AuthoringRepository. The linked candidates are omitted unread on the mapped and on the flat layout.
+
+    @Test
+    @DisabledOnOs(OS.WINDOWS)
+    void b19_repositoryMountOverMappedFileRepository_linkedAncestorsOmittedAndNeverRead(@TempDir Path dir)
+            throws IOException {
+        assertRepositoryMountOmitsLinkedAncestors(dir, true);
+    }
+
+    @Test
+    @DisabledOnOs(OS.WINDOWS)
+    void b19_repositoryMountOverFlatFileRepository_linkedAncestorsOmittedAndNeverRead(@TempDir Path dir)
+            throws IOException {
+        assertRepositoryMountOmitsLinkedAncestors(dir, false);
+    }
+
+    // V1: B18 — only the containment anchor is unwrapped from the repository mount. The lookup still lists and reads
+    // through the flat secured wrapper behind AuthoringRepository, so a regular file the ACL service refuses to READ
+    // is filtered by that wrapper's listing, although the lookup's own parent-strategy check grants it.
+    @Test
+    void b18_repositoryMountOverFlatSecuredFileRepository_fileReadDenialStillOmitsCandidate(@TempDir Path dir)
+            throws IOException {
+        var rootMarker = marker();
+        var deniedMarker = marker();
+        var repo = dir.resolve("repo");
+        write(repo.resolve("AGENTS.md"), rootMarker);
+        write(repo.resolve("P1/AGENTS.md"), deniedMarker);
+        Files.createDirectories(repo.resolve("P1/a/b"));
+        var configured = Mockito.spy(configuredFileRepository(repo));
+        try {
+            var acl = grantAllSimpleAcl();
+            when(acl.isGranted(anyString(), eq("P1/AGENTS.md"), anyList())).thenReturn(false);
+            var secured = assertInstanceOf(SecureBranchRepository.class,
+                    SecuredRepositoryFactory.wrapToSecureRepo(configured, acl),
+                    "Fixture: the flat secured wrapper the repository-mount routes receive");
+            var mount = factoryMount(new ProjectFileLookupServiceImpl(mock(AclProjectsHelper.class),
+                    grantAllAclProvider()), secured);
+
+            var files = mount.searchAncestors("P1/a/b/AGENTS.md");
+
+            assertEquals(List.of("AGENTS.md"), paths(files),
+                    "the candidate P1/AGENTS.md that the secured wrapper may not READ must be omitted");
+            assertEquals(rootMarker, content(files.getFirst()));
+            assertNoContentContains(files, deniedMarker,
+                    "no returned file may carry the content of P1/AGENTS.md, which the user may not READ");
+            verify(configured, never()).read("P1/AGENTS.md");
+        } finally {
+            IOUtils.closeQuietly(configured);
+        }
+    }
+
     // V1: branch coverage of the lookup paths around the link check that the B19 tests do not reach, so
     // the changed lookup service keeps at least 90% line and branch coverage from this class and the Git test.
 
@@ -509,6 +576,94 @@ class ProjectFileLookupServiceImplTest {
                 invocation -> invocation.getMethod().getReturnType() == boolean.class
                         ? Boolean.TRUE
                         : Mockito.RETURNS_DEFAULTS.answer(invocation));
+    }
+
+    // V1: B19 — the upward line of the anchor P1/a/b/c/AGENTS.md holds, nearest first, a link into the sibling
+    // project P2, a link to a file outside the repository, a link to another file of P1, and then the regular files
+    // P1/AGENTS.md and AGENTS.md. The search runs on the repository mount RepoFileRootFactory builds.
+    private static void assertRepositoryMountOmitsLinkedAncestors(Path dir, boolean mappedLayout) throws IOException {
+        var rootMarker = marker();
+        var nearMarker = marker();
+        var siblingMarker = marker();
+        var outsideSentinel = marker();
+        var inProjectMarker = marker();
+        var repo = dir.resolve("repo");
+        write(repo.resolve("AGENTS.md"), rootMarker);
+        write(repo.resolve("P1/AGENTS.md"), nearMarker);
+        write(repo.resolve("P1/docs/guide.md"), inProjectMarker);
+        write(repo.resolve("P2/AGENTS.md"), siblingMarker);
+        Files.createDirectories(repo.resolve("P1/a/b/c"));
+        Files.createSymbolicLink(repo.resolve("P1/a/b/c/AGENTS.md"),
+                Path.of("..", "..", "..", "..", "P2", "AGENTS.md"));
+        Files.createSymbolicLink(repo.resolve("P1/a/b/AGENTS.md"),
+                write(dir.resolve("outside/secret.md"), outsideSentinel));
+        Files.createSymbolicLink(repo.resolve("P1/a/AGENTS.md"), Path.of("..", "docs", "guide.md"));
+        var configured = Mockito.spy(configuredFileRepository(repo));
+        var mapped = mappedLayout ? MappedRepository.create(configured, "DESIGN/") : null;
+        try {
+            var secured = SecuredRepositoryFactory.wrapToSecureRepo(mappedLayout ? mapped : configured,
+                    grantAllSimpleAcl());
+            Class<? extends Repository> securedType = mappedLayout
+                    ? SecureMappedRepository.class
+                    : SecureBranchRepository.class;
+            assertInstanceOf(securedType, secured, "Fixture: the secured wrapper the repository-mount routes receive");
+            var helper = mock(AclProjectsHelper.class);
+            lenient().when(helper.hasPermission(any(AProjectArtefact.class), eq(BasePermission.READ))).thenReturn(true);
+            var mount = factoryMount(new ProjectFileLookupServiceImpl(helper, grantAllAclProvider()), secured);
+
+            var files = mount.searchAncestors("P1/a/b/c/AGENTS.md");
+
+            assertEquals(List.of("P1/AGENTS.md", "AGENTS.md"), paths(files),
+                    "the linked candidates P1/a/b/c/AGENTS.md, P1/a/b/AGENTS.md and P1/a/AGENTS.md must be omitted");
+            assertEquals(nearMarker, content(files.getFirst()));
+            assertEquals(rootMarker, content(files.get(1)));
+            assertNoContentContains(files, siblingMarker,
+                    "no returned file may carry the content of the sibling project file behind P1/a/b/c/AGENTS.md");
+            assertNoContentContains(files, outsideSentinel,
+                    "no returned file may carry the content of the outside file behind P1/a/b/AGENTS.md");
+            assertNoContentContains(files, inProjectMarker,
+                    "no returned file may carry the content of the project file behind P1/a/AGENTS.md");
+            verify(configured, never()).read("P1/a/b/c/AGENTS.md");
+            verify(configured, never()).read("P1/a/b/AGENTS.md");
+            verify(configured, never()).read("P1/a/AGENTS.md");
+        } finally {
+            IOUtils.closeQuietly(mapped);
+            IOUtils.closeQuietly(configured);
+        }
+    }
+
+    // V1: B19 — a repo-file design repository over the folder, built from its settings the way the application
+    // builds it, and therefore behind PathCheckedRepository.
+    private static Repository configuredFileRepository(Path root) {
+        var settings = Map.of("repository.design.factory", "repo-file", "repository.design.uri", root.toString());
+        var configured = RepositoryInstatiator.newRepository("repository.design", settings::get);
+        return assertInstanceOf(PathCheckedRepository.class, configured,
+                "Fixture: the settings build a path-checked wrapper");
+    }
+
+    // V1: B19 — the repository mount RepoFileRootFactory builds on the default branch. The factory stamps the
+    // authenticated user as the author, so a generated user is authenticated while it runs.
+    private static FileRoot factoryMount(ProjectFileLookupService lookupService, Repository repository) {
+        var userName = RandomStringUtils.secure().nextAlphanumeric(24);
+        var user = mock(WorkspaceUser.class);
+        when(user.getUserName()).thenReturn(userName);
+        var userWorkspace = mock(UserWorkspace.class);
+        when(userWorkspace.getUser()).thenReturn(user);
+        var factory = new RepoFileRootFactory(mock(AclProjectsHelper.class), mock(UserManagementService.class),
+                lookupService) {
+            @Override
+            public UserWorkspace getUserWorkspace() {
+                return userWorkspace;
+            }
+        };
+        var context = SecurityContextHolder.createEmptyContext();
+        context.setAuthentication(new TestingAuthenticationToken(userName, null));
+        SecurityContextHolder.setContext(context);
+        try {
+            return assertInstanceOf(RepoFileRoot.class, factory.of(repository, null), "Fixture: a repository mount");
+        } finally {
+            SecurityContextHolder.clearContext();
+        }
     }
 
     // V1: a mocked project file at a project-relative path; a null content yields an absent stream.

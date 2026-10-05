@@ -124,15 +124,27 @@ public interface FileRoot {
      * after a link in it, as in {@code <link>/..}, leads where the repository reads. A root that does
      * not exist yet is resolved through its deepest existing ancestor.
      *
+     * <p>The repository mount holds its repository inside {@link AuthoringRepository}, which is unwrapped
+     * first, here only, through {@code AuthoringRepository.getDelegate()}. It is not a
+     * {@link RepositoryDelegate}, so other code that unwraps delegates, such as the ancestor lookup, keeps
+     * reading through it and through the secured wrapper behind it. For a mapped repository it wraps the
+     * {@link PathCheckedRepository} that {@code SecureMappedRepository.getDelegate()} returns; for a flat
+     * one it wraps {@code SecureBranchRepository}, whose {@code getOriginal()} is that
+     * {@link PathCheckedRepository}. Both reach the root.
+     *
      * <p>Any other backend yields empty, including a {@link PathCheckedRepository} over a backend that
-     * is not file-backed and the Git branch wrapper {@code AuthoringRepository}, which implements
-     * neither interface: Git reads blobs from its object database, never through working-tree links.
+     * is not file-backed, such as Git, also when it is reached through {@code AuthoringRepository}: Git
+     * reads blobs from its object database, never through working-tree links.
      *
      * @param repo the repository as the caller holds it, possibly wrapped; may be {@code null}
      * @return the real root directory, or empty when the repository is not file-backed
      */
     static Optional<Path> localRoot(@Nullable Repository repo) { // V1: a null repository is not file-backed
         var current = repo;
+        // V1: the repository mount's author-stamping wrapper; only the root of the repository it wraps is read
+        if (current instanceof AuthoringRepository authoring) {
+            current = authoring.getDelegate();
+        }
         while (current instanceof RepositoryDelegate delegate) {
             current = delegate.getOriginal();
         }
