@@ -82,6 +82,20 @@ browser.
   `/webstudio` context path the link previously lost that path and did not resolve. No action is required
   beyond upgrading; a link sent by an earlier version stays broken.
 
+  <!-- V1: opening a file-repository project leaves out the files that links place outside the project folder -->
+* **Opening a project from a file design repository no longer copies files that links place outside the project
+  folder.** In a `repo-file` design repository, a file that a symbolic link places outside the project folder —
+  outside the repository, or into another project — is left out of the user's workspace when the project is opened,
+  and its content is not read. The opened project does not list it, find it in a search or serve it (`404`), as the
+  closed project already did not. Links that stay inside the project folder keep working and are copied as their
+  content. A project folder that is itself a link, or that sits under a link below the repository root, opens
+  empty. Links in the configured repository root's own path are trusted. Git and the other non-file repositories
+  are unaffected. On each such open, the server logs a WARN that names the project and the number of files left
+  out: "… file(s) of the project '…' are not copied to the workspace, because links place them outside the project
+  folder." Saving the project afterwards writes the working copy back, so the link entries that were left out are
+  removed from the project in the design repository; the files they pointed to are not touched. Before upgrading,
+  replace a link that a project needs for shared content with a regular copy of the file inside the project.
+
 ## Testing Recommendations
 
 After upgrading, verify in a non-production environment:
@@ -90,3 +104,5 @@ After upgrading, verify in a non-production environment:
 2. A service published from such a project answers as it did before.
 3. Heap headroom, if the maximum heap is set close to the previous usage.
 4. A client that calls the OpenL Studio API answers on `/rest`, and its WebSocket connects to `/rest/ws`.
+   <!-- V1: a file-repository project that holds links opens with only the files of its own folder -->
+5. A project of a file design repository that holds symbolic links opens with the files of its own folder.
