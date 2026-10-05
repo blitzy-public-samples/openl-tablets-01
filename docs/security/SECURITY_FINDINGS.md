@@ -41,11 +41,11 @@
 
 | Category | Low | High |
 | --- | --- | --- |
-| Production | 1802 | 3284 |
-| Test | 4840 | 8530 |
-| Configuration and build | 191 | 383 |
+| Production | 1967 | 3569 |
+| Test | 5300 | 9210 |
+| Configuration and build | 190 | 381 |
 | Documentation | 188 | 345 |
-| Total | 7021 | 12542 |
+| Total | 7645 | 13505 |
 | Human decision (SEC-03, SEC-14; excluded from Total) | 974 | 1681 |
 
 ## 2. CVE Register
@@ -679,11 +679,11 @@
 
 | Field | Content |
 | --- | --- |
-| What | Run-result export permits `Integer.MAX_VALUE` rows and materializes the workbook in a byte array. |
-| Where (file:line) | `STUDIO/org.openl.rules.webstudio/src/org/openl/studio/projects/rest/controller/ProjectsRunController.java:183-188` |
+| What | The run-result XLSX export has no row cap, because its `Integer.MAX_VALUE` argument only sets how many tests share a sheet, and it materializes the whole workbook in a byte array. |
+| Where (file:line) | `STUDIO/org.openl.rules.webstudio/src/org/openl/studio/projects/rest/controller/ProjectsRunController.java:183-188`, `DEV/org.openl.rules/src/org/openl/rules/testmethod/export/ResultExport.java:39-64`, `DEV/org.openl.rules/src/org/openl/rules/testmethod/export/ParameterExport.java:254-289` |
 | Why it matters | Large result exports can exhaust the OpenL Studio heap despite bounded upload intake. |
 | Preconditions | A run has produced enough rows and XLSX output is requested; single mode imposes no login requirement. |
-| Fix direction | Add a row-limit compatibility switch and an explicit property-naming refusal above the secure cap. |
+| Fix direction | Add the row-cap switch `test.run.export.max-rows` (default `-1`, unlimited as today; secure `100000`), whose cap counts every row the export emits across its result and parameter sheets, header rows and expanded nested values included. A bounded preflight that shares the exporter's own row layout counts those rows before the workbook is built, refuses an export above the cap with an explicit error naming the property and lets one at the cap export unchanged. A blank, non-integer or out-of-`int`-range value is refused when the controller is constructed, before any export. |
 | Default vs production | Upload caps do not bound output; production limits and authenticated access reduce the residual #952 exposure. |
 
 ### SEC-28
@@ -770,7 +770,7 @@
 | Item | Basis |
 | --- | --- |
 | Scope | Added plus modified LOC; nine independent upgrade units and 34 weaknesses; only Confirmed weaknesses and Open dependency groups are estimated |
-| Tests | Reference test methods average 4.7–28.8 lines; default/secure states, partial warning states and fixture setup are included, with browser/SAML matrices sized separately |
+| Tests | Reference test methods average 4.7–38.0 lines; default/secure states, partial warning states and fixture setup are included, with browser/SAML matrices sized separately |
 | Shared edits | The shared security test context (`AbstractStudioOpenApiTest` setup extraction, `AbstractStudioMockMvcTest`, `SecurityChainTestConfiguration`) carried by SEC-04, Kafka startup fixture by SEC-31, migration header by SEC-02; repeated paths with distinct edits are not duplicate LOC |
 | Confidence | Low marks uncertain upgrade/API work; generated lockfile lines are excluded; no bound exceeds four times its low unless confidence is Low |
 | Human decision | SEC-03 and SEC-14 remain Open, receive estimates and Project Guide recommendations but no remediation directive; their totals are separate |
@@ -815,7 +815,7 @@
 | [SEC-24](#sec-24); Bucket: Operator-only | Production: 0; Test: 0; Configuration and build: 0; Documentation: 0 | Count: 0; Paths: none (Operator-only) | Confidence: High — Infrastructure-only action, no repository edit or JVM regression test.; Ratio: n/a (no code); Flag: none |
 | [SEC-25](#sec-25); Bucket: Code fix | Production: 40–80; Test: 100–200; Configuration and build: 0–0; Documentation: 0–0 | Count: 2; Paths: `STUDIO/org.openl.security.acl/src/org/openl/security/acl/repository/SimpleRepositoryAclServiceImpl.java`, `STUDIO/org.openl.security.acl/test/org/openl/security/acl/repository/AclRevocationCacheTest.java` | Confidence: Medium — Existing after-completion helper is reused, controlled transaction timing covers every revocation overload.; Ratio: 2.5:1; Flag: none |
 | [SEC-26](#sec-26); Bucket: Default-changing fix | Production: 35–60; Test: 100–180; Configuration and build: 8–16; Documentation: 8–15 | Count: 5; Paths: `STUDIO/org.openl.rules.webstudio/src/org/openl/rules/webstudio/web/servlet/SpringInitializer.java`, `STUDIO/org.openl.rules.webstudio/resources/openl-default.properties`, `STUDIO/org.openl.rules.webstudio/test/org/openl/rules/webstudio/web/servlet/SpringInitializerTest.java`, `STUDIO/org.openl.rules.webstudio/test/org/openl/studio/common/ApiExceptionControllerAdviceTest.java`, `docs/security/MIGRATION_NOTES.md` | Confidence: Medium — Reference tests bound default/secure cases, warnings and fixture setup.; Ratio: 2.9:1; Flag: none |
-| [SEC-27](#sec-27); Bucket: Default-changing fix | Production: 25–45; Test: 80–140; Configuration and build: 4–8; Documentation: 8–15 | Count: 4; Paths: `STUDIO/org.openl.rules.webstudio/src/org/openl/studio/projects/rest/controller/ProjectsRunController.java`, `STUDIO/org.openl.rules.webstudio/resources/openl-default.properties`, `STUDIO/org.openl.rules.webstudio/test/org/openl/studio/projects/rest/controller/ProjectsRunControllerTest.java`, `docs/security/MIGRATION_NOTES.md` | Confidence: Medium — Reference tests bound default/secure cases, warnings and fixture setup.; Ratio: 3.1:1; Flag: none |
+| [SEC-27](#sec-27); Bucket: Default-changing fix | Production: 190–330; Test: 540–820; Configuration and build: 3–6; Documentation: 8–15 | Count: 16; Paths: `STUDIO/org.openl.rules.webstudio/src/org/openl/studio/projects/rest/controller/ProjectsRunController.java`, `DEV/org.openl.rules/src/org/openl/rules/testmethod/export/ResultExport.java`, `DEV/org.openl.rules/src/org/openl/rules/testmethod/export/RulesResultExport.java`, `DEV/org.openl.rules/src/org/openl/rules/testmethod/export/TestResultExport.java`, `DEV/org.openl.rules/src/org/openl/rules/testmethod/export/BaseParameterExport.java`, `DEV/org.openl.rules/src/org/openl/rules/testmethod/export/ParameterExport.java`, `DEV/org.openl.rules/src/org/openl/rules/testmethod/export/FlattenParameterExport.java`, `DEV/org.openl.rules/src/org/openl/rules/testmethod/export/ExportRowCount.java`, `DEV/org.openl.rules/src/org/openl/rules/testmethod/export/ExportRowLimitExceededException.java`, `STUDIO/org.openl.rules.webstudio/resources/openl-default.properties`, `STUDIO/org.openl.rules.webstudio/resources/ValidationMessages.properties`, `STUDIO/org.openl.rules.webstudio/test/org/openl/rules/testmethod/export/TestResultExportTest.java`, `STUDIO/org.openl.rules.webstudio/test/org/openl/rules/testmethod/export/ParameterExportTest.java`, `STUDIO/org.openl.rules.webstudio/test/org/openl/rules/testmethod/export/FlattenParameterExportTest.java`, `STUDIO/org.openl.rules.webstudio/test/org/openl/studio/projects/rest/controller/ProjectsRunControllerTest.java`, `docs/security/MIGRATION_NOTES.md` | Confidence: Medium — One row-sink traversal in both parameter writers, the bounded preflight, the refusal wiring and per-fixture emitted-row tests are sized against the three exporter tests and `ProjectsRunControllerTest`.; Ratio: 2.6:1; Flag: none |
 | [SEC-28](#sec-28); Bucket: Code fix | Production: 25–45; Test: 80–140; Configuration and build: 0–0; Documentation: 0–0 | Count: 4; Paths: `STUDIO/org.openl.rules.webstudio/src/org/openl/studio/security/CommonAuthenticationConfig.java`, `STUDIO/org.openl.rules.webstudio/src/org/openl/studio/security/OAuth2SecurityConfig.java`, `STUDIO/org.openl.rules.webstudio/test/org/openl/studio/security/CommonAuthenticationConfigTest.java`, `STUDIO/org.openl.rules.webstudio/test/org/openl/studio/security/OAuth2SecurityConfigTest.java` | Confidence: Medium — Mode-specific credential erasure, retained SAML logout state and OAuth2 token retention are tested with mocked authentication objects.; Ratio: 3.1:1; Flag: none |
 | [SEC-29](#sec-29); Bucket: Code fix | Production: 30–50; Test: 90–150; Configuration and build: 0–0; Documentation: 0–0 | Count: 2; Paths: `STUDIO/org.openl.rules.webstudio/src/org/openl/studio/security/CommonAuthenticationConfig.java`, `STUDIO/org.openl.rules.webstudio/test/org/openl/studio/security/CommonAuthenticationConfigTest.java` | Confidence: Medium — Same-origin normalization and saved-request fallback need URL boundary regression cases.; Ratio: 3.0:1; Flag: none |
 | [SEC-30](#sec-30); Bucket: Default-changing fix | Production: 25–45; Test: 80–140; Configuration and build: 4–8; Documentation: 8–15 | Count: 4; Paths: `STUDIO/org.openl.rules.webstudio/src/org/openl/studio/security/FormBasedAuthenticationConfig.java`, `STUDIO/org.openl.rules.webstudio/resources/openl-default.properties`, `STUDIO/org.openl.rules.webstudio/test/org/openl/studio/security/FormBasedAuthenticationConfigTest.java`, `docs/security/MIGRATION_NOTES.md` | Confidence: Medium — Reference tests bound default/secure cases, warnings and fixture setup.; Ratio: 3.1:1; Flag: none |
@@ -828,11 +828,11 @@
 
 | Category | Low | High |
 | --- | --- | --- |
-| Production | 1802 | 3284 |
-| Test | 4840 | 8530 |
-| Configuration and build | 191 | 383 |
+| Production | 1967 | 3569 |
+| Test | 5300 | 9210 |
+| Configuration and build | 190 | 381 |
 | Documentation | 188 | 345 |
-| Total | 7021 | 12542 |
+| Total | 7645 | 13505 |
 | Human decision (SEC-03, SEC-14; excluded from Total) | 974 | 1681 |
 
 ### Totals by band
@@ -840,13 +840,13 @@
 | Band | Low | High |
 | --- | --- | --- |
 | Critical | 439 | 1261 |
-| High | 3222 | 5379 |
+| High | 3846 | 6342 |
 | Medium | 3360 | 5902 |
 | Low | 0 | 0 |
 | None | 0 | 0 |
 | Unscored | 0 | 0 |
 | No advisory | 0 | 0 |
-| Total | 7021 | 12542 |
+| Total | 7645 | 13505 |
 | Human decision (excluded) | 974 | 1681 |
 
 ### Test-to-production ratio
