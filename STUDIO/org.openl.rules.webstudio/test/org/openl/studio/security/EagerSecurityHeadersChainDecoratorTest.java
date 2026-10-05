@@ -1,15 +1,19 @@
 package org.openl.studio.security;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
 
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
+import jakarta.servlet.ServletRequestWrapper;
+import jakarta.servlet.ServletResponseWrapper;
 import jakarta.servlet.http.HttpServletResponse;
 
 import org.junit.jupiter.api.Test;
@@ -60,8 +64,9 @@ class EagerSecurityHeadersChainDecoratorTest {
         assertTrue(response.getHeaderNames().isEmpty(), () -> "headers: " + response.getHeaderNames());
     }
 
+    /** The default set, cache headers included, goes out before the large write that commits the response. */
     @Test
-    void earlyCommittedResponseKeepsTheResponseIndependentHeaders() throws Exception {
+    void earlyCommittedResponseKeepsTheFullDefaultSet() throws Exception {
         var response = new EarlyCommitResponse();
 
         proxy(true).doFilter(request(MATCHED, false), response, LARGE_BODY_WRITER);
@@ -72,8 +77,7 @@ class EagerSecurityHeadersChainDecoratorTest {
         assertSingle(response, "X-Frame-Options", "DENY");
         assertSingle(response, "X-XSS-Protection", "0");
         assertNull(response.getHeader(HSTS), "HSTS on a plain HTTP request");
-        // The eager filter holds no cache writer: cache headers depend on what the response sets itself.
-        CACHE_HEADERS.forEach(name -> assertNull(response.getHeader(name), name));
+        assertDefaultCacheHeaders(response);
     }
 
     @Test
@@ -87,6 +91,103 @@ class EagerSecurityHeadersChainDecoratorTest {
         assertSingle(response, "X-Content-Type-Options", "nosniff");
         assertSingle(response, "X-Frame-Options", "DENY");
         assertSingle(response, "X-XSS-Protection", "0");
+        assertDefaultCacheHeaders(response);
+    }
+
+    /** A body written through the writer in one large write gets the same set. */
+    @Test
+    void earlyCommitThroughTheWriterKeepsTheFullDefaultSet() throws Exception {
+        var response = new EarlyCommitResponse();
+        var largeText = "x".repeat(LARGE_BODY.length);
+        FilterChain largeTextWriter = (req, res) -> res.getWriter().write(largeText);
+
+        proxy(true).doFilter(request(MATCHED, false), response, largeTextWriter);
+
+        assertTrue(response.isCommitted(), "the large write commits the response");
+        assertEquals(largeText, response.getContentAsString(), "body");
+        assertSingle(response, "X-Content-Type-Options", "nosniff");
+        assertSingle(response, "X-Frame-Options", "DENY");
+        assertSingle(response, "X-XSS-Protection", "0");
+        assertDefaultCacheHeaders(response);
+    }
+
+    /** A cache policy set before the large write stays alone: no {@code Pragma} or {@code Expires} joins it. */
+    @Test
+    void earlyCommittedResponseKeepsItsOwnCacheControl() throws Exception {
+        var response = new EarlyCommitResponse();
+
+        proxy(true).doFilter(request(MATCHED, false), response, largeBodyAfter("Cache-Control", "private, max-age=60"));
+
+        assertTrue(response.isCommitted(), "the large write commits the response");
+        assertSingle(response, "Cache-Control", "private, max-age=60");
+        assertNull(response.getHeader("Pragma"), "Pragma");
+        assertNull(response.getHeader("Expires"), "Expires");
+        assertSingle(response, "X-Content-Type-Options", "nosniff");
+        assertSingle(response, "X-Frame-Options", "DENY");
+        assertSingle(response, "X-XSS-Protection", "0");
+    }
+
+    /**
+     * An {@code Expires} header of the response's own, such as the one the container adds with a session cookie, also
+     * keeps the default cache headers away.
+     */
+    @Test
+    void earlyCommittedResponseWithItsOwnExpiresGetsNoDefaultCacheHeaders() throws Exception {
+        var response = new EarlyCommitResponse();
+        var expires = "Thu, 01 Jan 1970 00:00:00 GMT";
+
+        proxy(true).doFilter(request(MATCHED, false), response, largeBodyAfter("Expires", expires));
+
+        assertTrue(response.isCommitted(), "the large write commits the response");
+        assertSingle(response, "Expires", expires);
+        assertNull(response.getHeader("Cache-Control"), "Cache-Control");
+        assertNull(response.getHeader("Pragma"), "Pragma");
+        assertSingle(response, "X-Content-Type-Options", "nosniff");
+        assertSingle(response, "X-Frame-Options", "DENY");
+        assertSingle(response, "X-XSS-Protection", "0");
+    }
+
+    @Test
+    void earlyCommittedNotModifiedResponseGetsNoCacheHeaders() throws Exception {
+        var response = new EarlyCommitResponse();
+        FilterChain notModified = (req, res) -> {
+            ((HttpServletResponse) res).setStatus(HttpServletResponse.SC_NOT_MODIFIED);
+            res.getOutputStream().write(LARGE_BODY);
+        };
+
+        proxy(true).doFilter(request(MATCHED, false), response, notModified);
+
+        assertTrue(response.isCommitted(), "the large write commits the response");
+        CACHE_HEADERS.forEach(name -> assertNull(response.getHeader(name), name));
+        assertSingle(response, "X-Content-Type-Options", "nosniff");
+        assertSingle(response, "X-Frame-Options", "DENY");
+        assertSingle(response, "X-XSS-Protection", "0");
+    }
+
+    /**
+     * A reset clears the headers the first output wrote, so the large write after it writes the full set again, once,
+     * even through the output stream taken before the reset.
+     */
+    @Test
+    void resetBeforeTheEarlyCommitWritesTheFullSetAgain() throws Exception {
+        var response = new EarlyCommitResponse();
+        FilterChain resetThenLarge = (req, res) -> {
+            var out = res.getOutputStream();
+            out.write("partial".getBytes(StandardCharsets.UTF_8));
+            assertSingle(response, "Cache-Control", "no-cache, no-store, max-age=0, must-revalidate");
+            res.reset();
+            assertTrue(response.getHeaderNames().isEmpty(), () -> "headers after reset: " + response.getHeaderNames());
+            out.write(LARGE_BODY);
+        };
+
+        proxy(true).doFilter(request(MATCHED, false), response, resetThenLarge);
+
+        assertTrue(response.isCommitted(), "the large write commits the response");
+        assertEquals(LARGE_BODY.length, response.getContentAsByteArray().length, "body length");
+        assertSingle(response, "X-Content-Type-Options", "nosniff");
+        assertSingle(response, "X-Frame-Options", "DENY");
+        assertSingle(response, "X-XSS-Protection", "0");
+        assertDefaultCacheHeaders(response);
     }
 
     /** The chain's lazy filter still adds the cache headers, and the duplicate writers add nothing. */
@@ -165,17 +266,22 @@ class EagerSecurityHeadersChainDecoratorTest {
     }
 
     /**
-     * The eager filter runs first and then the chain's filters in their order, ending in the original chain.
+     * The eager filter runs first and then the chain's filters in their order, ending in the original chain, all with
+     * the response that writes the default set before its first output.
      */
     @Test
     void decoratedChainRunsTheChainFiltersAndTheOriginalChain() throws Exception {
         var decorator = new EagerSecurityHeadersChainDecorator();
         var response = new MockHttpServletResponse();
         var calls = new StringBuilder();
-        FilterChain original = (req, res) -> calls.append("original;");
+        FilterChain original = (req, res) -> {
+            assertInstanceOf(BeforeCommitHeadersResponse.class, res, "response of the original chain");
+            calls.append("original;");
+        };
 
         decorator.decorate(original, List.of(
                 (req, res, chain) -> {
+                    assertInstanceOf(BeforeCommitHeadersResponse.class, res, "response of the chain");
                     calls.append("first:")
                             .append(((HttpServletResponse) res).getHeader("X-Frame-Options"))
                             .append(';');
@@ -187,6 +293,34 @@ class EagerSecurityHeadersChainDecoratorTest {
                 })).doFilter(request(MATCHED, false), response);
 
         assertEquals("first:DENY;second;original;", calls.toString(), "call order");
+    }
+
+    /** A request that is not HTTP is not wrapped, and the eager filter rejects it as every security filter does. */
+    @Test
+    void nonHttpRequestIsRejectedByTheEagerFilter() {
+        var chain = new EagerSecurityHeadersChainDecorator().decorate((req, res) -> fail("original chain"),
+                List.of((req, res, next) -> fail("chain filter")));
+        var request = new ServletRequestWrapper(request(MATCHED, false));
+        var response = new MockHttpServletResponse();
+
+        var thrown = assertThrows(ServletException.class, () -> chain.doFilter(request, response));
+
+        assertEquals("OncePerRequestFilter only supports HTTP requests", thrown.getMessage(), "message");
+        assertTrue(response.getHeaderNames().isEmpty(), () -> "headers: " + response.getHeaderNames());
+    }
+
+    /** A response that is not HTTP is not wrapped either. */
+    @Test
+    void nonHttpResponseIsRejectedByTheEagerFilter() {
+        var chain = new EagerSecurityHeadersChainDecorator().decorate((req, res) -> fail("original chain"),
+                List.of((req, res, next) -> fail("chain filter")));
+        var target = new MockHttpServletResponse();
+        var response = new ServletResponseWrapper(target);
+
+        var thrown = assertThrows(ServletException.class, () -> chain.doFilter(request(MATCHED, false), response));
+
+        assertEquals("OncePerRequestFilter only supports HTTP requests", thrown.getMessage(), "message");
+        assertTrue(target.getHeaderNames().isEmpty(), () -> "headers: " + target.getHeaderNames());
     }
 
     @Test
@@ -230,6 +364,20 @@ class EagerSecurityHeadersChainDecoratorTest {
 
     private static FilterChain smallBody() {
         return (req, res) -> res.getOutputStream().write("ok".getBytes(StandardCharsets.UTF_8));
+    }
+
+    /** A body written in one large write after the response set the given header itself. */
+    private static FilterChain largeBodyAfter(String name, String value) {
+        return (req, res) -> {
+            ((HttpServletResponse) res).setHeader(name, value);
+            res.getOutputStream().write(LARGE_BODY);
+        };
+    }
+
+    private static void assertDefaultCacheHeaders(MockHttpServletResponse response) {
+        assertSingle(response, "Cache-Control", "no-cache, no-store, max-age=0, must-revalidate");
+        assertSingle(response, "Pragma", "no-cache");
+        assertSingle(response, "Expires", "0");
     }
 
     private static void assertSingle(MockHttpServletResponse response, String name, String value) {

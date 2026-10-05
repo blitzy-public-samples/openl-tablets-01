@@ -30328,9 +30328,7 @@ Content-Type: application/json
           "password": {
             "type": "string",
             "description": "***",
-            "example": "qwerty",
-            "maxLength": 25,
-            "minLength": 0
+            "example": "qwerty"
           },
           "username": {
             "type": "string",
@@ -30389,9 +30387,7 @@ Content-Type: application/json
           "password": {
             "type": "string",
             "description": "***",
-            "example": "qwerty",
-            "maxLength": 25,
-            "minLength": 0
+            "example": "qwerty"
           }
         },
         "required": [
@@ -30549,9 +30545,7 @@ Content-Type: application/json
           "password": {
             "type": "string",
             "description": "***",
-            "example": "qwerty",
-            "maxLength": 25,
-            "minLength": 0
+            "example": "qwerty"
           },
           "superUser": {
             "type": "boolean",

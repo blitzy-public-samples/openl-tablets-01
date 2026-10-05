@@ -19,9 +19,9 @@ import org.springframework.test.context.junit.jupiter.SpringJUnitConfig;
 import org.springframework.test.context.web.WebAppConfiguration;
 
 /**
- * V4: the application's own {@code filterChainProxy} bean of {@link SecurityConfig} writes the response-independent
- * security headers on a static-chain response that the container commits early, as Jetty does with the
- * {@code /application.properties} body when it is streamed in 16 KiB writes.
+ * V4: the application's own {@code filterChainProxy} bean of {@link SecurityConfig} writes the default security
+ * headers, cache headers included, on a static-chain response that the container commits early, as Jetty does with
+ * the {@code /application.properties} body when it is streamed in 16 KiB writes.
  * <p>
  * The context holds only {@link SecurityConfig}, so the static chain is the only chain. The response is an
  * {@link EarlyCommitResponse}, which commits the way Jetty does and then ignores every header.
@@ -50,6 +50,9 @@ class SecurityConfigEarlyCommitHeadersTest {
         assertSingle(response, "X-Frame-Options", "DENY");
         assertSingle(response, "X-XSS-Protection", "0");
         assertNull(response.getHeader("Strict-Transport-Security"), "HSTS on a plain HTTP request");
+        assertSingle(response, "Cache-Control", "no-cache, no-store, max-age=0, must-revalidate");
+        assertSingle(response, "Pragma", "no-cache");
+        assertSingle(response, "Expires", "0");
     }
 
     @Test
