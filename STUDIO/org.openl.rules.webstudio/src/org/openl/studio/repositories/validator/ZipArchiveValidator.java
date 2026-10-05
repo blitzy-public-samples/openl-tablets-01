@@ -148,7 +148,8 @@ public class ZipArchiveValidator implements Validator {
      * {@code .} and {@code ..} segments, {@code //}), which catches a backslash traversal such as {@code ..\x} as a
      * {@code ..} segment, and {@link NameChecker#validatePath(String)} (forbidden and control characters, reserved
      * names, trailing dots and spaces). Names decode with the charset the archive was detected with, as in the zipfs
-     * view. Entries the upload filter drops are skipped, because they are never written. Reading stops once
+     * view. Entries the upload filter drops get the {@link Repository#validatePath(String)} check only: they are never
+     * written, but a {@code .} or {@code ..} segment in one still stops the zipfs view from opening. Reading stops once
      * {@value #MAX_RAW_VIOLATIONS} distinct violations are collected, because any one of them refuses the archive.
      *
      * <p>Private to this validator: V1 allows no path component shared between surfaces, so the upload-project
@@ -167,9 +168,8 @@ public class ZipArchiveValidator implements Validator {
             while (entries.hasMoreElements() && violations.size() < MAX_RAW_VIOLATIONS) {
                 var name = entries.nextElement().getName().replace('\\', '/');
                 // The filter sees the raw name, trailing '/' of a folder entry included, as the other uploaders do.
-                if (!zipFilter.accept(name)) {
-                    continue;
-                }
+                // V1: a dropped entry is never written, yet a '.' or '..' segment in it still breaks the zipfs view
+                var written = zipFilter.accept(name);
                 // Only the '/' that marks a folder entry is dropped: a leading '/' is an absolute name.
                 if (name.endsWith("/")) {
                     name = name.substring(0, name.length() - 1);
@@ -179,7 +179,10 @@ public class ZipArchiveValidator implements Validator {
                 }
                 try {
                     Repository.validatePath(name);
-                    NameChecker.validatePath(name);
+                    // V1: content rules only for a written name, so dropped SVN/CVS metadata is not newly refused
+                    if (written) {
+                        NameChecker.validatePath(name);
+                    }
                 } catch (IOException | IllegalArgumentException e) {
                     // InvalidPathException, thrown for a traversal or a NUL byte, is an IllegalArgumentException.
                     violations.add(e.getMessage());

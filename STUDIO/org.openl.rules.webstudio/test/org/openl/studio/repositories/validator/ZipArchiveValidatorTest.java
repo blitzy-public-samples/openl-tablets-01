@@ -3,21 +3,29 @@ package org.openl.studio.repositories.validator;
 // V1-D: imports of the upload-project path matrix
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyMap;
+import static org.mockito.Mockito.CALLS_REAL_METHODS;
+import static org.mockito.Mockito.mockStatic;
 
 import java.io.IOException;
+import java.net.URI;
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Set;
 import java.util.stream.Stream;
+import java.util.zip.ZipException;
 
 import org.apache.commons.compress.archivers.zip.ZipArchiveEntry;
 import org.apache.commons.compress.archivers.zip.ZipArchiveOutputStream;
@@ -32,6 +40,9 @@ import org.springframework.validation.BindingResult;
 import org.springframework.validation.ObjectError;
 
 import org.openl.rules.webstudio.web.repository.upload.zip.ZipCharsetDetector;
+import org.openl.rules.workspace.filter.AndPathFilter;
+import org.openl.rules.workspace.filter.FileNamePathFilter;
+import org.openl.rules.workspace.filter.FolderNamePathFilter;
 import org.openl.studio.common.validation.AbstractConstraintValidatorTest;
 
 @SpringJUnitConfig(classes = MockConfiguration.class)
@@ -203,22 +214,64 @@ class ZipArchiveValidatorTest extends AbstractConstraintValidatorTest {
         assertNull(validate("root folder entry", archive("/")), "root folder entry: nothing to reject");
     }
 
-    // V1-D: an entry the upload filter drops is never written, so its raw name is not checked.
+    // V1-D: an entry the upload filter drops is never written, so its raw name gets no NameChecker check ('%').
     @Test
-    void testArchives_FilteredEntryNotChecked() throws IOException {
+    void testArchives_FilteredEntryNameRulesNotChecked() throws IOException {
         var filtering = new ZipArchiveValidator(path -> !path.contains("filtered"), zipCharsetDetector);
         assertNull(validateAndGetResult(archive("filtered%.xlsx"), filtering),
-                "filtered entry: a dropped entry is not validated");
+                "filtered entry: a dropped entry gets no NameChecker check");
     }
 
-    // V1-D: when the zipfs view cannot open the archive and no raw violation is left to report (the offending entry
-    // is filtered), the zipfs failure propagates unchanged instead of being turned into a path rejection.
+    // V1-D: a traversal name the upload filter drops is still rejected as a path: the filter decides what is written,
+    // not what is safe, and the '..' segment would otherwise stop the zipfs view from opening the archive (a 500).
     @Test
-    void testArchives_UnopenableArchiveWithoutRawViolationPropagates() throws IOException {
+    void testArchives_FilteredTraversalRejected() throws IOException {
         var filtering = new ZipArchiveValidator(path -> !path.contains("filtered"), zipCharsetDetector);
         var file = archive("../filtered.xlsx");
-        var e = assertThrows(RuntimeException.class, () -> validateAndGetResult(file, filtering));
-        assertInstanceOf(IOException.class, e.getCause(), "the zipfs failure is kept as the cause");
+        var result = assertDoesNotThrow(() -> validateAndGetResult(file, filtering),
+                "filtered traversal: validation must not throw");
+        assertEntryRejected("filtered traversal", result, UNKNOWN_ARCHIVE_PATH);
+    }
+
+    // V1-D: with the upload filter of the application, a traversal inside the SVN or CVS metadata it drops is
+    // rejected as a path, never answered with a 500.
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("uploadFilteredTraversalNames")
+    void testArchives_UploadFilteredTraversalRejected(String rowId, String rawName) throws IOException {
+        var file = archive(rawName);
+        var result = assertDoesNotThrow(() -> validateAndGetResult(file, uploadFilterValidator()),
+                rowId + ": validation must not throw");
+        assertEntryRejected(rowId, result, UNKNOWN_ARCHIVE_PATH);
+    }
+
+    // V1-D: traversal names the upload filter drops, as (row id, raw entry name).
+    static Stream<Arguments> uploadFilteredTraversalNames() {
+        return Stream.of(Arguments.of("dot-dot out of .svn", ".svn/../../evil-svn.txt"),
+                Arguments.of("dot-dot out of CVS", "CVS/../evil-cvs.txt"),
+                Arguments.of("dot segment inside CVS", "CVS/./x.txt"),
+                Arguments.of("dot-dot onto .cvsignore", "x/../.cvsignore"));
+    }
+
+    // V1-D: SVN and CVS metadata the upload filter drops stays accepted: it is never written, so only its traversal
+    // is checked and a name NameChecker refuses (':') is not newly rejected.
+    @Test
+    void testArchives_UploadFilteredMetadataAccepted() throws IOException {
+        var file = archive(".svn/", ".svn/entries", "CVS/Root", ".cvsignore", ".svn/a:b");
+        assertNull(validateAndGetResult(file, uploadFilterValidator()),
+                "filtered metadata: SVN and CVS metadata must stay accepted");
+    }
+
+    // V1-D: when the zipfs view cannot open the archive for a reason no raw name explains, the zipfs failure
+    // propagates as the cause instead of being turned into a path rejection.
+    @Test
+    void testArchives_UnopenableArchiveWithoutRawViolationPropagates() throws IOException {
+        var file = archive("rules/Main.xlsx");
+        var failure = new ZipException("zipfs cannot open the archive");
+        try (var fileSystems = mockStatic(FileSystems.class, CALLS_REAL_METHODS)) {
+            fileSystems.when(() -> FileSystems.newFileSystem(any(URI.class), anyMap())).thenThrow(failure);
+            var e = assertThrows(RuntimeException.class, () -> validateAndGetResult(file, validator));
+            assertSame(failure, e.getCause(), "the zipfs failure is kept as the cause");
+        }
     }
 
     // V1-D: an unchecked failure of the zipfs walk with no raw violation to report (the filter drops the raw name,
@@ -276,6 +329,14 @@ class ZipArchiveValidatorTest extends AbstractConstraintValidatorTest {
     private BindingResult validate(String rowId, Path archive) {
         return assertDoesNotThrow(() -> validateAndGetResult(archive, validator),
                 rowId + ": validation must not throw");
+    }
+
+    // V1-D: a validator with the upload filter the application configures ('zipFilter' in webstudio.xml), which drops
+    // the SVN and CVS metadata folders and the '.cvsignore' files.
+    private ZipArchiveValidator uploadFilterValidator() {
+        var uploadFilter = new AndPathFilter(List.of(new FolderNamePathFilter(Set.of(".svn", "CVS")),
+                new FileNamePathFilter(Set.of(".cvsignore"))));
+        return new ZipArchiveValidator(uploadFilter, zipCharsetDetector);
     }
 
     // V1-D: the archive is rejected as a whole (global errors only), every error is an archive error, and one of
