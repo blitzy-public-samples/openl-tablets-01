@@ -4,12 +4,14 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.reset;
 import static org.mockito.Mockito.when;
 
 import java.util.HashSet;
 import java.util.Objects;
 import java.util.stream.Stream;
+import jakarta.validation.ConstraintValidatorContext;
 
 import org.apache.commons.lang3.RandomStringUtils;
 import org.junit.jupiter.api.AfterEach;
@@ -229,6 +231,16 @@ class UsersValidatorTest extends AbstractConstraintValidatorTest {
         var internalPassword = new InternalPasswordModel().setPassword(candidate);
         var model = getValidUserCreateModel().setInternalPassword(internalPassword);
         assertPasswordPolicy(label, model, "internalPassword", expectedMessage, internalPassword);
+    }
+
+    // V7: coverage of the disabled-internal-users branch (AAP 0.9.4)
+    @Test
+    void testCreateUser_blankPasswordAllowedWhenInternalUsersDisabled() {
+        // The Spring test context fixes canCreateInternalUsers to true, so the validator is exercised directly here.
+        var validator = new InternalPasswordConstraintValidator();
+        validator.canCreateInternalUsers = false;
+        assertTrue(validator.isValid(new InternalPasswordModel().setPassword(null),
+                mock(ConstraintValidatorContext.class)));
     }
 
     @Test

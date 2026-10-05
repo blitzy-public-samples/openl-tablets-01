@@ -1,0 +1,13 @@
+HTTP/1.1 400
+Content-Type: application/json
+
+{
+  "message": "Bad Request",
+  "fields": [
+    {
+      "code": "openl.error.LocalPasswordConstraint",
+      "message": "The password must contain at least 12 characters.",
+      "field": "password"
+    }
+  ]
+}

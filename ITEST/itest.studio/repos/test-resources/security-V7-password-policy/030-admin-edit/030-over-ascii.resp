@@ -1,0 +1,13 @@
+HTTP/1.1 400
+Content-Type: application/json
+
+{
+  "message": "Bad Request",
+  "fields": [
+    {
+      "code": "openl.error.LocalPasswordConstraint",
+      "message": "The password must not exceed 72 bytes in UTF-8.",
+      "field": "password"
+    }
+  ]
+}

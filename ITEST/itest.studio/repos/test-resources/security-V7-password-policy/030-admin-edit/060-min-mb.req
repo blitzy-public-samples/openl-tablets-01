@@ -1,0 +1,11 @@
+PUT /rest/users/v7_edit HTTP/1.1
+Authorization: ${ADMIN_AUTH_TOCKEN}
+Content-Type: application/json; charset=UTF-8
+
+{
+  "displayName": "V7 Edit",
+  "password": "${V7_MIN_MB}",
+  "firstName": "V7",
+  "lastName": "Edit",
+  "email": "v7_edit@email"
+}
