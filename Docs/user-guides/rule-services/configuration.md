@@ -129,6 +129,7 @@ To use a relational database repository as a data source, proceed as follows:
     production-repository.password = admin
     # Secret key for password code/decode
     secret.key=
+    # V6: secret.cipher applies only to legacy ENC(...) values; ENC(v2:...) values always use AES-256-GCM.
     #secret.cipher=AES/CBC/PKCS5Padding
     ```
 
