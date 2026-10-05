@@ -1,5 +1,6 @@
 package org.openl.studio.projects.service.files;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
@@ -7,6 +8,7 @@ import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assumptions.assumeFalse;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
@@ -73,6 +75,7 @@ import org.openl.rules.repository.api.UserInfo;
 import org.openl.rules.repository.file.FileSystemRepository;
 import org.openl.rules.rest.acl.service.AclProjectsHelper;
 import org.openl.rules.webstudio.service.UserManagementService;
+import org.openl.rules.webstudio.util.NameChecker;
 import org.openl.rules.workspace.WorkspaceUser;
 import org.openl.rules.workspace.dtr.DesignTimeRepository;
 import org.openl.rules.workspace.dtr.impl.MappedRepository;
@@ -475,6 +478,9 @@ class ProjectFilesServiceTest {
      */
     private static final String SOURCE = "sub/inside.txt";
 
+    // V1: the names of the file links in docs/ that lead out of P1, see linkFilesOutOfTheProject.
+    private static final List<String> LINKED_FILES = List.of("leak.txt", "sib.xml");
+
     // V1: the mounts of the matrix, each reached through the secured wrapper its REST route receives.
     /**
      * The four mounts the files service serves, as the REST routes build them.
@@ -525,13 +531,19 @@ class ProjectFilesServiceTest {
 
     // V1: the operations a lexical payload is sent through, each taking it as the path it acts on.
     /**
-     * The operations of the files service that take a path to create, write, read or delete.
+     * The operations of the files service that take a path to create, write, read or delete, or to copy or move from.
+     * {@code COPY_TO} and {@code MOVE_TO} take the payload as the destination of the valid {@code SOURCE};
+     * {@code COPY_FROM} and {@code MOVE_FROM} take it as the source of a valid new destination.
      */
     enum PathOperation {
         CREATE,
         CREATE_FOLDER,
         COPY_TO,
+        // V1: the payload as a copy source, so every row also covers the source lookup of copyResource.
+        COPY_FROM,
         MOVE_TO,
+        // V1: the payload as a move source, so every row also covers the source lookup of moveResource.
+        MOVE_FROM,
         DELETE,
         READ,
         UPDATE,
@@ -543,7 +555,9 @@ class ProjectFilesServiceTest {
                 case CREATE -> service.createResource(root, payload, stream(marker()), true);
                 case CREATE_FOLDER -> service.createFolder(root, payload, true);
                 case COPY_TO -> service.copyResource(root, mount.path(SOURCE), payload);
+                case COPY_FROM -> service.copyResource(root, payload, mount.path("copied.txt"));
                 case MOVE_TO -> service.moveResource(root, mount.path(SOURCE), payload);
+                case MOVE_FROM -> service.moveResource(root, payload, mount.path("moved.txt"));
                 case DELETE -> service.deleteResource(root, payload);
                 case READ -> service.getResource(root, payload, null);
                 case UPDATE -> service.updateResource(root, payload, stream(marker()));
@@ -665,6 +679,13 @@ class ProjectFilesServiceTest {
     // V1: surface B payload B11 (Windows reserved names): recorded as-is, with no loosening and no tightening
     @Test
     void b11SuffixedAndLowerCaseReservedNamesAreStoredInsideTheProject() throws IOException {
+        // V1: the service's two lexical validators accept these names on every OS; only storing them is OS-bound.
+        for (var name : List.of("NUL.txt", "aux/x.txt")) {
+            assertDoesNotThrow(() -> NameChecker.validatePath(name), "B11 NameChecker accepts " + name);
+            assertDoesNotThrow(() -> Repository.validatePath(name), "B11 Repository.validatePath accepts " + name);
+        }
+        assumeFalse(OS.WINDOWS.isCurrentOs(), "Windows reserves NUL and AUX as device names with any extension or"
+                + " case, so they cannot be stored as ordinary files there");
         var mount = openedMount();
         var service = service(mount.acl());
         var before = snapshot(mount);
@@ -936,6 +957,126 @@ class ProjectFilesServiceTest {
 
         assertEquals(FORBIDDEN, denied.getErrorCode(), "B18 on " + kind + ": the write keeps its 403");
         assertNothingWritten("B18 write without permission on " + kind, mount, before);
+    }
+
+    // V1: surface B payload B18 (ACL through the secured wrapper): a file linked out of P1 that the user may not read
+    // keeps its 403, because the existing READ check runs before the containment guard
+    @ParameterizedTest
+    @EnumSource(MountKind.class)
+    @DisabledOnOs(OS.WINDOWS)
+    void b18LinkedFileWithoutReadPermissionIsStillForbidden(MountKind kind) throws IOException {
+        var mount = mount(kind);
+        var root = mount.root();
+        linkFilesOutOfTheProject(mount);
+        when(mount.acl().hasPermission(argThat((AProjectArtefact artefact) -> artefact != null
+                && LINKED_FILES.contains(artefact.getName())), eq(BasePermission.READ))).thenReturn(false);
+        var service = service(mount.acl(), new FileNodeMapperImpl());
+
+        for (var link : LINKED_FILES) {
+            var path = mount.path("docs/" + link);
+            var payloads = List.of(
+                    new Payload("getResource docs/" + link, () -> service.getResource(root, path, null)),
+                    new Payload("getNode docs/" + link, () -> service.getNode(root, path, null)),
+                    new Payload("copyResource from docs/" + link,
+                            () -> service.copyResource(root, path, mount.path("copied.txt"))),
+                    new Payload("moveResource from docs/" + link,
+                            () -> service.moveResource(root, path, mount.path("moved.txt"))));
+            for (var payload : payloads) {
+                var row = "B18 " + payload.description() + " without READ permission on " + kind;
+                var before = snapshot(mount);
+                assertForbidden(row, payload.call());
+                assertNothingWritten(row, mount, before);
+            }
+        }
+        assertLinkedFilesKept("B18 without READ permission on " + kind, mount);
+    }
+
+    // V1: surface B payload B18 (ACL through the secured wrapper): a file linked out of P1 that the user may read but
+    // not write or delete keeps the 403 of the WRITE and DELETE checks, which run before the containment guard
+    @ParameterizedTest
+    @EnumSource(MountKind.class)
+    @DisabledOnOs(OS.WINDOWS)
+    void b18LinkedFileWithoutWriteOrDeletePermissionIsStillForbidden(MountKind kind) throws IOException {
+        var mount = mount(kind);
+        var root = mount.root();
+        linkFilesOutOfTheProject(mount);
+        for (var permission : List.of(BasePermission.WRITE, BasePermission.DELETE)) {
+            when(mount.acl().hasPermission(argThat((AProjectArtefact artefact) -> artefact != null
+                    && LINKED_FILES.contains(artefact.getName())), eq(permission))).thenReturn(false);
+        }
+        var service = service(mount.acl(), new FileNodeMapperImpl());
+
+        for (var link : LINKED_FILES) {
+            var path = mount.path("docs/" + link);
+            var payloads = List.of(
+                    new Payload("updateResource docs/" + link + " without WRITE permission",
+                            () -> service.updateResource(root, path, stream(marker()))),
+                    new Payload("moveResource from docs/" + link + " without DELETE permission",
+                            () -> service.moveResource(root, path, mount.path("moved.txt"))));
+            for (var payload : payloads) {
+                var row = "B18 " + payload.description() + " on " + kind;
+                var before = snapshot(mount);
+                assertForbidden(row, payload.call());
+                assertNothingWritten(row, mount, before);
+            }
+            var row = "B18 getResource docs/" + link + " with READ permission on " + kind;
+            var before = snapshot(mount);
+            assertPathRejected(row, () -> service.getResource(root, path, null));
+            assertNothingWritten(row, mount, before);
+        }
+        assertLinkedFilesKept("B18 without WRITE and DELETE permission on " + kind, mount);
+    }
+
+    // V1: surface B payload B16 (file link outside) as an export base: it keeps the existing rejection of a base
+    // that is not a folder, which runs before the containment guard
+    @ParameterizedTest
+    @EnumSource(MountKind.class)
+    @DisabledOnOs(OS.WINDOWS)
+    void b16LinkedFileAsExportBaseKeepsItsNotAFolderRejection(MountKind kind) throws IOException {
+        var mount = mount(kind);
+        linkFilesOutOfTheProject(mount);
+        var service = service(mount.acl(), new FileNodeMapperImpl());
+
+        for (var link : LINKED_FILES) {
+            var row = "B16 writeFolderAsZip docs/" + link + " on " + kind;
+            var export = new ByteArrayOutputStream();
+            var before = snapshot(mount);
+            var rejected = assertThrows(BadRequestException.class,
+                    () -> service.writeFolderAsZip(mount.root(), mount.path("docs/" + link), export, null),
+                    row + " is rejected");
+            assertEquals(BASE_PATH_NOT_FOLDER, rejected.getErrorCode(), row + " keeps its not-a-folder rejection");
+            assertEquals(0, export.size(), row + " streams nothing");
+            assertNothingWritten(row, mount, before);
+        }
+        assertLinkedFilesKept("B16 export base on " + kind, mount);
+    }
+
+    // V1: positive control on every mount: a missing path keeps its 404 on every read and source the containment
+    // guard checks, because the guard runs only once the artefact is found
+    @ParameterizedTest
+    @EnumSource(MountKind.class)
+    void missingReadOrSourcePathStaysNotFound(MountKind kind) throws IOException {
+        var mount = mount(kind);
+        var root = mount.root();
+        var service = service(mount.acl(), new FileNodeMapperImpl());
+        var missing = mount.path("docs/missing.txt");
+        var export = new ByteArrayOutputStream();
+
+        var payloads = List.of(
+                new Payload("getResource", () -> service.getResource(root, missing, null)),
+                new Payload("getNode", () -> service.getNode(root, missing, null)),
+                new Payload("updateResource", () -> service.updateResource(root, missing, stream(marker()))),
+                new Payload("copyResource from", () -> service.copyResource(root, missing, mount.path("copied.txt"))),
+                new Payload("moveResource from", () -> service.moveResource(root, missing, mount.path("moved.txt"))),
+                new Payload("writeFolderAsZip", () -> service.writeFolderAsZip(root, missing, export, null)));
+        for (var payload : payloads) {
+            var row = payload.description() + " docs/missing.txt on " + kind;
+            var before = snapshot(mount);
+            var notFound = assertThrows(NotFoundException.class, payload.call(), row + " is not found");
+            assertEquals(NOT_FOUND, notFound.getErrorCode(), row + " keeps its 404");
+            assertNothingWritten(row, mount, before);
+        }
+        assertEquals(0, export.size(), "The export of docs/missing.txt on " + kind + " streams nothing");
     }
 
     // V1: surface B payload B19 (ancestor search through a link): linked candidates are omitted unread, and regular
@@ -1335,6 +1476,31 @@ class ProjectFilesServiceTest {
     private static void assertPathRejected(String row, Executable call) {
         var rejected = assertThrows(BadRequestException.class, call, row + " is rejected");
         assertEquals(INVALID_PATH, rejected.getErrorCode(), row + " is rejected as an invalid path");
+    }
+
+    // V1: an existing ACL rejection, 403 with the existing key, which the containment guard does not replace.
+    private static void assertForbidden(String row, Executable call) {
+        var denied = assertThrows(ForbiddenException.class, call, row + " is forbidden");
+        assertEquals(FORBIDDEN, denied.getErrorCode(), row + " keeps its 403");
+    }
+
+    // V1: the regular-file links of LINKED_FILES that lead out of P1, to the outside file and to the sibling's file.
+    /**
+     * Links {@code docs/leak.txt} to the outside file and {@code docs/sib.xml} to {@code rules.xml} of the sibling
+     * project {@code P2}. The mount lists and finds both, because they link to regular files.
+     */
+    private void linkFilesOutOfTheProject(Mount mount) throws IOException {
+        var docs = Files.createDirectories(mount.project().resolve("docs"));
+        Files.createSymbolicLink(docs.resolve("leak.txt"), outsideFile());
+        Files.createSymbolicLink(docs.resolve("sib.xml"), mount.sibling().resolve("rules.xml"));
+    }
+
+    // V1: a rejected payload keeps the links of linkFilesOutOfTheProject in place.
+    private static void assertLinkedFilesKept(String row, Mount mount) {
+        for (var link : LINKED_FILES) {
+            assertTrue(Files.isSymbolicLink(mount.project().resolve("docs").resolve(link)),
+                    row + ": the link docs/" + link + " is kept");
+        }
     }
 
     // V1: a path a link places outside: not found, or rejected as an invalid path, and nothing else.

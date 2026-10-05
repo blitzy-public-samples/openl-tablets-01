@@ -98,9 +98,9 @@ public class ProjectFilesServiceImpl implements ProjectFilesService {
     public AProjectResource getResource(@NotNull FileRoot root, @NotBlank String path, String version) {
         root.requireReadable();
         var resource = findFileArtefact(root.readFolder(version), path);
-        // V1: checked once the file is found, so a missing path stays 404, and before the ACL check.
-        requireContained(root, path);
         requirePermission(resource, BasePermission.READ);
+        // V1: checked once the file is found and readable, so a missing path stays 404 and a denied read 403.
+        requireContained(root, path);
         return resource;
     }
 
@@ -117,9 +117,9 @@ public class ProjectFilesServiceImpl implements ProjectFilesService {
         lockIfClosed(root);
         try {
             var resource = findFileArtefact(root.readFolder(null), path);
-            // V1: a file a link places outside the mount is not written through.
-            requireContained(root, path);
             requirePermission(resource, BasePermission.WRITE);
+            // V1: after the ACL check, so a denied write stays 403; a file linked outside is not written through.
+            requireContained(root, path);
             // Validated before the project is reserved, so a rejected write leaves no lock behind. The
             // validated content is closed here as well, so a write that never happens leaves nothing behind.
             try (InputStream validatedContent = validateContent(root, path, content)) {
@@ -167,10 +167,10 @@ public class ProjectFilesServiceImpl implements ProjectFilesService {
         lockIfClosed(root);
         try {
             var source = findExistingArtefact(root.readFolder(null), sourcePath);
-            // V1: a source a link places outside the mount is not copied from.
-            requireContained(root, sourcePath);
             requirePermission(source, BasePermission.READ);
             requireNotPlacedIntoItself(source, sourcePath, destinationPath, "file.copy.into.itself.message");
+            // V1: after the existing checks, so they keep their rejections; a linked-out source is not copied from.
+            requireContained(root, sourcePath);
             requireContainedCopy(root, source, destinationPath); // V1: every descendant, before anything is copied
             lockForEditing(root, destinationPath);
             var targetFolder = resolveOrCreateFolders(root.writeFolder(), destinationPath,
@@ -193,11 +193,11 @@ public class ProjectFilesServiceImpl implements ProjectFilesService {
         lockIfClosed(root);
         try {
             var source = findExistingArtefact(root.readFolder(null), sourcePath);
-            // V1: a source a link places outside the mount is not moved from.
-            requireContained(root, sourcePath);
             requirePermission(source, BasePermission.READ);
             requirePermission(source, BasePermission.DELETE);
             requireNotPlacedIntoItself(source, sourcePath, destinationPath, "file.move.into.itself.message");
+            // V1: after the existing checks, so they keep their rejections; a linked-out source is not moved from.
+            requireContained(root, sourcePath);
             requireContainedCopy(root, source, destinationPath); // V1: every descendant, before anything is moved
             lockForEditing(root, sourcePath, destinationPath);
             var targetFolder = resolveOrCreateFolders(root.writeFolder(), destinationPath,
@@ -277,12 +277,13 @@ public class ProjectFilesServiceImpl implements ProjectFilesService {
         AProjectFolder folder = root.readFolder(version);
         // A blank path zips the whole project (the root folder), e.g. project export.
         AProjectArtefact artefact = StringUtils.isBlank(path) ? folder : findExistingArtefact(folder, path);
-        // V1: the mount root is checked as "", because the root folder's internal path is not mount-relative.
-        requireContained(root, StringUtils.isBlank(path) ? "" : path);
         if (!artefact.isFolder()) {
             throw new BadRequestException("file.base-path.not-folder.message", new Object[]{path});
         }
         requirePermission(artefact, BasePermission.READ);
+        // V1: after the existing checks, so they keep their rejections; the mount root is checked as "", because the
+        // root folder's internal path is not mount-relative.
+        requireContained(root, StringUtils.isBlank(path) ? "" : path);
         requireContainedTree(root, (AProjectFolder) artefact); // V1: no entry a link places outside is zipped
         archiveSupport.writeZip((AProjectFolder) artefact, out);
     }
@@ -740,9 +741,10 @@ public class ProjectFilesServiceImpl implements ProjectFilesService {
      * folder that a link places outside the mount is neither read, nor written through, nor used as a
      * copy or move source.
      *
-     * <p>The caller has already validated the path lexically with {@link #validateResourcePath(String)}
-     * and found the artefact, so a missing path keeps its 404; the ACL check runs after this one. An
-     * empty path denotes the mount root.
+     * <p>The caller has already validated the path lexically with {@link #validateResourcePath(String)},
+     * found the artefact and run its existing checks, the ACL check included, so a missing path keeps
+     * its 404 and every rejection of those checks keeps its status and key. An empty path denotes the
+     * mount root.
      *
      * @throws BadRequestException with {@code file.path.invalid.message} if the path is not normalized
      *                             or resolves outside the mount
