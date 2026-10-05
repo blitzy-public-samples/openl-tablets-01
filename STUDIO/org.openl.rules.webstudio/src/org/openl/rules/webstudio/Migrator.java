@@ -36,6 +36,7 @@ import org.openl.rules.webstudio.web.admin.security.NOPUserSettings;
 import org.openl.rules.webstudio.web.install.KeyPairCertUtils;
 import org.openl.rules.workspace.dtr.impl.ProjectIndex;
 import org.openl.rules.workspace.dtr.impl.ProjectInfo;
+import org.openl.rules.workspace.lw.impl.FolderHelper;
 import org.openl.spring.env.DynamicPropertySource;
 import org.openl.util.FileUtils;
 import org.openl.util.PropertiesUtils;
@@ -195,9 +196,11 @@ public class Migrator {
 
     /**
      * V1 surface A (workspace directory) name check, private to {@code Migrator}: the single-user name becomes a
-     * workspace folder, so it must pass both the repository path rules (no absolute path, no {@code .} or
-     * {@code ..} segment, no {@code //}, no backslash) and the cross-platform name rules of {@link NameChecker}
-     * (no forbidden or control character, no reserved name, no leading or trailing space, no trailing dot).
+     * workspace folder, so it must be a single workspace folder name (no {@code /}, no {@code \}, no leading
+     * {@code .}), the rule {@link FolderHelper#isSafeFolderName(String)} applies to the user workspace directory. It
+     * must also pass both the repository path rules (no absolute path, no {@code .} or {@code ..} segment, no
+     * {@code //}, no backslash) and the cross-platform name rules of {@link NameChecker} (no forbidden or control
+     * character, no reserved name, no leading or trailing space, no trailing dot).
      *
      * <p>It runs before the name is resolved as a path, so an unparsable name (for example one with a NUL
      * character) is skipped like any other invalid name instead of failing the startup.
@@ -206,6 +209,10 @@ public class Migrator {
      * @return {@code true} if the name is a valid workspace folder name
      */
     private static boolean isValidWorkspaceFolderName(String username) {
+        // V1: the name must be a single folder name, as the user workspace directory (userDir) requires.
+        if (!FolderHelper.isSafeFolderName(username)) {
+            return false;
+        }
         try {
             Repository.validatePath(username);
             NameChecker.validatePath(username);

@@ -112,16 +112,23 @@ class MigratorSingleUserWorkspaceTest {
         assertTrue(Files.exists(root.resolve("DEFAULT")), "Blank or absent configuration is a no-op, not a failure.");
     }
 
+    // V1: a nested name no longer reaches the move, so the failing move takes a single folder name of 256 ASCII
+    // characters. It passes every name check and exceeds the 255-byte file name limit of ext4, APFS and NTFS.
     @Test
-    void logsInsteadOfThrowingWhenMoveFails() throws IOException {
+    @StdIo
+    void logsInsteadOfThrowingWhenMoveFails(StdErr err) throws IOException {
         Files.createDirectories(root.resolve("DEFAULT").resolve("SoloProj"));
-        // A regular file where the target's parent directory is expected makes the move fail.
-        Files.writeString(root.resolve("blocker"), "not a directory");
+        var username = "u".repeat(256);
 
         // Must not throw: a failed migration cannot break startup.
-        Migrator.migrateSingleUserWorkspace("single", root.toString(), "blocker/openl");
+        Migrator.migrateSingleUserWorkspace("single", root.toString(), username);
 
         assertTrue(Files.exists(root.resolve("DEFAULT")), "A failed move leaves the legacy workspace intact.");
+        // V1: the ERROR proves that the name passed the checks and that the move itself failed.
+        var message = "Failed to move the single-user workspace from 'DEFAULT' to '" + username + "'.";
+        var lines = Arrays.stream(err.capturedLines()).filter(line -> line.contains(message)).toList();
+        assertEquals(1, lines.size(), "Exactly one line logs the failed move.");
+        assertTrue(lines.get(0).contains("ERROR"), "The failed move is logged at ERROR.");
     }
 
     @Test
@@ -193,8 +200,31 @@ class MigratorSingleUserWorkspaceTest {
                 "V1 rejection: a look-alike separator keeps the workspace or moves it to a direct child of the root.");
     }
 
-    // V1: surface A row A12, the user's folder is a link to a directory outside the workspace root. The nested id
-    // continues through the link, and either id is skipped with the escape WARN.
+    // V1: surface A, the name must be a single folder name, as the user workspace directory requires. A nested name
+    // would move the legacy workspace into another user's folder and a leading dot would hide it as a service folder,
+    // so each is skipped with the invalid-name WARN and nothing of the sibling workspace is written (row A16).
+    @ParameterizedTest(name = "{0}")
+    @ValueSource(strings = {"bob/x", "x/", "bob/x/y", ".hidden"})
+    @StdIo
+    void skipsUserNameThatIsNotSingleFolderName(String userId, StdErr err) throws IOException {
+        var ws = legacyLayout();
+        var bob = Files.createDirectories(ws.resolve("bob"));
+        var marker = RandomStringUtils.secure().nextAlphanumeric(16);
+        Files.writeString(bob.resolve("marker.txt"), marker);
+        var before = capture(ws, List.of(bob), List.of());
+
+        var thrown = invoke(ws, userId);
+
+        assertContained(ws, before, thrown);
+        assertEquals(Map.of("marker.txt", "file:" + marker), snapshot(bob),
+                "V1 containment: the sibling workspace holds only its marker.");
+        assertRejected(ws, thrown);
+        assertSkipLogged(err, invalidNameMessage(userId));
+    }
+
+    // V1: surface A row A12, the user's folder is a link to a directory outside the workspace root. The id is skipped
+    // with the escape WARN. The nested id is not a single folder name, so it is skipped with the invalid-name WARN
+    // before the link is followed.
     @ParameterizedTest(name = "{0}")
     @ValueSource(strings = {"victim", "victim/x"})
     @DisabledOnOs(OS.WINDOWS)
@@ -213,11 +243,13 @@ class MigratorSingleUserWorkspaceTest {
         assertEquals(Map.of("marker.txt", "file:" + marker), snapshot(outsideTarget),
                 "V1 containment: the outside directory holds only its marker.");
         assertRejected(ws, thrown);
-        assertSkipLogged(err, outsideRootMessage(userId));
+        // V1: the expected WARN depends on whether the id is nested.
+        assertSkipLogged(err, linkSkipMessage(userId));
     }
 
-    // V1: surface A row A13, the user's folder is a dangling link to a missing path outside the workspace root. The
-    // nested id continues through the link, and either id is skipped with the escape WARN.
+    // V1: surface A row A13, the user's folder is a dangling link to a missing path outside the workspace root. The id
+    // is skipped with the escape WARN. The nested id is not a single folder name, so it is skipped with the
+    // invalid-name WARN before the link is followed.
     @ParameterizedTest(name = "{0}")
     @ValueSource(strings = {"ghost", "ghost/x"})
     @DisabledOnOs(OS.WINDOWS)
@@ -234,11 +266,13 @@ class MigratorSingleUserWorkspaceTest {
         assertFalse(Files.exists(ghostTarget, LinkOption.NOFOLLOW_LINKS),
                 "V1 containment: the target of the dangling link is never created.");
         assertRejected(ws, thrown);
-        assertSkipLogged(err, outsideRootMessage(userId));
+        // V1: the expected WARN depends on whether the id is nested.
+        assertSkipLogged(err, linkSkipMessage(userId));
     }
 
-    // V1: surface A row A16, the user's folder is a link to another user's folder inside the workspace root. The
-    // nested id continues through the link, and either id is skipped with the escape WARN.
+    // V1: surface A row A16, the user's folder is a link to another user's folder inside the workspace root. The id is
+    // skipped with the escape WARN. The nested id is not a single folder name, so it is skipped with the
+    // invalid-name WARN before the link is followed.
     @ParameterizedTest(name = "{0}")
     @ValueSource(strings = {"alice", "alice/x"})
     @DisabledOnOs(OS.WINDOWS)
@@ -257,11 +291,13 @@ class MigratorSingleUserWorkspaceTest {
         assertEquals(Map.of("marker.txt", "file:" + marker), snapshot(bob),
                 "V1 containment: the sibling workspace holds only its marker.");
         assertRejected(ws, thrown);
-        assertSkipLogged(err, outsideRootMessage(userId));
+        // V1: the expected WARN depends on whether the id is nested.
+        assertSkipLogged(err, linkSkipMessage(userId));
     }
 
-    // V1: the user's folder is a link to itself. The loop cannot be resolved, so the move is skipped with the WARN of
-    // a folder that cannot be resolved, not with the escape WARN.
+    // V1: the user's folder is a link to itself. The loop cannot be resolved, so the id is skipped with the WARN of a
+    // folder that cannot be resolved, not with the escape WARN. The nested id is not a single folder name, so it is
+    // skipped with the invalid-name WARN before the loop is followed.
     @ParameterizedTest(name = "{0}")
     @ValueSource(strings = {"loop", "loop/x"})
     @DisabledOnOs(OS.WINDOWS)
@@ -275,7 +311,14 @@ class MigratorSingleUserWorkspaceTest {
 
         assertContained(ws, before, thrown);
         assertRejected(ws, thrown);
-        assertUnresolvableLogged(err, userId);
+        // V1: the nested id fails the single folder name check, so the loop is never resolved.
+        if (isNested(userId)) {
+            assertSkipLogged(err, invalidNameMessage(userId));
+            assertFalse(err.capturedString().contains(UNRESOLVABLE_TEXT),
+                    "V1 rejection: a nested id is not reported as a folder that cannot be resolved.");
+        } else {
+            assertUnresolvableLogged(err, userId);
+        }
         assertFalse(err.capturedString().contains(OUTSIDE_ROOT_TEXT),
                 "V1 rejection: a folder that cannot be resolved is not reported as resolving outside the root.");
     }
@@ -491,6 +534,20 @@ class MigratorSingleUserWorkspaceTest {
     /** The WARN of a name that cannot name a workspace folder. */
     private static String invalidNameMessage(String loggedName) {
         return "The single-user name '" + loggedName + "' is not a valid workspace folder name; the move is skipped.";
+    }
+
+    // V1: helpers of the link rows, whose nested ids fail the single folder name check before any link is followed.
+    /** The reason part of the WARN of a folder that cannot be resolved, whatever user name it carries. */
+    private static final String UNRESOLVABLE_TEXT = "cannot be resolved";
+
+    /** Whether the id has more than one segment, so that it is not a single workspace folder name. */
+    private static boolean isNested(String userId) {
+        return userId.contains("/");
+    }
+
+    /** The WARN of a link row: the invalid-name WARN for a nested id, the escape WARN otherwise. */
+    private static String linkSkipMessage(String userId) {
+        return isNested(userId) ? invalidNameMessage(userId) : outsideRootMessage(userId);
     }
 
     /**
