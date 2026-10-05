@@ -585,20 +585,28 @@ security.administrators = jsmith
 
 <!-- V6: ENC(v2:...) AES-256-GCM values, password/secret/token settings, instance key file -->
 
-Any property value, not only a password, can be stored encrypted inside `ENC(...)`. OpenL decodes every `ENC(...)`
-value, whatever the name of its property:
+Any property value, not only a password, can be stored encrypted inside `ENC(...)`, except the values of the settings
+described after this example. OpenL decodes every `ENC(...)` value of the other settings, whatever the name of its
+property:
 
 ```properties
 secret.key = ${SECRET_KEY}
 db.password = ENC(v2:${ENCRYPTED_VALUE})
 ```
 
+The settings that OpenL reads to locate the settings file and the keys of the other values must stay unencrypted:
+`secret.key`, and `openl.home.shared`, the folder of the settings file and of `.openl-secret-key`, together with
+`openl.home` while `openl.home.shared` keeps its default `${openl.home}`. Where OpenL reads an `ENC(v2:...)` value of
+one of them while it resolves the keys of another `ENC(v2:...)` value, it uses an empty value and logs an ERROR.
+
 Values that OpenL saves are written as `ENC(v2:<Base64>)`, where the Base64 text holds the salt, the nonce and the
 ciphertext with its authentication tag, in that order. The cipher is AES-256-GCM with a 128-bit authentication tag.
 The 256-bit key is derived from the key material with PBKDF2-HMAC-SHA256 at 600,000 iterations. Each value gets its
 own random 16-byte salt and random 12-byte nonce, so the same password encrypts to a different value every time. A
-modified or truncated value fails authentication: it reads as an empty value, and OpenL logs an ERROR that does not
-contain the value.
+value that keeps its `ENC(v2:` start and its final `)` but whose salt, nonce, ciphertext or tag is modified or
+truncated cannot be decrypted: it reads as an empty value, and OpenL logs an ERROR that does not contain the value. A
+value that loses its `ENC(` start or its final `)` is not recognized as encrypted and is used as written. A value whose
+`v2:` marker is changed or removed is read in the legacy format described later in this section, without that ERROR.
 
 Keep `secret.key` out of `application.properties` in a shared environment — pass it as a Java system property or an
 environment variable instead. Quote the value if it contains spaces or shell metacharacters, so that
@@ -619,10 +627,10 @@ the settings file never holds a plain-text secret. The key file holds a random 3
 by its owner only, where the file system supports such permissions.
 
 The next time the settings file, `${openl.home.shared}/<application-name>.properties`, is saved, OpenL rewrites the
-legacy `ENC(...)` values and the plain-text values of matching settings as `ENC(v2:...)`. A value that has not changed
-is not rewritten. A legacy value that cannot be decrypted is kept as stored, and OpenL logs a WARN that names the
-property, never the value. `application.properties` and the other configuration files are only read and are never
-rewritten.
+legacy `ENC(...)` and plain-text values of matching settings as `ENC(v2:...)`, also when they have not changed. A value
+already stored as `ENC(v2:...)` that has not changed keeps its ciphertext and is not rewritten. A legacy value that
+cannot be decrypted is kept as stored, and OpenL logs a WARN that names the property, never the value.
+`application.properties` and the other configuration files are only read and are never rewritten.
 
 > [!Note]
 > Back up and move `.openl-secret-key` together with the settings file when copying the settings to another

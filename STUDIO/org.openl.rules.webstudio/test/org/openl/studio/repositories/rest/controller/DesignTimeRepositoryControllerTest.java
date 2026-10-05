@@ -396,6 +396,53 @@ class DesignTimeRepositoryControllerTest {
         assertEquals(HttpStatus.CONFLICT, ex.getHttpStatus());
     }
 
+    // V1-C: the files route keeps its bean-validation rejection (openl.constraints.path.1.message) before any upload
+    @Test
+    void createFromFilesWithALeadingSlashPathKeepsItsPathConstraintRejection() throws Exception {
+        var file = mock(MultipartFile.class);
+        when(file.getOriginalFilename()).thenReturn("notes.txt");
+        var files = List.of(file);
+        try (var factory = Validation.buildDefaultValidatorFactory()) {
+            var validating = controllerValidatingWith(factory);
+
+            var ex = assertThrows(ValidationException.class,
+                    () -> validating.createProject(repository, "Project", "/etc/p", "comment", files, null, null,
+                            null, "Models", "rules/Models.xlsx", "Algorithms", "rules/Algorithms.xlsx", false, null,
+                            null, false));
+
+            var error = ex.getBindingResult().getFieldError("path");
+            assertNotNull(error);
+            assertEquals("The path in the repository cannot start with '/'.", error.getDefaultMessage());
+            verify(projectCreationService, never()).createFromFiles(any(Repository.class), any(), any(), anyList(),
+                    any(), any(), any(), any(), any(), any());
+            verify(projectCreationService, never()).createFromTemplate(any(Repository.class), any(), any(), any(),
+                    any(), any(), any(), any());
+            verify(projectCreationService, never()).copyProject(any(Repository.class), any(), any(),
+                    any(RulesProject.class), any(), any());
+            verify(file, never()).getInputStream();
+        }
+    }
+
+    // V1-C: a repository failure on the files route keeps its 409 project.create.failed.message
+    @Test
+    void filesCreationFailureKeepsItsConflict() throws Exception {
+        var file = mock(MultipartFile.class);
+        when(file.getOriginalFilename()).thenReturn("notes.txt");
+        when(file.getInputStream()).thenReturn(new ByteArrayInputStream(new byte[0]));
+        when(projectCreationService.createFromFiles(eq(repository), eq("Project"), any(), anyList(), any(), any(),
+                any(), any(), any(), any())).thenThrow(new ConflictException("project.create.failed.message"));
+        var files = List.of(file);
+
+        var ex = assertThrows(ConflictException.class,
+                () -> controller.createProject(repository, "Project", null, "comment", files, null, null, null,
+                        "Models", "rules/Models.xlsx", "Algorithms", "rules/Algorithms.xlsx", false, null, null,
+                        false));
+
+        assertEquals("openl.error.409.project.create.failed.message", ex.getErrorCode());
+        assertEquals(HttpStatus.CONFLICT, ex.getHttpStatus());
+        verify(projectCreationService, never()).applyStatusAfterCreate(any(Repository.class), any(), any());
+    }
+
     // V1-C: a repository failure on the from-project route keeps its 409 project.copy.failed.message
     @Test
     void projectCopyFailureKeepsItsConflict() throws Exception {

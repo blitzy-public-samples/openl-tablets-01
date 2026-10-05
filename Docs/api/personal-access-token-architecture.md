@@ -52,32 +52,34 @@ The Personal Access Token (PAT) feature provides a secure, token-based authentic
 
 ### High-Level Architecture
 
+<!-- V8: labels are quoted so Mermaid 11 parses the diagram; the PatAuthService method is resolveAuthentication. -->
+
 ```mermaid
 flowchart TB
-    Client[Client Layer<br/>OAuth2/SAML or PAT Authentication]
+    Client["Client Layer<br/>OAuth2/SAML or PAT Authentication"]
 
-    subgraph SecurityFilter[Security Filter Chain]
-        PatFilter[PatAuthenticationFilter<br/>Before OAuth2 Filter<br/>- Checks Authorization: Token header<br/>- Validates using PatAuthService<br/>- Sets SecurityContext if valid]
-        OAuth2Filter[OAuth2/SAML Filter<br/>Standard Spring Security]
+    subgraph SecurityFilter["Security Filter Chain"]
+        PatFilter["PatAuthenticationFilter<br/>Before OAuth2 Filter<br/>- Checks Authorization: Token header<br/>- Validates using PatAuthService<br/>- Sets SecurityContext if valid"]
+        OAuth2Filter["OAuth2/SAML Filter<br/>Standard Spring Security"]
     end
 
-    subgraph Controller[REST Controller Layer]
-        PatController[PersonalAccessTokenController<br/>@NotPatAuth - Prevents PAT from managing PATs<br/>POST /users/personal-access-tokens Create<br/>GET /users/personal-access-tokens List<br/>GET /users/personal-access-tokens/:id Get<br/>DELETE /users/personal-access-tokens/:id Delete]
+    subgraph Controller["REST Controller Layer"]
+        PatController["PersonalAccessTokenController<br/>@NotPatAuth - Prevents PAT from managing PATs<br/>POST /users/personal-access-tokens Create<br/>GET /users/personal-access-tokens List<br/>GET /users/personal-access-tokens/:id Get<br/>DELETE /users/personal-access-tokens/:id Delete"]
     end
 
-    subgraph Service[Service Layer]
-        PatGenerator[PatGeneratorService<br/>generateToken]
-        PatAuth[PatAuthService<br/>resolveAuth]
-        PatValidation[PatValidationService<br/>validate]
-        PatCRUD[PersonalAccessTokenService<br/>CRUD operations]
+    subgraph Service["Service Layer"]
+        PatGenerator["PatGeneratorService<br/>generateToken"]
+        PatAuth["PatAuthService<br/>resolveAuthentication"]
+        PatValidation["PatValidationService<br/>validate"]
+        PatCRUD["PersonalAccessTokenService<br/>CRUD operations"]
     end
 
-    subgraph DAO[DAO Layer]
-        PatDAO[PersonalAccessTokenDao<br/>Hibernate Implementation<br/>getByPublicId<br/>getByLoginName<br/>save, delete, etc.]
+    subgraph DAO["DAO Layer"]
+        PatDAO["PersonalAccessTokenDao<br/>Hibernate Implementation<br/>getByPublicId<br/>getByLoginName<br/>save, delete, etc."]
     end
 
-    subgraph Database[Database Layer]
-        PatTable[(OpenL_PAT_Tokens Table<br/>publicId PK<br/>secretHash<br/>loginName FK<br/>name, createdAt, expiresAt)]
+    subgraph Database["Database Layer"]
+        PatTable[("OpenL_PAT_Tokens Table<br/>publicId PK<br/>secretHash<br/>loginName FK<br/>name, createdAt, expiresAt")]
     end
 
     Client --> SecurityFilter
@@ -342,7 +344,7 @@ openl_pat_<publicId>.<secret>
    token.setSecretHash(secretHash);  // Only hash is stored
    token.setLoginName(loginName);
    token.setName(name);
-   token.setCreatedAt(Instant.now(clock));
+   token.setCreatedAt(now);  // same instant as the expiry checks in step 1
    token.setExpiresAt(effectiveExpiresAt);  // resolved value: default applied, maximum checked
 
    crudService.save(token);
@@ -814,6 +816,8 @@ public final class Base62Generator {
 
 ### Token Creation Flow
 
+<!-- V8: the client request carries the /rest prefix under which the REST API is served. -->
+
 ```mermaid
 sequenceDiagram
     participant Client
@@ -824,7 +828,7 @@ sequenceDiagram
     participant DAO as PersonalAccessToken<br/>Dao
     participant DB as Database
 
-    Client->>SecurityFilter: POST /users/personal-access-tokens<br/>Authorization: Bearer oauth2-token<br/>Body: { name, expiresAt }
+    Client->>SecurityFilter: POST /rest/users/personal-access-tokens<br/>Authorization: Bearer oauth2-token<br/>Body: { name, expiresAt }
     SecurityFilter->>SecurityFilter: Validate OAuth2 Bearer Token<br/>Set SecurityContext
     SecurityFilter->>Controller: Forward request
 
@@ -849,6 +853,8 @@ sequenceDiagram
 ---
 
 ### Token Authentication Flow
+
+<!-- V8: the context is replaced only when authenticationIsRequired; an authenticated same-user context is kept. -->
 
 ```mermaid
 sequenceDiagram
@@ -886,8 +892,12 @@ sequenceDiagram
 
         AuthService-->>Filter: PatAuthResolution.valid(authentication)
 
-        Filter->>SecurityContext: setAuthentication(PatAuthenticationToken)
-        SecurityContext-->>Filter: Success
+        alt authenticationIsRequired(username)
+            Filter->>SecurityContext: setAuthentication(PatAuthenticationToken)
+            SecurityContext-->>Filter: Success
+        else Context already holds this user, authenticated
+            Note over Filter,SecurityContext: Existing authentication is kept
+        end
 
         Filter->>FilterChain: doFilter(request, response)
         Note over FilterChain: Request processed normally<br/>Authorization checks use SecurityContext
