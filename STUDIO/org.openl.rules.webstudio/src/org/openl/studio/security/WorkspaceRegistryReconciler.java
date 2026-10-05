@@ -6,6 +6,8 @@ import org.springframework.context.ApplicationListener;
 import org.springframework.security.authentication.event.InteractiveAuthenticationSuccessEvent;
 import org.springframework.stereotype.Component;
 
+import org.openl.rules.repository.api.UserInfo;
+import org.openl.rules.workspace.WorkspaceUserImpl;
 import org.openl.rules.workspace.lw.LocalWorkspaceManager;
 
 /**
@@ -40,7 +42,9 @@ public class WorkspaceRegistryReconciler implements ApplicationListener<Interact
 
     private void reconcile(String username) {
         try {
-            localWorkspaceManager.refreshMetainfoRegistry(username);
+            // V1: the workspace folder is named by the encoded user id, as for the user's own workspace
+            var userId = new WorkspaceUserImpl(username, UserInfo::new).getUserId();
+            localWorkspaceManager.refreshMetainfoRegistry(userId);
         } catch (Exception e) {
             log.error("Failed to reconcile the workspace metainfo registry for user '{}'.", username, e);
         }
