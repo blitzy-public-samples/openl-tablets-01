@@ -31,9 +31,13 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
+import java.util.TreeMap;
 import java.util.concurrent.CompletableFuture;
 import java.util.stream.Stream;
 import java.util.zip.ZipEntry;
@@ -1203,6 +1207,8 @@ class ProjectCreationServiceTest {
         var flat = backend == Backend.FLAT;
         var root = Files.createDirectories(tmp.resolve("repo"));
         var outside = Files.createDirectories(tmp.resolve("outside"));
+        // V1-C: a regular file with generated content outside the repository, so a write through the link is seen
+        write(outside.resolve("sentinel.txt"), marker());
         var sibling = root.resolve(flat ? "DESIGN/rules/Sibling" : "projects/Sibling");
         write(sibling.resolve("rules.xml"), descriptor("Sibling"));
         var target = secureFileRepository(root, !flat);
@@ -1216,15 +1222,17 @@ class ProjectCreationServiceTest {
         var name = flat ? linkName : "p";
         var path = flat ? null : linkName;
         var source = route == Route.COPY ? sourceInFlatFileRepository() : null;
+        // V1-C: the complete outside, sibling and repository state, each compared again after the rejection
         var rootBefore = snapshot(root);
         var siblingBefore = snapshot(sibling);
+        var outsideBefore = snapshot(outside);
 
         try (var uploaders = uploaders()) {
             assertPathRejected(() -> attempt(route, target, name, path, source));
             assertTrue(uploaders.constructed().isEmpty(), "The upload never runs");
         }
 
-        assertEquals(List.of(), snapshot(outside), "Nothing is written through the link");
+        assertEquals(outsideBefore, snapshot(outside), "Nothing is written through the link");
         assertEquals(siblingBefore, snapshot(sibling), "The sibling project is unchanged");
         assertEquals(rootBefore, snapshot(root), "Nothing is written to the repository");
     }
@@ -1585,16 +1593,34 @@ class ProjectCreationServiceTest {
         }
     }
 
-    // V1-C: every entry below a folder, relative to it and sorted, without following links; empty when it is absent
-    private static List<String> snapshot(Path dir) throws IOException {
+    // V1-C: every entry below a folder, links never followed: kind, link target, file size and SHA-256; empty if absent
+    private static Map<String, String> snapshot(Path dir) throws IOException {
         if (!Files.exists(dir, LinkOption.NOFOLLOW_LINKS)) {
-            return List.of();
+            return Map.of();
         }
+        var entries = new TreeMap<String, String>();
         try (var paths = Files.walk(dir)) {
-            return paths.filter(entry -> !entry.equals(dir))
-                    .map(entry -> dir.relativize(entry).toString())
-                    .sorted()
-                    .toList();
+            for (var entry : paths.filter(p -> !p.equals(dir)).toList()) {
+                String state;
+                if (Files.isSymbolicLink(entry)) {
+                    state = "link " + Files.readSymbolicLink(entry);
+                } else if (Files.isDirectory(entry, LinkOption.NOFOLLOW_LINKS)) {
+                    state = "dir";
+                } else {
+                    state = "file " + Files.size(entry) + " " + sha256(Files.readAllBytes(entry));
+                }
+                entries.put(dir.relativize(entry).toString(), state);
+            }
+        }
+        return entries;
+    }
+
+    // V1-C: the SHA-256 of a file's content, so a snapshot holds a fingerprint and never the content itself
+    private static String sha256(byte[] content) {
+        try {
+            return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(content));
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException(e);
         }
     }
 

@@ -1,7 +1,8 @@
 package org.openl.studio.repositories.service;
 
-// V1-D: never, LinkedHashMap, ThreadLocalRandom, ZipArchiveEntry, ZipArchiveOutputStream and Executable serve the
-// surface D link tests; the import block itself cannot hold a comment, as Spotless rewrites it.
+// V1-D: never, LinkedHashMap, ThreadLocalRandom, ZipArchiveEntry, ZipArchiveOutputStream, Executable, MessageDigest,
+// NoSuchAlgorithmException, HexFormat and TreeMap serve the surface D link tests; the import block itself cannot hold a
+// comment, as Spotless rewrites it.
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -30,11 +31,15 @@ import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.TreeMap;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
@@ -270,11 +275,11 @@ class ZipProjectSaveStrategyTest {
         var repo = designTimeRepositoryMock.getRepository(model.getRepoName());
         var actualStream = captureStream(repo);
 
-        var source = tempFolder.resolve("apple-double-project.zip");
-        try (var zip = new ZipOutputStream(Files.newOutputStream(source))) {
-            zip.putNextEntry(new ZipEntry("Legacy.xls"));
-            zip.putNextEntry(new ZipEntry("._Legacy.xls"));
-        }
+        // V1-D: the archive is built by the class's own archive helper, its entries in this order
+        var entries = new LinkedHashMap<String, byte[]>();
+        entries.put("Legacy.xls", new byte[0]);
+        entries.put("._Legacy.xls", new byte[0]);
+        var source = zip(tempFolder.resolve("apple-double-project.zip"), entries);
         saveStrategy.save(repo, model, source);
 
         var modulePaths = descriptor(actualStream.get()).getModules().stream().map(Module::getRulesRootPath).toList();
@@ -862,8 +867,9 @@ class ZipProjectSaveStrategyTest {
         var failure = new IOException("The repository cannot record the save", new IllegalStateException("Busy"));
         when(repository.save(any(FileData.class), any(), eq(ChangesetType.FULL))).thenAnswer(a -> {
             // Every change is inside the project folder and is taken, then the repository fails on its own.
-            // noinspection unchecked
-            for (FileItem change : (Iterable<FileItem>) a.getArguments()[1]) {
+            // V1-D: Mockito's typed argument accessor, so the changes need no unchecked cast
+            Iterable<FileItem> changes = a.getArgument(1);
+            for (FileItem change : changes) {
                 IOUtils.closeQuietly(change.getStream());
             }
             throw failure;
@@ -892,7 +898,7 @@ class ZipProjectSaveStrategyTest {
 
         assertPathRejected(() -> saveStrategy.save(repository, model, PROJECT_ARCHIVE));
 
-        assertEquals(List.of(), snapshot(outside), "Nothing is written through a rules location linked outside");
+        assertEquals(Map.of(), snapshot(outside), "Nothing is written through a rules location linked outside");
     }
 
     // V1-D: an ancestor of a mapped project folder is a link to outside
@@ -907,7 +913,7 @@ class ZipProjectSaveStrategyTest {
 
         assertPathRejected(() -> saveStrategy.save(repository, model, PROJECT_ARCHIVE));
 
-        assertEquals(List.of(), snapshot(outside), "Nothing is written below a mapped ancestor linked outside");
+        assertEquals(Map.of(), snapshot(outside), "Nothing is written below a mapped ancestor linked outside");
     }
 
     // V1-D: the new project folder is a dangling link, which can neither be resolved nor written through
@@ -938,8 +944,16 @@ class ZipProjectSaveStrategyTest {
         var project = Files.createDirectories(root.resolve(BASE_RULES_LOCATION + "Existing"));
         var descriptor = "<project><name>Existing</name></project>".getBytes(StandardCharsets.UTF_8);
         Files.write(project.resolve(ProjectDescriptor.FILE_NAME), descriptor);
+        // V1-D: an ordinary file of the project and one outside it, so a change to their content is seen as well
+        var existingWorkbook = new byte[16];
+        ThreadLocalRandom.current().nextBytes(existingWorkbook);
+        Files.write(project.resolve("Main.xlsx"), existingWorkbook);
+        var sentinel = new byte[16];
+        ThreadLocalRandom.current().nextBytes(sentinel);
+        Files.write(outside.resolve("sentinel.bin"), sentinel);
         var link = Files.createSymbolicLink(project.resolve("link"), outside);
         var before = snapshot(project);
+        var outsideBefore = snapshot(outside);
         var workbook = new byte[16];
         ThreadLocalRandom.current().nextBytes(workbook);
         var entries = new LinkedHashMap<String, byte[]>();
@@ -953,6 +967,7 @@ class ZipProjectSaveStrategyTest {
 
         assertFalse(Files.exists(outside.resolve("evil.xlsx"), LinkOption.NOFOLLOW_LINKS),
                 "No entry is written through the link the existing project folder holds");
+        assertEquals(outsideBefore, snapshot(outside), "The folder the link points to is left as it was");
         assertEquals(before, snapshot(project), "The existing project folder is left as it was");
         assertTrue(Files.isSymbolicLink(link), "The link itself is left as it was");
         assertArrayEquals(descriptor, Files.readAllBytes(project.resolve(ProjectDescriptor.FILE_NAME)),
@@ -1229,13 +1244,34 @@ class ZipProjectSaveStrategyTest {
         return target;
     }
 
-    // V1-D: the entries below a folder, relative to it and sorted; a link is listed and never followed
-    private static List<String> snapshot(Path dir) throws IOException {
+    // V1-D: each entry below a folder, links never followed: its kind, a link's target, a file's size and SHA-256
+    private static Map<String, String> snapshot(Path dir) throws IOException {
         if (!Files.exists(dir, LinkOption.NOFOLLOW_LINKS)) {
-            return List.of();
+            return Map.of();
         }
+        var entries = new TreeMap<String, String>();
         try (var paths = Files.walk(dir)) {
-            return paths.filter(p -> !p.equals(dir)).map(p -> dir.relativize(p).toString()).sorted().toList();
+            for (var path : paths.filter(p -> !p.equals(dir)).toList()) {
+                String state;
+                if (Files.isSymbolicLink(path)) {
+                    state = "link " + Files.readSymbolicLink(path);
+                } else if (Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS)) {
+                    state = "dir";
+                } else {
+                    state = "file " + Files.size(path) + " " + sha256(Files.readAllBytes(path));
+                }
+                entries.put(dir.relativize(path).toString(), state);
+            }
+        }
+        return entries;
+    }
+
+    // V1-D: the content fingerprint of a snapshot entry, so a snapshot never holds the content itself
+    private static String sha256(byte[] content) {
+        try {
+            return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(content));
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException(e);
         }
     }
 
