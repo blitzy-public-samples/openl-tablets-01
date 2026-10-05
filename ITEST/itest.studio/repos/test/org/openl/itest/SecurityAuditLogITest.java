@@ -63,8 +63,8 @@ import org.openl.itest.core.JettyServer;
  * <ul>
  * <li>groups have no management API in this mode, so {@code /rest/admin/management/groups} answers 404; a group is
  * created, and its SID removed, only by the bulk ACL overwrite {@code POST /rest/acls};</li>
- * <li>{@code DELETE /rest/users/<name>} writes an {@code acl.change} line only for a user whose SID holds an entry at
- * that time, and a bulk overwrite removes the SID of every user it does not list;</li>
+ * <li>{@code DELETE /rest/users/<name>} writes an {@code acl.change} line only when the user's SID exists, whether
+ * or not the SID still holds an entry, and a bulk overwrite removes the SID of every user it does not list;</li>
  * <li>an HTTP Basic request opens no session, so the session a valid token rides in {@code 040-pat-use} is opened by
  * a form login.</li>
  * </ul>
