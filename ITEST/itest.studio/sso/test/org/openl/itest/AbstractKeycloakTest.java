@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.net.http.HttpResponse;
+import java.nio.file.Path;
 import java.security.SecureRandom;
 import java.util.Collections;
 import java.util.LinkedHashMap;
@@ -13,11 +14,15 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Supplier;
 
 import com.adobe.testing.s3mock.testcontainers.S3MockContainer;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dasniko.testcontainers.keycloak.KeycloakContainer;
 import org.apache.http.HttpStatus;
+import org.jspecify.annotations.Nullable;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.extension.RegisterExtension;
 
 import org.openl.itest.core.JettyServer;
 
@@ -55,6 +60,13 @@ abstract class AbstractKeycloakTest {
     private static final String CLIENT_SECRET = randomValue();
     private static final String S3_ACCESS_KEY = randomValue();
     private static final String S3_SECRET_KEY = randomValue();
+    // V3: every generated credential and every one issued to the test class, by kind; each test's output is scanned
+    // for them after the test, passed or failed, and the saved responses after the class
+    @RegisterExtension
+    static final SecretLeakGuard SECRET_GUARD = new SecretLeakGuard()
+            .retain("realm credential", PASSWORDS.values())
+            .retain("client secret", List.of(CLIENT_SECRET))
+            .retain("S3 key", List.of(S3_ACCESS_KEY, S3_SECRET_KEY));
 
     protected final ObjectMapper mapper = new ObjectMapper();
 
@@ -109,6 +121,40 @@ abstract class AbstractKeycloakTest {
         secrets.add(S3_ACCESS_KEY);
         secrets.add(S3_SECRET_KEY);
         return Collections.unmodifiableSet(secrets);
+    }
+
+    // V3: keeps a credential issued during the test class, such as a token or a session ID, for the leak scans
+    /**
+     * Keeps {@code value}, a credential the IdP or Studio issued while the test class runs, so that each test's
+     * captured output and, after the class, the saved responses are scanned for it. A {@code null} or blank value
+     * is ignored.
+     *
+     * @param kind the kind of credential, the only thing a failure message names
+     * @param value the credential
+     */
+    static void registerSecret(String kind, @Nullable String value) {
+        SECRET_GUARD.register(kind, value);
+    }
+
+    // V3: a test that captures its streams with @StdIo hands each capture over, so the guard still scans it
+    /**
+     * Adds output captured outside the guard's tees, such as JUnit Pioneer {@code StdOut} or {@code StdErr}, to the
+     * leak scan that runs when the current test finishes, whether it passes or fails.
+     *
+     * @param captured supplies the captured text; it is read only when the test finishes
+     */
+    protected static void scanCapturedAfterTest(Supplier<String> captured) {
+        SECRET_GUARD.scanAlso(captured);
+    }
+
+    // V3: the harness saves the body of every mismatching response under server.responses; none may hold a secret
+    /**
+     * Fails, naming only the kind of secret and the file's relative path, when a response saved under the
+     * {@code server.responses} directory contains a credential generated for or issued to this test class.
+     */
+    @AfterAll
+    static void assertNoSecretsSaved() {
+        SECRET_GUARD.assertNoSecretsSaved(Path.of(System.getProperty("server.responses", "target/responses")));
     }
 
     // V3: one generated password per realm user, in realm order
@@ -174,6 +220,113 @@ abstract class AbstractKeycloakTest {
         assertEquals("0", headers.firstValue("X-XSS-Protection").orElse(null), url + ": X-XSS-Protection");
         assertFalse(headers.firstValue("Strict-Transport-Security").isPresent(),
                 url + ": Strict-Transport-Security must be absent on plain HTTP");
+    }
+
+    // V4: the default set on a request marked secure, where the HSTS writer must add Strict-Transport-Security
+    /**
+     * Sends a GET for {@code path} marked secure with {@code X-Forwarded-Proto: https}, which Studio's forwarded-header
+     * filter turns into a secure request, and asserts its status, the Spring Security default security headers and
+     * the default {@code Strict-Transport-Security: max-age=31536000 ; includeSubDomains}. Redirects are not followed.
+     *
+     * <p>Every failure message names the path and the header only; the response body is never printed.
+     *
+     * @param browser the browser whose cookie jar carries the session, if any
+     * @param path the path relative to the Studio base URL, with no query
+     * @param expectedStatus the status the chain must answer
+     */
+    protected static void assertSecureSecurityHeadersOn(SsoBrowser browser,
+                                                        String path,
+                                                        int expectedStatus) throws Exception {
+        var response = getMarkedSecure(browser, path);
+        var label = path + " (secure)";
+        assertEquals(expectedStatus, response.statusCode(), label + ": status");
+        assertResponseIndependentHeaders(response, label, true);
+        var headers = response.headers();
+        assertEquals("no-cache, no-store, max-age=0, must-revalidate",
+                headers.firstValue("Cache-Control").orElse(null),
+                label + ": Cache-Control");
+        assertEquals("no-cache", headers.firstValue("Pragma").orElse(null), label + ": Pragma");
+        assertEquals("0", headers.firstValue("Expires").orElse(null), label + ": Expires");
+    }
+
+    // V4: Jetty marks a cookie-setting response "Expires: Thu, 01 Jan 1970", so the cache writer backs off there only
+    /**
+     * Asserts the security headers that never depend on the response on a plain-HTTP response that sets a cookie,
+     * such as an IdP callback that rotates the session ID: {@code X-Content-Type-Options: nosniff},
+     * {@code X-Frame-Options: DENY}, {@code X-XSS-Protection: 0} and no {@code Strict-Transport-Security}.
+     *
+     * <p>Jetty adds its own {@code Expires: Thu, 01 Jan 1970 00:00:00 GMT} to every response that sets a cookie, and
+     * Spring's cache writer backs off whenever the response already has a cache header, so the cache headers are not
+     * expected here; the caller asserts the cache headers on a session-bearing request to the same chain. The check
+     * fails if the response sets no cookie, so this exception never stands in for the full set. Every failure message
+     * names the route and the header only; no cookie, location or body is printed.
+     *
+     * @param response the cookie-setting response
+     * @param route the route pattern of the chain that answered, used in the failure messages
+     */
+    protected static void assertCookieSettingSecurityHeaders(HttpResponse<?> response, String route) {
+        assertTrue(response.headers().firstValue("Set-Cookie").isPresent(),
+                route + ": expected a cookie-setting response");
+        assertResponseIndependentHeaders(response, route, false);
+    }
+
+    // V4: no response of an IdP callback chain leaves its cache policy to Spring, so only no-store is required there
+    /**
+     * Sends a GET for {@code path} on the browser's session, plainly and then marked secure with
+     * {@code X-Forwarded-Proto: https}, to an IdP callback chain, and asserts both statuses, the security headers that
+     * never depend on the response, {@code Strict-Transport-Security: max-age=31536000 ; includeSubDomains} on the
+     * secure request only, and a {@code Cache-Control} that forbids storing the response.
+     *
+     * <p>Every response of a callback chain sets its own cache policy, and Spring's cache writer gives way to it by
+     * design: the callback itself rotates the session ID, so Jetty marks it with its own {@code Expires}; a request
+     * without the IdP's parameters fails into Jetty's error page, which sets its own {@code Cache-Control}; any other
+     * path under the chain serves the application page with its own {@code Cache-Control: no-store}. Every failure
+     * message names the path and the header only; the response body is never printed.
+     *
+     * @param browser the browser whose cookie jar carries the session
+     * @param path the path relative to the Studio base URL, with no query, so it carries no IdP parameter
+     * @param expectedStatus the status the chain must answer to both requests
+     */
+    protected static void assertCallbackChainSecurityHeadersOn(SsoBrowser browser,
+                                                               String path,
+                                                               int expectedStatus) throws Exception {
+        var plain = browser.get(path);
+        assertEquals(expectedStatus, plain.statusCode(), path + ": status");
+        assertResponseIndependentHeaders(plain, path, false);
+        assertNoStore(plain, path);
+        var secure = getMarkedSecure(browser, path);
+        var label = path + " (secure)";
+        assertEquals(expectedStatus, secure.statusCode(), label + ": status");
+        assertResponseIndependentHeaders(secure, label, true);
+        assertNoStore(secure, label);
+    }
+
+    // V4: the request header that Studio's forwarded-header filter turns into a secure request
+    private static HttpResponse<String> getMarkedSecure(SsoBrowser browser, String path) throws Exception {
+        return browser.get(path, Map.of("X-Forwarded-Proto", "https"));
+    }
+
+    // V4: the headers that Studio writes before any chain filter runs, so no response can drop or replace them
+    private static void assertResponseIndependentHeaders(HttpResponse<?> response, String label, boolean secure) {
+        var headers = response.headers();
+        assertEquals("nosniff", headers.firstValue("X-Content-Type-Options").orElse(null),
+                label + ": X-Content-Type-Options");
+        assertEquals("DENY", headers.firstValue("X-Frame-Options").orElse(null), label + ": X-Frame-Options");
+        assertEquals("0", headers.firstValue("X-XSS-Protection").orElse(null), label + ": X-XSS-Protection");
+        if (secure) {
+            assertEquals("max-age=31536000 ; includeSubDomains",
+                    headers.firstValue("Strict-Transport-Security").orElse(null),
+                    label + ": Strict-Transport-Security");
+        } else {
+            assertFalse(headers.firstValue("Strict-Transport-Security").isPresent(),
+                    label + ": Strict-Transport-Security must be absent on plain HTTP");
+        }
+    }
+
+    // V4: the response's own cache policy must still forbid storing it
+    private static void assertNoStore(HttpResponse<?> response, String label) {
+        assertTrue(response.headers().firstValue("Cache-Control").orElse("").contains("no-store"),
+                label + ": Cache-Control must carry no-store");
     }
 
     // V10: sys.json and http.json are authenticated by the browser's session cookie alone

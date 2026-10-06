@@ -44,8 +44,9 @@ class SamlTest extends AbstractKeycloakTest {
 
                 // SP-initiated logout sends a SAML LogoutRequest to the IdP Single Logout Service.
                 var logoutDestination = browser.logoutViaSaml();
+                // V3: a fixed message; the destination can carry the signed LogoutRequest
                 assertTrue(logoutDestination.startsWith(authServerUrl + "/realms/openlstudio/protocol/saml"),
-                        "Logout must target the IdP Single Logout Service: " + logoutDestination);
+                        "Logout must target the IdP Single Logout Service");
 
                 // Local session cleared; the IdP requires re-authentication.
                 assertRestUnauthorized(browser);
@@ -71,7 +72,8 @@ class SamlTest extends AbstractKeycloakTest {
         });
     }
 
-    // V4: the SAML metadata, REST and catch-all chains send the default security headers, before and after login
+    // V4: the SAML logout, metadata, assertion consumer, AuthnRequest, REST and catch-all chains send the default
+    // security headers, before and after login, and Strict-Transport-Security on a request marked secure only
     @Test
     void securityHeaders() throws Exception {
         withSamlStudio(browser -> {
@@ -84,10 +86,37 @@ class SamlTest extends AbstractKeycloakTest {
             assertStatusAndSecurityHeaders(browser, "/saml2/service-provider-metadata/webstudio", HttpStatus.SC_OK);
             assertStatusAndSecurityHeaders(browser, "/rest/users/profile", HttpStatus.SC_UNAUTHORIZED);
             assertStatusAndSecurityHeaders(browser, "/", HttpStatus.SC_MOVED_TEMPORARILY);
+            // V4: the same chains and the AuthnRequest chain marked secure (X-Forwarded-Proto: https) also send
+            // Strict-Transport-Security
+            assertSecureSecurityHeadersOn(browser, "/saml2/service-provider-metadata/webstudio", HttpStatus.SC_OK);
+            assertSecureSecurityHeadersOn(browser, "/rest/users/profile", HttpStatus.SC_UNAUTHORIZED);
+            assertSecureSecurityHeadersOn(browser, "/", HttpStatus.SC_MOVED_TEMPORARILY);
+            assertSecureSecurityHeadersOn(browser, "/saml2/authenticate/webstudio", HttpStatus.SC_OK);
+            // V4: the assertion consumer chain, asked without a SAMLResponse, rejects with Jetty's error page; it is
+            // asked only before login, because the failed authentication clears the security context
+            assertCallbackChainSecurityHeadersOn(browser, "/login/saml2/sso/webstudio", HttpStatus.SC_UNAUTHORIZED);
 
             // After login: the REST chain serves the authenticated session.
             browser.loginViaSaml("admin", password("admin"));
             assertStatusAndSecurityHeaders(browser, "/rest/users/profile", HttpStatus.SC_OK);
+            // V4: the AuthnRequest that the login posted to the IdP came as an HTTP-POST binding form
+            var authnRequest = browser.lastStudioResponse("/saml2/authenticate/webstudio");
+            assertEquals(HttpStatus.SC_OK, authnRequest.statusCode(), "/saml2/authenticate/**: status");
+            assertSecurityHeaders(authnRequest, "/saml2/authenticate/**");
+            // V4: the real assertion consumer callback rotates the session ID and sets the new cookie, which Jetty
+            // marks with its own Expires, so the cache writer backs off on it by design; the other headers must stay
+            var callback = browser.lastStudioResponse("/login/saml2/sso/webstudio");
+            assertEquals(HttpStatus.SC_MOVED_TEMPORARILY, callback.statusCode(), "/login/saml2/**: status");
+            assertCookieSettingSecurityHeaders(callback, "/login/saml2/**");
+
+            // V4: logging out answers with the LogoutRequest form and the cookie of the session that keeps the
+            // request, so the cache writer backs off there too; the ended session then gets the full set, plain and
+            // marked secure
+            var logout = browser.get("/logout");
+            assertEquals(HttpStatus.SC_OK, logout.statusCode(), "/logout: status");
+            assertCookieSettingSecurityHeaders(logout, "/logout");
+            assertStatusAndSecurityHeaders(browser, "/logout", HttpStatus.SC_UNAUTHORIZED);
+            assertSecureSecurityHeadersOn(browser, "/logout", HttpStatus.SC_UNAUTHORIZED);
         });
     }
 
