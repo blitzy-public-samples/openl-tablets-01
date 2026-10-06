@@ -159,8 +159,9 @@ class InstanceSecretKeyTest {
 
         long checked = System.nanoTime();
         IOException e = assertThrows(IOException.class, () -> InstanceSecretKey.get(dir, true, checked));
-        // Checked again under the lock, the unchanged file fails from memory; a read-only lookup fails without a check.
+        // A lookup that may create reads the unchanged file again, without waiting, and fails.
         assertThrows(IOException.class, () -> InstanceSecretKey.get(dir, true, checked));
+        // A read-only lookup at the same moment fails from memory, without reading the file.
         assertThrows(IOException.class, () -> InstanceSecretKey.get(dir, false, checked));
 
         String message = e.getMessage();

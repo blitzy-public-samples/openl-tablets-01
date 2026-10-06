@@ -680,11 +680,21 @@ the old location and requires moving it manually.
 
 ### What Moves to the Shared Directory
 
+<!-- V6: instances share one secret.key or the shared instance key file -->
+
 - **Administration settings** — every instance reads the same `<application-name>.properties`, so a change applied in
   one instance's **Administration** area takes effect everywhere. The passwords in that file are stored as `ENC(...)`,
-  so every instance needs the same `secret.key`: an instance configured with a different key reads such a password as
-  an empty value. Changing the key therefore means changing it on all instances together and re-entering the affected
-  passwords afterwards, which saves them encrypted with the new key.
+  so every instance must be able to decrypt them. Two arrangements are supported: the same explicit `secret.key` on
+  every instance, or `secret.key` left blank on every instance, so that all of them use the shared instance key file
+  `.openl-secret-key` beside the settings file. An instance decrypts an `ENC(v2:...)` value with its configured
+  `secret.key` first and then with the instance key file. A value encrypted with the instance key therefore stays
+  readable on an instance that configures a `secret.key`, while a value encrypted with a configured `secret.key` reads
+  as an empty value on an instance whose `secret.key` is blank or different, and OpenL logs an ERROR. Legacy `ENC(...)`
+  values without the `v2:` prefix are decrypted with `secret.key` only, so they need the same `secret.key` on every
+  instance until a save rewrites them as `ENC(v2:...)`. Changing a configured `secret.key` means changing it on all
+  instances together and re-entering the passwords it encrypted, which saves them encrypted with the new key. Losing or
+  replacing `.openl-secret-key` makes the values it encrypted read as an empty value on every instance, and their
+  passwords then have to be entered again.
 - **User workspace and project history** — users see the same open projects and history on whichever instance serves
   them.
 - **Locks** — an instance sees projects locked by users on other instances.

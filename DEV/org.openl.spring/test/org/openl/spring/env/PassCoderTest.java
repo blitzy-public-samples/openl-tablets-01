@@ -62,8 +62,8 @@ class PassCoderTest {
     private static final SecureRandom RANDOM = new SecureRandom();
     private static final String PASS = random(16);
     private static final String KEY = random(32);
-    // V6: a random wrong key passes the CBC padding check about once in 256 runs and yields garbage instead of an
-    // exception, so only a candidate that is proven to fail the legacy decoding is used.
+    // V6: WRONG_KEY is a generated key proven to fail the legacy decoding of PASS encoded under KEY.
+    // A random wrong key passes the CBC padding check about once in 256 runs and yields garbage, not an exception.
     private static final String WRONG_KEY = wrongKey();
 
     @Test
@@ -90,7 +90,7 @@ class PassCoderTest {
 
     @Test
     void testEmpty() throws Exception {
-        // V6: the generated PASS and KEY replace the literal value and key; PASS is compared without being printed.
+        // V6: generated values and fixed-message assertions keep secrets out of test reports.
         assertSamePlain(PASS, PassCoder.encode(PASS, "", CIPHER), "An empty key must leave the value as it is");
         assertSamePlain(PASS, PassCoder.encode(PASS, " ", CIPHER), "A blank key must leave the value as it is");
         assertSamePlain(PASS, PassCoder.encode(PASS, null, CIPHER), "A null key must leave the value as it is");
@@ -108,9 +108,9 @@ class PassCoderTest {
         assertEquals("", PassCoder.decode("", "", CIPHER));
     }
 
-    // V6: the tests below prove the legacy format unchanged and cover the v2 format (AES-256-GCM with a
-    // PBKDF2-derived key). Each v2 encoding derives a key through 600,000 PBKDF2 iterations, so the class reuses
-    // one shared encoding wherever a test only needs some valid v2 value.
+    // V6: the tests below prove the legacy format unchanged and cover the v2 format, AES-256-GCM with a PBKDF2 key.
+    // Each v2 encoding derives a key through 600,000 PBKDF2 iterations, so the class reuses one shared encoding
+    // wherever a test only needs some valid v2 value.
 
     /**
      * Recomputes the legacy format with the JDK alone: AES-128-CBC, PKCS5 padding, a zero IV and the first 16 bytes
@@ -248,8 +248,7 @@ class PassCoderTest {
         assertThrows(NullPointerException.class, () -> PassCoder.encodeV2(null, KEY));
     }
 
-    // V6: encodeV2 proves the key it encrypted with, so the reads of a saved value find it among the authenticated
-    // keys.
+    // V6: encodeV2 proves the key it encrypted with, so reads of the value find it among the authenticated keys.
     @Test
     void v2EncodingProvesItsKey() {
         var payload = Base64.getDecoder().decode(encoded.substring(PassCoder.V2_PREFIX.length()));
@@ -296,8 +295,7 @@ class PassCoderTest {
         assertFalse(PassCoder.KEYS.isAuthenticated(wrong), "A rejected key must never count as authenticated");
     }
 
-    // V6: wrong keys tried against a live value never evict the key that authenticated it, so the next read of the
-    // value derives nothing.
+    // V6: wrong keys tried against a live value never evict its key, so the next read derives nothing.
     @Test
     void v2RejectedKeysNeverEvictTheAuthenticatedKey() throws Exception {
         var keyMaterial = random(32);
@@ -436,8 +434,8 @@ class PassCoderTest {
         assertEquals(300, derivations.get());
     }
 
-    // V6: the keys of live ciphertexts stay however many further values are saved, since a group lives as long as
-    // its ciphertext is configured.
+    // V6: the proven keys of live ciphertexts stay however many further values are saved.
+    // A proven group is never evicted by count; only forget drops it.
     @Test
     void keyCacheKeepsALiveWorkingSetWhateverIsSavedAfterIt() throws Exception {
         var cache = cache(256);
@@ -505,8 +503,7 @@ class PassCoderTest {
         }
     }
 
-    // V6: wrong keys tried against an authenticated salt are kept apart from its key, at most REJECTED_PER_SALT of
-    // them, and never displace the key or a candidate of another salt.
+    // V6: an authenticated salt keeps at most REJECTED_PER_SALT wrong keys; they never displace its key or a candidate.
     @Test
     void keyCacheRejectedKeysNeverDisplaceTheAuthenticatedKey() throws Exception {
         int rejected = PassCoder.KeyCache.REJECTED_PER_SALT;
