@@ -56,6 +56,7 @@ PASS GATES:
 - Gate 3 final aggregate: after every directive has run, the enforcement check runs once over the whole Dependency-Check report and the `STUDIO/studio-ui` `npm audit` report. That `npm audit` run follows the npm scan failure rule: when it is not executed, the aggregate records "not executed: npm scan failure: `<error>`" for its `STUDIO/studio-ui` part and NEVER reports that part as passed. Its failures go to the Project Guide hand-off, and it reverts nothing.
 
 PROJECT GUIDE HAND-OFF:
+
 the final Project Guide lists, as human tasks:
 - every switch property with its recommended secure value, what flipping it breaks, and the target release;
 - every Operator-only finding;
