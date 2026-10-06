@@ -115,16 +115,22 @@ browser.
   operating system, so a name with a Windows drive prefix such as `C:x` too), starts with a space, ends with a dot or a
   space, or is a reserved name such as `CON`, `NUL` or `COM1` in upper case. OpenL Studio does not open the workspace of
   such a user. The startup conversion of legacy `.studioProps` project metadata also leaves such folders out and logs a
-  WARN for each of them except a dangling link, which is not a folder. In user workspaces and in a `repo-file` design
-  repository, the project files API no longer follows a symbolic link that leads out of the project folder, outside the
-  repository or into another project: listings and searches leave the entry out, and reading, updating, copying, moving,
-  exporting or writing through it answers `400` with `openl.error.400.file.path.invalid.message`. In a `repo-file`
-  design repository, creating or copying a project answers the same `400` when the new project folder would be reached
-  through such a link. Creating a project from uploaded files and copying a project also answer that `400` for a project
-  name or path holding a control character, which was previously removed silently. A project archive with an entry name
-  that is not a valid relative path, such as one with a `..` segment or a leading `/`, is refused before anything is
-  written. Copying a project answers that `400` as well when a file of the project being copied leads out of its folder
-  through a link, in a `repo-file` design repository or, for an opened project, in the user's workspace.
+  WARN for each of them except a dangling link, which is not a folder. It likewise leaves out, with a WARN each, a user
+  folder whose `.metainfo` is a symbolic link, with all its projects, and a project not yet converted whose folder is a
+  symbolic link to a folder or whose `.studioProps`, `.history`, `.studioProps/.version` or
+  `.studioProps/file-properties` is a symbolic link; a dangling `.metainfo` or metadata link counts too, and the legacy
+  metadata of a project left out is neither converted nor deleted. A symbolic link inside `.studioProps/file-properties`
+  is not followed, so the project is converted without the file baselines behind it. In user workspaces and in a
+  `repo-file` design repository, the project files API no longer follows a symbolic link that leads out of the project
+  folder, outside the repository or into another project: listings and searches leave the entry out, and reading,
+  updating, copying, moving, exporting or writing through it answers `400` with
+  `openl.error.400.file.path.invalid.message`. In a `repo-file` design repository, creating or copying a project answers
+  the same `400` when the new project folder would be reached through such a link. Creating a project from uploaded
+  files and copying a project also answer that `400` for a project name or path holding a control character, which was
+  previously removed silently. A project archive with an entry name that is not a valid relative path, such as one with
+  a `..` segment or a leading `/`, is refused before anything is written. Copying a project answers that `400` as well
+  when a file of the project being copied leads out of its folder through a link, in a `repo-file` design repository or,
+  for an opened project, in the user's workspace.
 
   In a `repo-file` design repository, and in the working tree of a `repo-git` design repository, uploading files or a
   template over an existing project answers that `400` when any entry of the existing project folder is a symbolic

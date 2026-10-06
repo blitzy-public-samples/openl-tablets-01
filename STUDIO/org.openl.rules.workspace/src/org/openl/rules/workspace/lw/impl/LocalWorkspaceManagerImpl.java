@@ -129,16 +129,16 @@ public class LocalWorkspaceManagerImpl implements LocalWorkspaceManager, LocalWo
                 return userDir;
             }
         } catch (IllegalArgumentException e) {
-            // V1: an id the path API cannot parse, such as one with a NUL byte, gets the same rejection, with the
-            // parser failure as its cause
+            // V1: an id the path API cannot parse, such as one with a NUL byte, gets the same rejection.
+            // The parser failure is kept as its cause.
             throw new IllegalArgumentException(INVALID_USER_ID, e);
         }
         throw new IllegalArgumentException(INVALID_USER_ID);
     }
 
-    // V1: real-path containment of the user's folder under the workspace home. No path check is shared between the
-    // workspace, file, project and upload surfaces, so it stays private to this class, not in the dedicated file the
-    // Minimal Change Rule prefers
+    // V1: real-path containment of the user's folder under the workspace home.
+    // No path check is shared between the workspace, file, project and upload surfaces, so this check stays private
+    // to this class, not in the dedicated file the Minimal Change Rule prefers.
     /**
      * Checks that the user folder is a real folder of its own right under the workspace root.
      *

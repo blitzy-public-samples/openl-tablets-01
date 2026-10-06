@@ -149,8 +149,9 @@ public class Migrator {
                 || LEGACY_SINGLE_USERNAME.equals(username)) {
             return;
         }
-        // V1: validate the user name before it is resolved as a path segment. The blank check above already
-        // returned for null; the null check states it, so the name is non-null for the checks below.
+        // V1: validate the user name before it is resolved as a path segment.
+        // The blank check above already returned for null; the null check states it, so the name is non-null for
+        // the checks below.
         if (username == null || !isValidWorkspaceFolderName(username)) {
             // V1: the rejected name is logged in its printable form.
             log.warn("The single-user name '{}' is not a valid workspace folder name; the move is skipped.",
@@ -170,8 +171,9 @@ public class Migrator {
         if (!Files.isDirectory(workspacesRoot)) {
             return; // nothing to migrate, as the no-legacy return below
         }
-        // V1: a folder that leads elsewhere and a folder that cannot be resolved (a link loop, a denied access) are
-        // both skipped, each with its own WARN that names the user, and the cause, in their printable form.
+        // V1: a folder that leads elsewhere and a folder that cannot be resolved are both skipped.
+        // A link loop or a denied access makes a folder unresolvable. Each skip logs its own WARN with the printable
+        // user name, and the WARN of an unresolvable folder adds the printable cause.
         try {
             if (!isOwnWorkspaceFolder(workspacesRoot, username)) {
                 log.warn("The single-user name '{}' resolves outside the workspace root; the move is skipped.",
@@ -234,31 +236,33 @@ public class Migrator {
     }
 
     /**
-     * V1 surface A (workspace directory) containment check, private to {@code Migrator}: the user's folder must sit
-     * at its own lexical place under the real workspace root.
+     * V1 surface A (workspace directory) containment check, private to {@code Migrator}: the child of an existing
+     * anchor folder, named by a single name, must sit at its own lexical place under the real anchor.
      *
-     * <p>The configured root is the anchor: links in its own path are trusted and followed. The user's folder is the
-     * boundary: no existing link from the root down to it may lead elsewhere, neither outside the root nor into
-     * another user's folder. The part of the folder that does not exist yet cannot contain a link, so the deepest
-     * existing ancestor is resolved and the missing tail re-appended. A dangling link counts as existing and leads
-     * to a missing location, which rejects it.
+     * <p>The anchor is trusted: the configured workspace root, whose own path may hold links that are followed, or a
+     * user, project or {@code .studioProps} folder that has passed this check itself. The child is the boundary: no
+     * existing link from the anchor down to it may lead elsewhere, neither outside the anchor nor into a sibling, such
+     * as another user's folder or another project. The part of the child that does not exist yet cannot contain a
+     * link, so the deepest existing ancestor is resolved and the missing tail re-appended, which accepts an absent
+     * child. A dangling link counts as existing and leads to a missing location, which rejects it.
      *
-     * @param workspacesRoot an existing workspace root
-     * @param username a user name that passed {@link #isValidWorkspaceFolderName(String)}
-     * @return {@code true} if the user's folder resolves to its own lexical place under the real root
-     * @throws IOException if the root or the user's folder cannot be resolved, for example because of a link loop or
-     *         a denied access
+     * @param anchor an existing folder: the workspace root, a user folder, a project folder or its {@code .studioProps}
+     * @param name a single folder name: a user name that passed {@link #isValidWorkspaceFolderName(String)}, a name
+     *        listed in the anchor or the fixed name of a metadata entry
+     * @return {@code true} if the child resolves to its own lexical place under the real anchor
+     * @throws IOException if the anchor or the child cannot be resolved, for example because of a link loop or a
+     *         denied access
      */
-    private static boolean isOwnWorkspaceFolder(Path workspacesRoot, String username) throws IOException {
-        var anchorReal = workspacesRoot.toRealPath();
+    private static boolean isOwnWorkspaceFolder(Path anchor, String name) throws IOException {
+        var anchorReal = anchor.toRealPath();
         // Computed lexically, so a boundary that is itself a link is caught by the walk below.
-        var boundary = anchorReal.resolve(username).normalize();
+        var boundary = anchorReal.resolve(name).normalize();
         var existing = boundary;
         while (existing != null && !Files.exists(existing, LinkOption.NOFOLLOW_LINKS)) {
             existing = existing.getParent();
         }
         if (existing == null) {
-            // Defensive: the walk stops at the real root at the latest, which exists unless removed meanwhile.
+            // Defensive: the walk stops at the real anchor at the latest, which exists unless removed meanwhile.
             return false;
         }
         // V1: only a missing location is a rejection here; any other resolution failure reaches the caller.
@@ -274,15 +278,15 @@ public class Migrator {
     }
 
     /**
-     * V1 surface A (workspace directory) log form of a text that holds the single-user name or a user folder name
-     * listed in the workspace root, such as the name itself or the description of an exception whose message holds
-     * the name's path: every ISO control character and the
+     * V1 surface A (workspace directory) log form of a text that holds the single-user name, a user folder name
+     * listed in the workspace root or a project folder name listed in a user folder, such as the name itself or the
+     * description of an exception whose message holds the name's path: every ISO control character and the
      * Unicode line and paragraph separators, which some log viewers render as a line break, are replaced with
      * {@code _}, so the text can neither break its log line nor forge another one.
      *
      * @param text the text to log; the callers pass a single-user name already checked to be non-blank, a user folder
-     *        name listed in the workspace root or an exception description, and {@code null} is written as
-     *        {@code null}
+     *        name listed in the workspace root, a project folder name listed in a user folder or an exception
+     *        description, and {@code null} is written as {@code null}
      * @return the text with every such character replaced
      */
     private static String printable(@Nullable String text) {
@@ -306,7 +310,11 @@ public class Migrator {
      * legacy {@code .studioProps} folder and the in-project edit history are deleted right away.
      *
      * <p>V1: a user folder that is not a valid workspace folder of its own, such as a link out of the workspace
-     * root or into another user's folder, is skipped with a WARN.
+     * root or into another user's folder, or whose {@code .metainfo} folder does not sit at its own place in it, is
+     * skipped with a WARN. So is a project folder that does not sit at its own place in its user folder, or whose
+     * {@code .studioProps}, {@code .history}, {@code .studioProps/.version} or {@code .studioProps/file-properties}
+     * entry does not sit at its own place in its parent folder. A file link inside {@code file-properties} is never
+     * read.
      */
     private static void migrateUserWorkspacesToMetainfoRegistry() {
         String workspacePath = Props.text(AdministrationSettings.USER_WORKSPACE_HOME);
@@ -323,7 +331,7 @@ public class Migrator {
         try (var userDirs = Files.list(workspacesRoot)) {
             userDirs.filter(Files::isDirectory)
                     .filter(dir -> !dir.getFileName().toString().startsWith("."))
-                    // V1: only a valid user folder of its own is converted, so nothing behind a link is touched.
+                    // V1: the user folder, its .metainfo, projects and their metadata must each sit at its own place.
                     .filter(dir -> isOwnUserWorkspace(workspacesRoot, dir))
                     .forEach(Migrator::migrateUserWorkspace);
         } catch (IOException e) {
@@ -365,6 +373,19 @@ public class Migrator {
     }
 
     private static void migrateUserWorkspace(Path userDir) {
+        // V1: records are written only into a .metainfo folder at its own place in the user folder, or an absent one.
+        var userName = userDir.getFileName().toString();
+        try {
+            if (!isOwnWorkspaceFolder(userDir, MetainfoRegistry.METAINFO_FOLDER)) {
+                log.warn("The metainfo folder of the user workspace folder '{}' resolves outside its own place; its "
+                        + "metainfo migration is skipped.", printable(userName));
+                return;
+            }
+        } catch (IOException | IllegalArgumentException e) {
+            log.warn("The metainfo folder of the user workspace folder '{}' cannot be resolved ({}); its metainfo "
+                    + "migration is skipped.", printable(userName), printable(e.toString()));
+            return;
+        }
         try (var projectDirs = Files.list(userDir)) {
             projectDirs.filter(Files::isDirectory)
                     .filter(dir -> !dir.getFileName().toString().startsWith("."))
@@ -378,6 +399,10 @@ public class Migrator {
         var projectName = projectDir.getFileName().toString();
         if (MetainfoRegistry.exists(userDir, projectName)) {
             // Already migrated. A repeated run must not degrade the record to a local project.
+            return;
+        }
+        // V1: the legacy metadata is read and deleted only when the project and its entries sit at their own place.
+        if (!isOwnLegacyProject(userDir, projectDir)) {
             return;
         }
         try {
@@ -396,6 +421,48 @@ public class Migrator {
         } catch (IOException | RuntimeException e) {
             log.error("Migration of the '{}' project metainfo failed.", projectName, e);
         }
+    }
+
+    /**
+     * V1 surface A (workspace directory) guard of one project's metainfo conversion, which reads the legacy metainfo
+     * of the project folder and then deletes it with the in-project edit history: the project folder must sit at its
+     * own place in the user folder, its {@code .studioProps} and {@code .history} entries at their own place in the
+     * project folder, and the {@code .version} and {@code file-properties} entries of a {@code .studioProps} folder
+     * at their own place in it. Each folder is checked before its entries, and an absent entry is accepted. A project
+     * with an entry that leads elsewhere, a dangling link included, and one with an entry that cannot be resolved are
+     * each skipped with a WARN that names the project folder, the user folder and the cause, in their printable form.
+     *
+     * @param userDir a user folder that passed {@link #isOwnUserWorkspace(Path, Path)}, with its {@code .metainfo}
+     *        folder at its own place
+     * @param projectDir a folder listed in the user folder
+     * @return {@code true} if the project may be converted
+     */
+    private static boolean isOwnLegacyProject(Path userDir, Path projectDir) {
+        var projectName = projectDir.getFileName().toString();
+        var userName = userDir.getFileName().toString();
+        var studioProps = projectDir.resolve(".studioProps");
+        try {
+            // V1: each folder is checked before its entries, so every check resolves an anchor at its own place.
+            if (isOwnWorkspaceFolder(userDir, projectName)
+                    && isOwnWorkspaceFolder(projectDir, ".studioProps")
+                    && isOwnWorkspaceFolder(projectDir, ".history")
+                    && (!Files.isDirectory(studioProps, LinkOption.NOFOLLOW_LINKS)
+                            || (isOwnWorkspaceFolder(studioProps, ".version")
+                                    && isOwnWorkspaceFolder(studioProps, "file-properties")))) {
+                return true;
+            }
+            log.warn("The project folder '{}' of the user workspace folder '{}', or its legacy metainfo, resolves "
+                    + "outside its own place; its metainfo migration is skipped.",
+                    printable(projectName),
+                    printable(userName));
+        } catch (IOException | IllegalArgumentException e) {
+            log.warn("The project folder '{}' of the user workspace folder '{}', or its legacy metainfo, cannot be "
+                    + "resolved ({}); its metainfo migration is skipped.",
+                    printable(projectName),
+                    printable(userName),
+                    printable(e.toString()));
+        }
+        return false;
     }
 
     /**
@@ -435,7 +502,9 @@ public class Migrator {
             return baselines;
         }
         try (var stream = Files.walk(filePropertiesDir)) {
-            for (Path file : (Iterable<Path>) stream.filter(Files::isRegularFile)::iterator) {
+            // V1: a file link inside file-properties is never read; the walk never descends into a folder link.
+            var regularFiles = stream.filter(path -> Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS));
+            for (Path file : (Iterable<Path>) regularFiles::iterator) {
                 var baseline = legacyBaseline(file);
                 if (baseline != null) {
                     baselines.put("/" + filePropertiesDir.relativize(file).toString().replace('\\', '/'), baseline);

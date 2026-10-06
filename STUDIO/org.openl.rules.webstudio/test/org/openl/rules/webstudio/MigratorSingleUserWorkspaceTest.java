@@ -22,6 +22,7 @@ import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.StringJoiner;
 import java.util.TreeMap;
 import java.util.stream.Stream;
@@ -118,8 +119,8 @@ class MigratorSingleUserWorkspaceTest {
         assertTrue(Files.exists(root.resolve("DEFAULT")), "Blank or absent configuration is a no-op, not a failure.");
     }
 
-    // V1: a nested name no longer reaches the move, so the failing move takes a single folder name of 256 ASCII
-    // characters. It passes every name check and exceeds the 255-byte file name limit of ext4, APFS and NTFS.
+    // V1: a valid single folder name of 256 ASCII characters passes every name check, yet the move itself fails.
+    // The name exceeds the 255-byte file name limit of ext4, APFS and NTFS.
     @Test
     @StdIo
     void logsInsteadOfThrowingWhenMoveFails(StdErr err) throws IOException {
@@ -159,10 +160,11 @@ class MigratorSingleUserWorkspaceTest {
         assertFalse(Files.exists(absolute), "Nothing is created at the absolute location.");
     }
 
-    // V1: surface A lexical matrix, rows A1-A11 and A14. The display name is
-    // the row id only: the payloads carry NUL and control characters that would corrupt the test reports.
-    // V1: each row also gets its logged name and the captured log. Every row is skipped on every OS, the
-    // drive-relative A4b included, because the raw name is checked before path parsing can drop a drive prefix.
+    // V1: surface A lexical matrix, rows A1-A11 and A14.
+    // The display name is only the row id: the payloads' NUL and control characters would corrupt the test reports.
+    // V1: each row also gets its logged name and the captured log.
+    // Every row is skipped on every OS, the drive-relative A4b included, because the raw name is checked before path
+    // parsing can drop a drive prefix.
     @ParameterizedTest(name = "{0}")
     @MethodSource("lexicalPayloads")
     @StdIo
@@ -199,9 +201,10 @@ class MigratorSingleUserWorkspaceTest {
                 "V1 rejection: a look-alike separator keeps the workspace or moves it to a direct child of the root.");
     }
 
-    // V1: surface A, the name must be a single folder name, as the user workspace directory requires. A nested name
-    // would move the legacy workspace into another user's folder and a leading dot would hide it as a service folder,
-    // so each is skipped with the invalid-name WARN and nothing of the sibling workspace is written (row A16).
+    // V1: surface A, the name must be a single folder name, as the user workspace directory requires.
+    // A nested name would move the legacy workspace into another user's folder and a leading dot would hide it as a
+    // service folder, so each is skipped with the invalid-name WARN and nothing of the sibling workspace is written
+    // (row A16).
     @ParameterizedTest(name = "{0}")
     @ValueSource(strings = {"bob/x", "x/", "bob/x/y", ".hidden"})
     @StdIo
@@ -221,9 +224,9 @@ class MigratorSingleUserWorkspaceTest {
         assertSkipLogged(err, invalidNameMessage(userId));
     }
 
-    // V1: surface A row A12, the user's folder is a link to a directory outside the workspace root. The id is skipped
-    // with the escape WARN. The nested id is not a single folder name, so it is skipped with the invalid-name WARN
-    // before the link is followed.
+    // V1: surface A row A12, the user's folder is a link to a directory outside the workspace root.
+    // The id is skipped with the escape WARN. The nested id is not a single folder name, so it is skipped with the
+    // invalid-name WARN before the link is followed.
     @ParameterizedTest(name = "{0}")
     @ValueSource(strings = {"victim", "victim/x"})
     @DisabledOnOs(OS.WINDOWS)
@@ -246,8 +249,8 @@ class MigratorSingleUserWorkspaceTest {
         assertSkipLogged(err, linkSkipMessage(userId));
     }
 
-    // V1: surface A row A13, the user's folder is a dangling link to a missing path outside the workspace root. The id
-    // is skipped with the escape WARN. The nested id is not a single folder name, so it is skipped with the
+    // V1: surface A row A13, the user's folder is a dangling link to a missing path outside the workspace root.
+    // The id is skipped with the escape WARN. The nested id is not a single folder name, so it is skipped with the
     // invalid-name WARN before the link is followed.
     @ParameterizedTest(name = "{0}")
     @ValueSource(strings = {"ghost", "ghost/x"})
@@ -269,8 +272,8 @@ class MigratorSingleUserWorkspaceTest {
         assertSkipLogged(err, linkSkipMessage(userId));
     }
 
-    // V1: surface A row A16, the user's folder is a link to another user's folder inside the workspace root. The id is
-    // skipped with the escape WARN. The nested id is not a single folder name, so it is skipped with the
+    // V1: surface A row A16, the user's folder is a link to another user's folder inside the workspace root.
+    // The id is skipped with the escape WARN. The nested id is not a single folder name, so it is skipped with the
     // invalid-name WARN before the link is followed.
     @ParameterizedTest(name = "{0}")
     @ValueSource(strings = {"alice", "alice/x"})
@@ -294,9 +297,9 @@ class MigratorSingleUserWorkspaceTest {
         assertSkipLogged(err, linkSkipMessage(userId));
     }
 
-    // V1: the user's folder is a link to itself. The loop cannot be resolved, so the id is skipped with the WARN of a
-    // folder that cannot be resolved, not with the escape WARN. The nested id is not a single folder name, so it is
-    // skipped with the invalid-name WARN before the loop is followed.
+    // V1: the user's folder is a link to itself, a loop that cannot be resolved.
+    // The id is skipped with the WARN of a folder that cannot be resolved, not with the escape WARN. The nested id is
+    // not a single folder name, so it is skipped with the invalid-name WARN before the loop is followed.
     @ParameterizedTest(name = "{0}")
     @ValueSource(strings = {"loop", "loop/x"})
     @DisabledOnOs(OS.WINDOWS)
@@ -322,8 +325,9 @@ class MigratorSingleUserWorkspaceTest {
                 "V1 rejection: a folder that cannot be resolved is not reported as resolving outside the root.");
     }
 
-    // V1: a link loop whose name holds a C1 control or a Unicode line or paragraph separator. The failure behind the
-    // WARN quotes the raw path, and the WARN shows both the name and that failure with the character replaced.
+    // V1: a link loop whose name holds a C1 control or a Unicode line or paragraph separator.
+    // The failure behind the WARN quotes the raw path, and the WARN shows both the name and that failure with the
+    // character replaced.
     @ParameterizedTest(name = "{0}")
     @MethodSource("lineBreakingPayloads")
     @DisabledOnOs(OS.WINDOWS)
@@ -414,8 +418,9 @@ class MigratorSingleUserWorkspaceTest {
         assertConverted(jdoe, "Proj", repositoryId);
     }
 
-    // V1: the startup order of migrate() for a valid single-user name: the legacy workspace moves to that name, and the
-    // conversion that follows records its legacy project there without any skip.
+    // V1: the startup order of migrate() for a valid single-user name, the move and then the conversion.
+    // The legacy workspace moves to that name, and the conversion that follows records its legacy project there
+    // without any skip.
     @Test
     @StdIo
     void startupConversionRecordsTheMovedWorkspace(StdErr err) throws IOException {
@@ -434,9 +439,9 @@ class MigratorSingleUserWorkspaceTest {
         assertConverted(openl, "Proj", repositoryId);
     }
 
-    // V1: a user folder whose name is not a valid workspace folder name, such as a reserved name or one holding a
-    // forbidden character, is skipped by the conversion with the invalid-name WARN and keeps its legacy files. Windows
-    // cannot create such a folder.
+    // V1: the conversion skips a user folder whose name is not a valid workspace folder name.
+    // Examples are a reserved name and a name holding a forbidden character. The folder gets the invalid-name WARN
+    // and keeps its legacy files. Windows cannot create such a folder.
     @ParameterizedTest
     @ValueSource(strings = {"CON", "o'x", "a:b"})
     @DisabledOnOs(OS.WINDOWS)
@@ -455,8 +460,9 @@ class MigratorSingleUserWorkspaceTest {
         assertEquals(1, countConversionSkips(err), "V1 rejection: the invalid user folder is skipped once.");
     }
 
-    // V1: a user folder whose name holds a C1 control or a Unicode line or paragraph separator, and which links out of
-    // the workspace root, is skipped by the conversion; the escape WARN shows the name with that character replaced.
+    // V1: the conversion skips a user folder that links out of the workspace root and has a line-breaking name.
+    // The name holds a C1 control or a Unicode line or paragraph separator, and the escape WARN shows it with that
+    // character replaced.
     @ParameterizedTest(name = "{0}")
     @MethodSource("lineBreakingPayloads")
     @DisabledOnOs(OS.WINDOWS)
@@ -478,8 +484,9 @@ class MigratorSingleUserWorkspaceTest {
         assertLogPrintable(err);
     }
 
-    // V1: rows A13 and the link loop for the conversion. Neither a dangling link nor a link loop is a folder, so the
-    // conversion never enters either one and never creates the target of the dangling link.
+    // V1: rows A13 and the link loop for the conversion.
+    // Neither a dangling link nor a link loop is a folder, so the conversion never enters either one and never creates
+    // the target of the dangling link.
     @Test
     @DisabledOnOs(OS.WINDOWS)
     @StdIo
@@ -495,12 +502,13 @@ class MigratorSingleUserWorkspaceTest {
                 "V1 containment: the target of the dangling link is never created.");
         assertEquals(ghostTarget, Files.readSymbolicLink(ghost), "V1 containment: the dangling link keeps its target.");
         assertEquals(ws.resolve("loop"), Files.readSymbolicLink(loop), "V1 containment: the link loop is unchanged.");
-        assertEquals(0, countConversionSkips(err), "V1 rejection: a link that is not a folder never reaches the checks.");
+        assertEquals(0, countConversionSkips(err),
+                "V1 rejection: a link that is not a folder never reaches the checks.");
     }
 
-    // V1: a user folder that links to a directory whose real path exceeds the platform path limit is a folder, yet its
-    // real path cannot be resolved. The conversion skips it with the WARN of a folder that cannot be resolved, which
-    // names the file-system failure, and leaves the legacy project behind the link untouched.
+    // V1: the conversion skips a user folder whose real path exceeds the platform path limit.
+    // The link to the deep directory is a folder, yet its real path cannot be resolved. The WARN of a folder that
+    // cannot be resolved names the file-system failure, and the legacy project behind the link stays untouched.
     @Test
     @DisabledOnOs(OS.WINDOWS)
     @StdIo
@@ -522,6 +530,282 @@ class MigratorSingleUserWorkspaceTest {
         } finally {
             deleteDeepChain(hops);
         }
+    }
+
+    // V1: the conversion skips a project folder that links to a legacy project outside the workspace root.
+    // Nothing outside changes, the user's registry records no outside repository and a regular project converts.
+    @Test
+    @DisabledOnOs(OS.WINDOWS)
+    @StdIo
+    void conversionSkipsProjectFolderThatLinksOutside(StdErr err) throws IOException {
+        var ws = Files.createDirectories(root.resolve("ws"));
+        var alice = Files.createDirectories(ws.resolve("alice"));
+        var outsideTarget = Files.createDirectories(root.resolve("outside"));
+        legacyProject(outsideTarget.resolve("Proj"));
+        var escape = Files.createSymbolicLink(alice.resolve("Escape"), outsideTarget.resolve("Proj"));
+        var repositoryId = legacyProject(alice.resolve("Plain"));
+        var before = outside(root, ws);
+
+        Migrator.migrateUserWorkspacesToMetainfoRegistry(ws);
+
+        assertEquals(before, outside(root, ws), "V1 containment: nothing outside the workspace root changes.");
+        assertLegacyProjectKept(outsideTarget, "Proj");
+        assertEquals(outsideTarget.resolve("Proj"), Files.readSymbolicLink(escape),
+                "V1 containment: the link keeps its target.");
+        assertNotRecorded(alice, "Escape");
+        assertSkipLogged(err, projectOutsideMessage("Escape", "alice"));
+        assertEquals(1, countConversionSkips(err), "V1 rejection: only the linked project folder is skipped.");
+        assertConverted(alice, "Plain", repositoryId);
+    }
+
+    // V1: the conversion skips a project folder that links into a plain sub-folder of another user's workspace.
+    // The workspace of bob is unchanged: team is a project folder of bob without legacy metainfo of its own.
+    @Test
+    @DisabledOnOs(OS.WINDOWS)
+    @StdIo
+    void conversionSkipsProjectFolderThatLinksToSibling(StdErr err) throws IOException {
+        var ws = Files.createDirectories(root.resolve("ws"));
+        var bob = Files.createDirectories(ws.resolve("bob"));
+        var team = Files.createDirectories(bob.resolve("team"));
+        legacyProject(team.resolve("Q"));
+        var alice = Files.createDirectories(ws.resolve("alice"));
+        var sibling = Files.createSymbolicLink(alice.resolve("Sibling"), team.resolve("Q"));
+        var repositoryId = legacyProject(alice.resolve("Plain"));
+        var before = snapshot(bob);
+
+        Migrator.migrateUserWorkspacesToMetainfoRegistry(ws);
+
+        assertEquals(before, snapshot(bob), "V1 containment: the workspace of bob is unchanged.");
+        assertLegacyProjectKept(team, "Q");
+        assertEquals(team.resolve("Q"), Files.readSymbolicLink(sibling), "V1 containment: the link keeps its target.");
+        assertNotRecorded(alice, "Sibling");
+        assertSkipLogged(err, projectOutsideMessage("Sibling", "alice"));
+        assertEquals(1, countConversionSkips(err), "V1 rejection: only the linked project folder is skipped.");
+        assertConverted(alice, "Plain", repositoryId);
+    }
+
+    // V1: the conversion skips a project whose legacy metadata entry links to a valid copy of it outside the root.
+    // Nothing outside changes, the project keeps its link and its files, and a regular project still converts.
+    @ParameterizedTest
+    @ValueSource(strings = {".studioProps", ".history", ".studioProps/.version", ".studioProps/file-properties"})
+    @DisabledOnOs(OS.WINDOWS)
+    @StdIo
+    void conversionSkipsProjectWhoseMetadataLinksOutside(String entry, StdErr err) throws IOException {
+        var ws = Files.createDirectories(root.resolve("ws"));
+        var alice = Files.createDirectories(ws.resolve("alice"));
+        var project = alice.resolve("Proj");
+        legacyProject(project);
+        legacyFileProperties(project);
+        var outsideTarget = Files.createDirectories(root.resolve("outside")).resolve("target");
+        Files.move(project.resolve(entry), outsideTarget);
+        var link = Files.createSymbolicLink(project.resolve(entry), outsideTarget);
+        var repositoryId = legacyProject(alice.resolve("Plain"));
+        var before = outside(root, ws);
+        var projectBefore = snapshot(project);
+
+        Migrator.migrateUserWorkspacesToMetainfoRegistry(ws);
+
+        assertEquals(before, outside(root, ws), "V1 containment: nothing outside the workspace root changes.");
+        assertEquals(projectBefore, snapshot(project), "V1 containment: the skipped project is unchanged.");
+        assertEquals(outsideTarget, Files.readSymbolicLink(link), "V1 containment: the link keeps its target.");
+        assertNotRecorded(alice, "Proj");
+        assertSkipLogged(err, projectOutsideMessage("Proj", "alice"));
+        assertEquals(1, countConversionSkips(err), "V1 rejection: only the project with the link is skipped.");
+        assertConverted(alice, "Plain", repositoryId);
+    }
+
+    // V1: the conversion skips a project whose legacy metadata entry is a dangling link and never creates its target.
+    @ParameterizedTest
+    @ValueSource(strings = {".studioProps", ".history", ".studioProps/.version", ".studioProps/file-properties"})
+    @DisabledOnOs(OS.WINDOWS)
+    @StdIo
+    void conversionSkipsProjectWhoseMetadataIsDanglingLink(String entry, StdErr err) throws IOException {
+        var ws = Files.createDirectories(root.resolve("ws"));
+        var alice = Files.createDirectories(ws.resolve("alice"));
+        var project = alice.resolve("Proj");
+        legacyProject(project);
+        legacyFileProperties(project);
+        Files.move(project.resolve(entry), root.resolve("removed"));
+        var ghostTarget = root.resolve("ghost-target");
+        var link = Files.createSymbolicLink(project.resolve(entry), ghostTarget);
+        var projectBefore = snapshot(project);
+
+        Migrator.migrateUserWorkspacesToMetainfoRegistry(ws);
+
+        assertFalse(Files.exists(ghostTarget, LinkOption.NOFOLLOW_LINKS),
+                "V1 containment: the target of the dangling link is never created.");
+        assertEquals(ghostTarget, Files.readSymbolicLink(link), "V1 containment: the dangling link keeps its target.");
+        assertEquals(projectBefore, snapshot(project), "V1 containment: the skipped project is unchanged.");
+        assertNotRecorded(alice, "Proj");
+        assertSkipLogged(err, projectOutsideMessage("Proj", "alice"));
+        assertEquals(1, countConversionSkips(err), "V1 rejection: the project with the dangling link is skipped once.");
+    }
+
+    // V1: the conversion skips a user folder whose .metainfo links outside the root or to another user's .metainfo.
+    // No record is written behind either link, both user folders stay as they were and a regular user still converts.
+    @Test
+    @DisabledOnOs(OS.WINDOWS)
+    @StdIo
+    void conversionSkipsUserFolderWhoseMetainfoLinksElsewhere(StdErr err) throws IOException {
+        var ws = Files.createDirectories(root.resolve("ws"));
+        var outsideTarget = Files.createDirectories(root.resolve("outside"));
+        var bob = Files.createDirectories(ws.resolve("bob"));
+        var bobMetainfo = Files.createDirectories(bob.resolve(MetainfoRegistry.METAINFO_FOLDER));
+        var alice = Files.createDirectories(ws.resolve("alice"));
+        legacyProject(alice.resolve("Proj"));
+        Files.createSymbolicLink(alice.resolve(MetainfoRegistry.METAINFO_FOLDER), outsideTarget);
+        var carol = Files.createDirectories(ws.resolve("carol"));
+        legacyProject(carol.resolve("Proj"));
+        Files.createSymbolicLink(carol.resolve(MetainfoRegistry.METAINFO_FOLDER), bobMetainfo);
+        var jdoe = Files.createDirectories(ws.resolve("jdoe"));
+        var repositoryId = legacyProject(jdoe.resolve("Proj"));
+        var before = outside(root, ws);
+        var bobBefore = snapshot(bob);
+        var aliceBefore = snapshot(alice);
+        var carolBefore = snapshot(carol);
+
+        Migrator.migrateUserWorkspacesToMetainfoRegistry(ws);
+
+        assertEquals(before, outside(root, ws), "V1 containment: nothing is written outside the workspace root.");
+        assertEquals(bobBefore, snapshot(bob), "V1 containment: nothing is written into the registry of bob.");
+        assertEquals(aliceBefore, snapshot(alice), "V1 containment: the skipped folder of alice is unchanged.");
+        assertEquals(carolBefore, snapshot(carol), "V1 containment: the skipped folder of carol is unchanged.");
+        assertSkipLogged(err, metainfoOutsideMessage("alice"));
+        assertSkipLogged(err, metainfoOutsideMessage("carol"));
+        assertEquals(2, countConversionSkips(err), "V1 rejection: only the two user folders with a link are skipped.");
+        assertConverted(jdoe, "Proj", repositoryId);
+    }
+
+    // V1: the conversion deletes a link planted as the temporary record entry instead of writing the record through it.
+    // The file behind the link stays unchanged, the record is a regular file and the project still converts.
+    @Test
+    @DisabledOnOs(OS.WINDOWS)
+    @StdIo
+    void conversionNeverWritesThroughLinkPlantedAsTemporaryRecord(StdErr err) throws IOException {
+        var ws = Files.createDirectories(root.resolve("ws"));
+        var outsideTarget = Files.createDirectories(root.resolve("outside"));
+        var outsideFile = Files.writeString(outsideTarget.resolve("target"),
+                RandomStringUtils.secure().nextAlphanumeric(16));
+        var alice = Files.createDirectories(ws.resolve("alice"));
+        var repositoryId = legacyProject(alice.resolve("Proj"));
+        var aliceMetainfo = Files.createDirectories(alice.resolve(MetainfoRegistry.METAINFO_FOLDER));
+        var tmp = Files.createSymbolicLink(aliceMetainfo.resolve("Proj.properties.tmp"), outsideFile);
+        var before = outside(root, ws);
+
+        Migrator.migrateUserWorkspacesToMetainfoRegistry(ws);
+
+        assertEquals(before, outside(root, ws), "V1 containment: nothing is written outside the workspace root.");
+        assertFalse(Files.exists(tmp, LinkOption.NOFOLLOW_LINKS),
+                "V1 containment: the planted link is deleted itself.");
+        assertTrue(Files.isRegularFile(aliceMetainfo.resolve("Proj.properties"), LinkOption.NOFOLLOW_LINKS),
+                "V1 containment: the record is a regular file, not a link.");
+        assertEquals(0, countConversionSkips(err), "V1 rejection: a planted temporary entry skips no user folder.");
+        assertConverted(alice, "Proj", repositoryId);
+    }
+
+    // V1: the conversion skips a user folder whose .metainfo is a link loop, with the WARN of an unresolvable entry.
+    @Test
+    @DisabledOnOs(OS.WINDOWS)
+    @StdIo
+    void conversionSkipsUserFolderWhoseMetainfoCannotBeResolved(StdErr err) throws IOException {
+        var ws = Files.createDirectories(root.resolve("ws"));
+        var alice = Files.createDirectories(ws.resolve("alice"));
+        legacyProject(alice.resolve("Proj"));
+        var loop = alice.resolve(MetainfoRegistry.METAINFO_FOLDER);
+        Files.createSymbolicLink(loop, loop);
+        var before = snapshot(alice);
+
+        Migrator.migrateUserWorkspacesToMetainfoRegistry(ws);
+
+        assertEquals(before, snapshot(alice), "V1 containment: the skipped folder of alice is unchanged.");
+        assertUnresolvableSkipLogged(err, metainfoUnresolvableStart("alice"));
+        assertEquals(1, countConversionSkips(err), "V1 rejection: the user folder is skipped once.");
+    }
+
+    // V1: the conversion never reads a file link inside file-properties, nor a file behind a folder link there.
+    // The project still converts with its regular baseline, and the linked files outside stay unchanged.
+    @Test
+    @DisabledOnOs(OS.WINDOWS)
+    @StdIo
+    void conversionIgnoresLinksInsideFileProperties(StdErr err) throws IOException {
+        var ws = Files.createDirectories(root.resolve("ws"));
+        var alice = Files.createDirectories(ws.resolve("alice"));
+        var project = alice.resolve("Proj");
+        var repositoryId = legacyProject(project);
+        var rules = legacyFileProperties(project);
+        var outsideTarget = Files.createDirectories(root.resolve("outside"));
+        var linkedFile = Files.writeString(outsideTarget.resolve("Linked.properties"), legacyBaseline());
+        Files.createSymbolicLink(rules.resolve("Linked.xlsx"), linkedFile);
+        var linkedFolder = Files.createDirectories(outsideTarget.resolve("folder"));
+        Files.writeString(linkedFolder.resolve("Nested.xlsx"), legacyBaseline());
+        Files.createSymbolicLink(rules.resolve("sub"), linkedFolder);
+        var before = outside(root, ws);
+
+        Migrator.migrateUserWorkspacesToMetainfoRegistry(ws);
+
+        assertEquals(before, outside(root, ws), "V1 containment: nothing outside the workspace root changes.");
+        assertEquals(0, countConversionSkips(err), "V1 rejection: a link inside file-properties skips no project.");
+        assertConverted(alice, "Proj", repositoryId);
+        var metainfo = MetainfoRegistry.open(alice).get("Proj");
+        assertNotNull(metainfo, "The converted project is recorded in the registry.");
+        assertEquals(Set.of("/rules/Main.xlsx"), metainfo.files().keySet(),
+                "V1 containment: only the regular baseline is recorded; no linked file is read.");
+    }
+
+    // V1: the conversion skips a project folder whose real path exceeds the platform path limit.
+    // The link to the deep directory is a folder, yet its real path cannot be resolved. The WARN names the file-system
+    // failure, the legacy project behind the link stays untouched and a regular project still converts.
+    @Test
+    @DisabledOnOs(OS.WINDOWS)
+    @StdIo
+    void conversionSkipsProjectFolderThatCannotBeResolved(StdErr err) throws IOException {
+        var ws = Files.createDirectories(root.resolve("ws"));
+        var alice = Files.createDirectories(ws.resolve("alice"));
+        var repositoryId = legacyProject(alice.resolve("Plain"));
+        var hops = new ArrayList<Path>();
+        try {
+            var deep = deepChain(hops);
+            legacyProject(deep.resolve("Proj"));
+            var link = Files.createSymbolicLink(alice.resolve("deep"), deep.resolve("Proj"));
+            assertTrue(Files.isDirectory(link), "The linked deep project is a folder, so the conversion lists it.");
+
+            Migrator.migrateUserWorkspacesToMetainfoRegistry(ws);
+
+            assertLegacyProjectKept(deep, "Proj");
+            assertEquals(deep.resolve("Proj"), Files.readSymbolicLink(link),
+                    "V1 containment: the link keeps its target.");
+            assertNotRecorded(alice, "deep");
+            assertUnresolvableSkipLogged(err, projectUnresolvableStart("deep", "alice"));
+            assertEquals(1, countConversionSkips(err),
+                    "V1 rejection: the unresolvable project folder is skipped once.");
+            assertConverted(alice, "Plain", repositoryId);
+        } finally {
+            deleteDeepChain(hops);
+        }
+    }
+
+    // V1: the project skip WARN shows a line-breaking character of the project folder name replaced.
+    // The names hold a C1 control or a Unicode line or paragraph separator, and the project folder links outside.
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("lineBreakingPayloads")
+    @DisabledOnOs(OS.WINDOWS)
+    @StdIo
+    void replacesLineBreakersInProjectSkipWarning(String row, String name, String loggedName, StdErr err)
+            throws IOException {
+        var ws = Files.createDirectories(root.resolve("ws"));
+        var alice = Files.createDirectories(ws.resolve("alice"));
+        var outsideTarget = Files.createDirectories(root.resolve("outside"));
+        legacyProject(outsideTarget.resolve("Proj"));
+        var link = Files.createSymbolicLink(linkPath(alice, name), outsideTarget.resolve("Proj"));
+        var before = snapshot(outsideTarget);
+
+        Migrator.migrateUserWorkspacesToMetainfoRegistry(ws);
+
+        assertEquals(before, snapshot(outsideTarget), "V1 containment: the outside directory is unchanged.");
+        assertEquals(outsideTarget.resolve("Proj"), Files.readSymbolicLink(link),
+                "V1 containment: the link keeps its target.");
+        assertSkipLogged(err, projectOutsideMessage(loggedName, "alice"));
+        assertLogPrintable(err);
     }
 
     // V1: helpers of the startup conversion checks, private to this class.
@@ -560,6 +844,76 @@ class MigratorSingleUserWorkspaceTest {
                 () -> "V1 rejection: \"" + start + "...\" ends with the skip on the same line.");
     }
 
+    // V1: helpers of the project and metainfo folder checks of the conversion, private to this class.
+    /** The WARN of a project folder that, or whose legacy metainfo, leads outside its own place. */
+    private static String projectOutsideMessage(String loggedProject, String loggedUser) {
+        return "The project folder '" + loggedProject + "' of the user workspace folder '" + loggedUser
+                + "', or its legacy metainfo, resolves outside its own place; " + CONVERSION_SKIP_TEXT;
+    }
+
+    /** The start of the WARN of a project folder that, or whose legacy metainfo, cannot be resolved. */
+    private static String projectUnresolvableStart(String loggedProject, String loggedUser) {
+        return "The project folder '" + loggedProject + "' of the user workspace folder '" + loggedUser
+                + "', or its legacy metainfo, cannot be resolved (";
+    }
+
+    /** The WARN of a user folder whose metainfo folder leads outside its own place. */
+    private static String metainfoOutsideMessage(String loggedUser) {
+        return "The metainfo folder of the user workspace folder '" + loggedUser + "' resolves outside its own place; "
+                + CONVERSION_SKIP_TEXT;
+    }
+
+    /** The start of the WARN of a user folder whose metainfo folder cannot be resolved. */
+    private static String metainfoUnresolvableStart(String loggedUser) {
+        return "The metainfo folder of the user workspace folder '" + loggedUser + "' cannot be resolved (";
+    }
+
+    /**
+     * Asserts that exactly one captured line logs at WARN the given start of the skip of an entry that cannot be
+     * resolved, that it names the file-system failure behind it and that it ends with the skip. The failure text
+     * quotes only the expected start.
+     */
+    private static void assertUnresolvableSkipLogged(StdErr err, String start) {
+        var lines = Arrays.stream(err.capturedLines()).filter(line -> line.contains(start)).toList();
+        assertEquals(1, lines.size(), () -> "V1 rejection: exactly one line logs \"" + start + "...\".");
+        var line = lines.get(0);
+        assertTrue(line.contains("WARN"), () -> "V1 rejection: \"" + start + "...\" is logged at WARN.");
+        assertTrue(line.contains("FileSystemException"),
+                () -> "V1 rejection: \"" + start + "...\" names the file-system failure.");
+        assertTrue(line.endsWith("); " + CONVERSION_SKIP_TEXT),
+                () -> "V1 rejection: \"" + start + "...\" ends with the skip on the same line.");
+    }
+
+    /** Asserts that the user folder records no metainfo of the project; the check never opens the registry. */
+    private static void assertNotRecorded(Path userDir, String projectName) {
+        assertFalse(MetainfoRegistry.exists(userDir, projectName),
+                () -> "V1 containment: " + userDir.getFileName() + " records no metainfo of " + projectName + ".");
+    }
+
+    /**
+     * Adds {@code .studioProps/file-properties/rules/Main.xlsx}, a valid baseline, to a legacy project.
+     *
+     * @param project a project folder built by {@link #legacyProject(Path)}
+     * @return the {@code rules} folder of the file properties
+     */
+    private static Path legacyFileProperties(Path project) throws IOException {
+        var fileProperties = project.resolve(".studioProps").resolve("file-properties");
+        var rules = Files.createDirectories(fileProperties.resolve("rules"));
+        Files.writeString(rules.resolve("Main.xlsx"), legacyBaseline());
+        return rules;
+    }
+
+    /** The properties of a valid legacy file baseline, with random values. */
+    private static String legacyBaseline() {
+        return """
+                unique-id=%s
+                size=%s
+                modified-at-long=%s
+                """.formatted(RandomStringUtils.secure().nextAlphanumeric(8),
+                RandomStringUtils.secure().nextNumeric(4),
+                RandomStringUtils.secure().nextNumeric(13));
+    }
+
     /** The name of each directory of {@link #deepChain(List)}: 255 characters, the longest name ext4 and APFS hold. */
     private static final String DEEP_NAME = "d".repeat(255);
 
@@ -572,7 +926,8 @@ class MigratorSingleUserWorkspaceTest {
      * its parent, {@code root/hop<k>}, so every path handed to the file system stays short; a lookup through a link to
      * the last one follows 21 nested links, within the 40 of Linux and the 32 of macOS.
      *
-     * @param hops receives each link as it is created, so that {@link #deleteDeepChain(List)} can remove a partial chain
+     * @param hops receives each link as it is created, so that {@link #deleteDeepChain(List)} can remove a partial
+     *             chain
      * @return the link to the deepest directory
      */
     private Path deepChain(List<Path> hops) throws IOException {
@@ -684,8 +1039,9 @@ class MigratorSingleUserWorkspaceTest {
                 Arguments.of("A14", "a/../../outside", "a/../../outside"));
     }
 
-    // V1: names that both validators accept although they hold a line separator, a paragraph separator or a C1
-    // control (next line), labelled with their row id and followed by the name as the skip logs it.
+    // V1: line-breaking payloads, labelled with their row id and followed by the name as the skip logs it.
+    // Both validators accept these names, although they hold a line separator, a paragraph separator or a C1
+    // control (next line).
     static Stream<Arguments> lineBreakingPayloads() {
         return Stream.of(Arguments.of("A12-LS", "v\u2028x", "v_x"),
                 Arguments.of("A12-PS", "v\u2029x", "v_x"),
@@ -758,7 +1114,8 @@ class MigratorSingleUserWorkspaceTest {
     private void assertContained(Path ws, Before before, @Nullable Throwable thrown) throws IOException {
         assertTrue(thrown == null || thrown instanceof IllegalArgumentException,
                 () -> "V1 containment: the migration failed with " + describe(thrown));
-        assertEquals(before.outside(), outside(root, ws), "V1 containment: nothing outside the workspace root changes.");
+        assertEquals(before.outside(), outside(root, ws),
+                "V1 containment: nothing outside the workspace root changes.");
         for (var sibling : before.siblings().entrySet()) {
             assertEquals(sibling.getValue(), snapshot(sibling.getKey()),
                     () -> "V1 containment: the folder " + sibling.getKey().getFileName() + " is unchanged.");

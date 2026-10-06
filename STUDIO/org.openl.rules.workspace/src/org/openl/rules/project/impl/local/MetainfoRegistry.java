@@ -142,6 +142,8 @@ public class MetainfoRegistry {
         var metainfoDir = userDir.resolve(METAINFO_FOLDER);
         Files.createDirectories(metainfoDir);
         var tmp = metainfoDir.resolve(projectName + RECORD_SUFFIX + TMP_SUFFIX);
+        // V1: a leftover entry, a planted link included, is deleted itself, so the write never follows a link.
+        Files.deleteIfExists(tmp);
         PropertiesUtils.store(tmp, toProperties(metainfo).entrySet());
         var target = metainfoDir.resolve(projectName + RECORD_SUFFIX);
         try {
