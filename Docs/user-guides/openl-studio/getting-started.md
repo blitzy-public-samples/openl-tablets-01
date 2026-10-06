@@ -172,9 +172,12 @@ To create a personal access token, proceed as follows:
 
     <!-- V8: default and maximum token lifetime -->
 
-    -   **No expiration** creates a token that expires after the default period set by the administrator in `security.pat.default-expiration-days`, 90 days by default. The option keeps its name in the drawer.
-    -   A custom date beyond the maximum period set in `security.pat.max-expiration-days`, 365 days by default, is refused with an error message.
-    -   Tokens created without an expiration date before the upgrade still never expire and are listed with **Never** in the **Expires** column.
+    -   **No expiration** creates a token that expires after the default period set by the administrator in
+        `security.pat.default-expiration-days`, 90 days by default. The option keeps its name in the drawer.
+    -   A custom date beyond the maximum period set in `security.pat.max-expiration-days`, 365 days by default, is
+        refused with an error message.
+    -   Tokens created without an expiration date before the upgrade still never expire and are listed with **Never** in
+        the **Expires** column.
 
 6.  Click **Create**.
 7.  Copy the generated token value immediately.

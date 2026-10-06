@@ -62,9 +62,6 @@ public class RepoFileRoot implements FileRoot {
      * shared between threads.
      */
     private @Nullable Path anchor;
-    /**
-     * Whether {@link #anchor} has been resolved.
-     */
     private boolean anchorResolved;
 
     @Override

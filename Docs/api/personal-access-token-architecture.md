@@ -39,7 +39,10 @@ The Personal Access Token (PAT) feature provides a secure, token-based authentic
 ### Key Features
 
 - **Token Lifecycle Management**: Create, list, retrieve, and delete tokens
-- **Expiration Support**: Every new token expires. A token created without an expiration date expires after `security.pat.default-expiration-days` (default 90) days, and an expiration date more than `security.pat.max-expiration-days` (default 365) days ahead is refused; both values are configurable. Tokens created before 6.5.0 with `expiresAt = null` are unchanged and never expire
+- **Expiration Support**: Every new token expires. A token created without an expiration date expires after
+  `security.pat.default-expiration-days` (default 90) days, and an expiration date more than
+  `security.pat.max-expiration-days` (default 365) days ahead is refused; both values are configurable. Tokens created
+  before 6.5.0 with `expiresAt = null` are unchanged and never expire
 - **User Isolation**: Users manage only their own tokens
 - **Audit Trail**: Creation and expiration timestamps for all tokens
 - **Security Hardening**: Multiple layers of protection against common attacks
@@ -52,19 +55,28 @@ The Personal Access Token (PAT) feature provides a secure, token-based authentic
 
 ### High-Level Architecture
 
-<!-- V8: labels are quoted so Mermaid 11 parses the diagram; the PatAuthService method is resolveAuthentication. -->
+<!-- V8: quoted labels, long ones as shape data (Mermaid 11.3+); the PatAuthService method is resolveAuthentication. -->
 
 ```mermaid
 flowchart TB
     Client["Client Layer<br/>OAuth2/SAML or PAT Authentication"]
 
     subgraph SecurityFilter["Security Filter Chain"]
-        PatFilter["PatAuthenticationFilter<br/>Before OAuth2 Filter<br/>- Checks Authorization: Token header<br/>- Validates using PatAuthService<br/>- Sets SecurityContext if valid"]
+        PatFilter@{ label: "PatAuthenticationFilter
+            Before OAuth2 Filter
+            - Checks Authorization: Token header
+            - Validates using PatAuthService
+            - Sets SecurityContext if valid" }
         OAuth2Filter["OAuth2/SAML Filter<br/>Standard Spring Security"]
     end
 
     subgraph Controller["REST Controller Layer"]
-        PatController["PersonalAccessTokenController<br/>@NotPatAuth - Prevents PAT from managing PATs<br/>POST /users/personal-access-tokens Create<br/>GET /users/personal-access-tokens List<br/>GET /users/personal-access-tokens/:id Get<br/>DELETE /users/personal-access-tokens/:id Delete"]
+        PatController@{ label: "PersonalAccessTokenController
+            @NotPatAuth - Prevents PAT from managing PATs
+            POST /users/personal-access-tokens Create
+            GET /users/personal-access-tokens List
+            GET /users/personal-access-tokens/:id Get
+            DELETE /users/personal-access-tokens/:id Delete" }
     end
 
     subgraph Service["Service Layer"]
@@ -75,11 +87,19 @@ flowchart TB
     end
 
     subgraph DAO["DAO Layer"]
-        PatDAO["PersonalAccessTokenDao<br/>Hibernate Implementation<br/>getByPublicId<br/>getByLoginName<br/>save, delete, etc."]
+        PatDAO@{ label: "PersonalAccessTokenDao
+            Hibernate Implementation
+            getByPublicId
+            getByLoginName
+            save, delete, etc." }
     end
 
     subgraph Database["Database Layer"]
-        PatTable[("OpenL_PAT_Tokens Table<br/>publicId PK<br/>secretHash<br/>loginName FK<br/>name, createdAt, expiresAt")]
+        PatTable@{ shape: cyl, label: "OpenL_PAT_Tokens Table
+            publicId PK
+            secretHash
+            loginName FK
+            name, createdAt, expiresAt" }
     end
 
     Client --> SecurityFilter
@@ -317,8 +337,12 @@ openl_pat_<publicId>.<secret>
                new Object[]{String.valueOf(maxLifetime.toDays())});
    }
    ```
-   - `defaultLifetime` and `maxLifetime` are `Duration` constructor parameters that `PatSecurityConfiguration.patGeneratorService(...)` builds from `security.pat.default-expiration-days` (default `90`) and `security.pat.max-expiration-days` (default `365`); a non-positive value, or a default greater than the maximum, fails Studio at startup in every user mode except `single`, where this configuration is not loaded
-   - A date later than now + `maxLifetime` is rejected with 400 `openl.error.400.pat.expires-at.max.message`; a date of exactly now + the maximum is accepted
+   - `defaultLifetime` and `maxLifetime` are `Duration` constructor parameters that
+     `PatSecurityConfiguration.patGeneratorService(...)` builds from `security.pat.default-expiration-days` (default
+     `90`) and `security.pat.max-expiration-days` (default `365`); a non-positive value, or a default greater than the
+     maximum, fails Studio at startup in every user mode except `single`, where this configuration is not loaded
+   - A date later than now + `maxLifetime` is rejected with 400 `openl.error.400.pat.expires-at.max.message`; a date of
+     exactly now + the maximum is accepted
 
 2. **Generate Unique Public ID**:
    ```java
@@ -695,9 +719,12 @@ public final class Base62Generator {
 | **SQL Injection** | Parameterized queries | JPA/Hibernate |
 | **DoS via Long Tokens** | Length validation | Max 256 chars |
 | **Information Disclosure** | Generic error messages | Return only VALID/INVALID |
-| **Replay Attacks** | Mandatory expiration for new tokens (configurable 90-day default, 365-day maximum) | `expiresAt` field; `security.pat.default-expiration-days`, `security.pat.max-expiration-days` |
+| **Replay Attacks** | Mandatory expiration for new tokens | `expiresAt` field; 90-day default, 365-day maximum |
 | **Token Proliferation** | `@NotPatAuth` | PATs can't create PATs |
 | **Credential Stuffing** | Secure hash storage | BCrypt with salt |
+
+The token lifetime limits are configurable through `security.pat.default-expiration-days` and
+`security.pat.max-expiration-days`.
 
 <!-- V8: replay attacks are bounded by the mandatory expiry of every new token. -->
 
@@ -818,7 +845,7 @@ public final class Base62Generator {
 
 ### Token Creation Flow
 
-<!-- V8: the client request carries the /rest prefix under which the REST API is served; the Bearer value is a placeholder. -->
+<!-- V8: the client request carries the /rest prefix of the REST API; the Bearer value is a placeholder. -->
 
 ```mermaid
 sequenceDiagram
@@ -830,7 +857,8 @@ sequenceDiagram
     participant DAO as PersonalAccessToken<br/>Dao
     participant DB as Database
 
-    Client->>SecurityFilter: POST /rest/users/personal-access-tokens<br/>Authorization: Bearer ${OAUTH2_ACCESS_TOKEN}<br/>Body: { name, expiresAt }
+    Client->>SecurityFilter: POST /rest/users/personal-access-tokens
+    Note over Client,SecurityFilter: Authorization: Bearer ${OAUTH2_ACCESS_TOKEN}<br/>Body: { name, expiresAt }
     SecurityFilter->>SecurityFilter: Validate OAuth2 Bearer Token<br/>Set SecurityContext
     SecurityFilter->>Controller: Forward request
 
@@ -1143,12 +1171,14 @@ Client Request → Full Token → Hash Full Token → Database Lookup
 
 ### 5. Mandatory Expiration for New Tokens
 
-<!-- V8: every new token expires; an omitted expiresAt gets the configured default and dates beyond the maximum are refused. -->
+<!-- V8: every new token expires; an omitted expiresAt gets the default and dates beyond the maximum are refused. -->
 
 **Decision**: Every new token expires. `expiresAt` stays optional in the creation request:
 - An omitted or null `expiresAt` becomes the creation time plus `security.pat.default-expiration-days` (default `90`)
-- An `expiresAt` later than the creation time plus `security.pat.max-expiration-days` (default `365`) is rejected with 400 `openl.error.400.pat.expires-at.max.message`; exactly the maximum is accepted
-- Both properties are positive whole numbers of days, and the default must not exceed the maximum; in every user mode except `single`, which has no PATs, Studio checks both rules at startup and fails to start when either is broken
+- An `expiresAt` later than the creation time plus `security.pat.max-expiration-days` (default `365`) is rejected with
+  400 `openl.error.400.pat.expires-at.max.message`; exactly the maximum is accepted
+- Both properties are positive whole numbers of days, and the default must not exceed the maximum; in every user mode
+  except `single`, which has no PATs, Studio checks both rules at startup and fails to start when either is broken
 
 **Rationale**:
 - **Bounded Replay Window**: A leaked token stops working when its lifetime ends, at the latest after the maximum
@@ -1160,9 +1190,11 @@ Client Request → Full Token → Hash Full Token → Database Lookup
   ```sql
   CHECK (expiresAt IS NULL OR expiresAt > createdAt)
   ```
-  The column stays nullable because tokens created before 6.5.0 without an expiration date keep working and never expire. Every token created since then stores an expiration date.
+  The column stays nullable because tokens created before 6.5.0 without an expiration date keep working and never
+  expire. Every token created since then stores an expiration date.
 
-**Security Note**: Expiration is enforced for every new token. Administrators can shorten the default lifetime and the maximum through `security.pat.default-expiration-days` and `security.pat.max-expiration-days`.
+**Security Note**: Expiration is enforced for every new token. Administrators can shorten the default lifetime and the
+maximum through `security.pat.default-expiration-days` and `security.pat.max-expiration-days`.
 
 ---
 
@@ -1339,8 +1371,11 @@ if (!secretMatches || stored == null || isExpired(stored)) {
 | `user.mode` | `oauth2`, `saml`, `standalone` | `standalone` | Authentication mode |
 | `security.password.encoder` | `bcrypt`, `noop` | `bcrypt` | Secret hashing algorithm; `noop` is for tests |
 | `webstudio.bcrypt.strength` | `4-31` | `10` | BCrypt work factor |
-| `security.pat.default-expiration-days` | Positive whole number of days, not greater than the maximum | `90` | Lifetime of a token created without an expiration date |
-| `security.pat.max-expiration-days` | Positive whole number of days, not less than the default | `365` | How many days ahead an expiration date may be; later dates are rejected with 400 |
+| `security.pat.default-expiration-days` | Whole days | `90` | Lifetime of a token created without an expiration date |
+| `security.pat.max-expiration-days` | Whole days | `365` | How many days ahead an expiration date may be |
+
+Both values must be positive whole numbers of days, and the default must not exceed the maximum. Expiration dates
+beyond the maximum are rejected with 400.
 
 <!-- V8: the PAT lifetime properties are positive whole day counts, and the default must not exceed the maximum. -->
 
@@ -1668,7 +1703,8 @@ void parse_sqlInjectionAttempt_throwsException() {
 **Token Expiration**:
 - Every new token expires; `expiresAt` stays optional in the creation request
 - `security.pat.default-expiration-days` (default `90`) sets the lifetime of a token created without an expiration date
-- `security.pat.max-expiration-days` (default `365`) caps how many days ahead an expiration date may be; a later date is rejected with 400 `openl.error.400.pat.expires-at.max.message`
+- `security.pat.max-expiration-days` (default `365`) caps how many days ahead an expiration date may be; a later date is
+  rejected with 400 `openl.error.400.pat.expires-at.max.message`
 - Tokens created before 6.5.0 with `expiresAt = null` are unchanged and never expire
 
 ### Version 6.0.0 (EPBDS-15458)

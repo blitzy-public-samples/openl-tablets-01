@@ -91,7 +91,9 @@ import org.openl.util.IOUtils;
  * repository. Every layout uses real directories and links under a temporary folder. A project mount
  * accepts links that stay inside its project folder; the repository mount authorizes each repository
  * path separately, so it refuses every link at or above a path. Backends that are not file-backed
- * (Git, JDBC, S3, Azure Blob, mocks) accept every path without any filesystem or repository call.
+ * (Git, JDBC, S3, Azure Blob, mocks) accept every path without any filesystem access and without any
+ * repository content access: their wrappers are only unwrapped, through {@code getOriginal()} and
+ * {@code getDelegate()}, and the backend itself is never called.
  *
  * <p>The closed-project and repository mounts are also built over a {@code repo-file} repository
  * instantiated from its settings, as the application instantiates it, so behind

@@ -364,9 +364,10 @@ class ProjectFileLookupServiceImplTest {
         assertEquals(rootMarker, content(files.get(1)));
     }
 
-    // V1: B19 on the repository mount exactly as RepoFileRootFactory builds it for the REST routes: a design
-    // repository built from its settings (behind PathCheckedRepository), behind its secured wrapper, and mounted
-    // inside AuthoringRepository. The linked candidates are omitted unread on the mapped and on the flat layout.
+    // V1: B19 on the repository mount RepoFileRootFactory builds, on the mapped and on the flat layout.
+    // The mount is built exactly as for the REST routes: a design repository built from its settings (behind
+    // PathCheckedRepository), behind its secured wrapper, and mounted inside AuthoringRepository. The linked
+    // candidates are omitted unread.
 
     @Test
     @DisabledOnOs(OS.WINDOWS)
@@ -382,9 +383,10 @@ class ProjectFileLookupServiceImplTest {
         assertRepositoryMountOmitsLinkedAncestors(dir, false);
     }
 
-    // V1: B18 — only the containment anchor is unwrapped from the repository mount. The lookup still lists and reads
-    // through the flat secured wrapper behind AuthoringRepository, so a regular file the ACL service refuses to READ
-    // is filtered by that wrapper's listing, although the lookup's own parent-strategy check grants it.
+    // V1: B18 — only the containment anchor is unwrapped from the repository mount; reads keep the ACL wrapper.
+    // The lookup still lists and reads through the flat secured wrapper behind AuthoringRepository, so a regular file
+    // the ACL service refuses to READ is filtered by that wrapper's listing, although the lookup's own parent-strategy
+    // check grants it.
     @Test
     void b18_repositoryMountOverFlatSecuredFileRepository_fileReadDenialStillOmitsCandidate(@TempDir Path dir)
             throws IOException {
@@ -417,8 +419,11 @@ class ProjectFileLookupServiceImplTest {
         }
     }
 
-    // V1: branch coverage of the lookup paths around the link check that the B19 tests do not reach, so
-    // the changed lookup service keeps at least 90% line and branch coverage from this class and the Git test.
+    // V1: the lookup's boundary and error branches around the link check that the B19 tests do not reach.
+    // The cases below cover blank and non-text anchors in both overloads, nested folders, oversize, denied and
+    // metadata-less files on a non-file backend that keeps every other candidate, absent or failing content, a
+    // repository without folders, and a missing item or stream. This class and the Git test together keep the lookup
+    // service at 90% or more line and branch coverage.
 
     @Test
     void blankOrNonTextAnchor_returnsEmptyWithoutListing_inBothOverloads() throws IOException {
@@ -522,8 +527,7 @@ class ProjectFileLookupServiceImplTest {
         return new FileItem(fileData("ignored"), new ByteArrayInputStream(content.getBytes(StandardCharsets.UTF_8)));
     }
 
-    // V1: B19 — the repository-root file, the anchor a/b/AGENTS.md and the ancestor file link a/AGENTS.md
-    // to a file outside the repository.
+    // V1: B19 — the root file, the anchor a/b/AGENTS.md and the ancestor a/AGENTS.md, a link to an outside file.
     private static void seedOutsideFileLink(Path dir, String rootMarker, String anchorMarker, String outsideSentinel)
             throws IOException {
         var repo = dir.resolve("repo");
@@ -578,9 +582,9 @@ class ProjectFileLookupServiceImplTest {
                         : Mockito.RETURNS_DEFAULTS.answer(invocation));
     }
 
-    // V1: B19 — the upward line of the anchor P1/a/b/c/AGENTS.md holds, nearest first, a link into the sibling
-    // project P2, a link to a file outside the repository, a link to another file of P1, and then the regular files
-    // P1/AGENTS.md and AGENTS.md. The search runs on the repository mount RepoFileRootFactory builds.
+    // V1: B19 — the repository mount RepoFileRootFactory builds omits the linked ancestors of P1/a/b/c/AGENTS.md.
+    // Nearest first, the anchor's upward line holds a link into the sibling project P2, a link to a file outside the
+    // repository, a link to another file of P1, and then the regular files P1/AGENTS.md and AGENTS.md.
     private static void assertRepositoryMountOmitsLinkedAncestors(Path dir, boolean mappedLayout) throws IOException {
         var rootMarker = marker();
         var nearMarker = marker();
@@ -632,8 +636,8 @@ class ProjectFileLookupServiceImplTest {
         }
     }
 
-    // V1: B19 — a repo-file design repository over the folder, built from its settings the way the application
-    // builds it, and therefore behind PathCheckedRepository.
+    // V1: B19 — a repo-file design repository over the folder, built from its settings as the application does.
+    // Built that way, it sits behind PathCheckedRepository.
     private static Repository configuredFileRepository(Path root) {
         var settings = Map.of("repository.design.factory", "repo-file", "repository.design.uri", root.toString());
         var configured = RepositoryInstatiator.newRepository("repository.design", settings::get);
@@ -641,8 +645,8 @@ class ProjectFileLookupServiceImplTest {
                 "Fixture: the settings build a path-checked wrapper");
     }
 
-    // V1: B19 — the repository mount RepoFileRootFactory builds on the default branch. The factory stamps the
-    // authenticated user as the author, so a generated user is authenticated while it runs.
+    // V1: B19 — the repository mount RepoFileRootFactory builds on the default branch.
+    // The factory stamps the authenticated user as the author, so a generated user is authenticated while it runs.
     private static FileRoot factoryMount(ProjectFileLookupService lookupService, Repository repository) {
         var userName = RandomStringUtils.secure().nextAlphanumeric(24);
         var user = mock(WorkspaceUser.class);

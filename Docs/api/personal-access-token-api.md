@@ -31,7 +31,11 @@ The Personal Access Token (PAT) API enables users to generate and manage authent
 
 - **Secure Token Generation**: Cryptographically secure tokens using Base62 encoding
 - **Token Management**: Full CRUD operations for personal access tokens
-- **Expiration Support**: Every new token expires. When no expiration date is given, the token lives for `security.pat.default-expiration-days` (default 90) days; a requested date may be at most `security.pat.max-expiration-days` (default 365) days ahead. Both properties are positive whole numbers of days, and the default must not exceed the maximum; otherwise Studio does not start in a mode that offers PATs. Tokens created before 6.5.0 without an expiration keep working and never expire
+- **Expiration Support**: Every new token expires. When no expiration date is given, the token lives for
+  `security.pat.default-expiration-days` (default 90) days; a requested date may be at most
+  `security.pat.max-expiration-days` (default 365) days ahead. Both properties are positive whole numbers of days, and
+  the default must not exceed the maximum; otherwise Studio does not start in a mode that offers PATs. Tokens created
+  before 6.5.0 without an expiration keep working and never expire
 - **User Isolation**: Users can only manage their own tokens
 - **Authenticated Modes Only**: Available in every authenticated user mode (OAuth2, SAML, AD, multi); not in single-user mode
 
@@ -119,7 +123,10 @@ POST /rest/users/personal-access-tokens
 | Field | Type | Required | Constraints | Description |
 |-------|------|----------|-------------|-------------|
 | `name` | String | Yes | Max 100 chars, not blank | Human-readable token name (must be unique per user) |
-| `expiresAt` | ISO 8601 DateTime | No | Future date, at most `security.pat.max-expiration-days` (default 365) days ahead | Token expiration date; when omitted or `null`, the token expires `security.pat.default-expiration-days` (default 90) days after creation |
+| `expiresAt` | ISO 8601 DateTime | No | Future, within the maximum lifetime | Default lifetime if omitted |
+
+When `expiresAt` is omitted or `null`, the token expires `security.pat.default-expiration-days` (default 90) days after
+creation. A date more than `security.pat.max-expiration-days` (default 365) days ahead is rejected.
 
 <!-- V8: an omitted expiresAt gets the configured default lifetime; dates after the configured maximum are rejected. -->
 
@@ -195,9 +202,10 @@ GET /rest/users/personal-access-tokens
 ]
 ```
 
-**Note**: Token secrets are **never** returned by this endpoint. An `expiresAt` of `null` appears only for tokens created before 6.5.0 without an expiration; such tokens never expire, and every newly created token carries a date.
+**Note**: Token secrets are **never** returned by this endpoint. An `expiresAt` of `null` appears only for tokens
+created before 6.5.0 without an expiration; such tokens never expire, and every newly created token carries a date.
 
-<!-- V8: null expiresAt now identifies only tokens created before the default lifetime existed. -->
+<!-- V8: null expiresAt identifies only legacy tokens created without an expiration date. -->
 
 #### Error Responses
 
@@ -304,7 +312,10 @@ Request model for creating a new token.
 | Field | Type | Required | Constraints | Description |
 |-------|------|----------|-------------|-------------|
 | `name` | String | Yes | 1-100 characters | Unique name for the token (per user) |
-| `expiresAt` | ISO 8601 DateTime | No | Future date, at most `security.pat.max-expiration-days` (default 365) days ahead | Token expiration date; when omitted or `null`, the token expires `security.pat.default-expiration-days` (default 90) days after creation |
+| `expiresAt` | ISO 8601 DateTime | No | Future, within the maximum lifetime | Default lifetime if omitted |
+
+When `expiresAt` is omitted or `null`, the token expires `security.pat.default-expiration-days` (default 90) days after
+creation. A date more than `security.pat.max-expiration-days` (default 365) days ahead is rejected.
 
 <!-- V8: an omitted expiresAt gets the configured default lifetime; dates after the configured maximum are rejected. -->
 
@@ -329,7 +340,7 @@ Response model returned when a token is created. **Contains the full token - sho
 | `loginName` | String | Owner's login name |
 | `token` | String | **Full token value** (only shown once) |
 | `createdAt` | ISO 8601 DateTime | Creation timestamp |
-| `expiresAt` | ISO 8601 DateTime | Expiration timestamp, always set for a newly created token (the default lifetime is applied when the request omits `expiresAt`) |
+| `expiresAt` | ISO 8601 DateTime | Expiration timestamp, always set (default lifetime if `expiresAt` was omitted) |
 
 <!-- V8: a newly created token always carries an expiration timestamp. -->
 
@@ -357,9 +368,11 @@ Response model for listing and retrieving tokens (without secret).
 | `name` | String | Token name |
 | `loginName` | String | Owner's login name |
 | `createdAt` | ISO 8601 DateTime | Creation timestamp |
-| `expiresAt` | ISO 8601 DateTime | Expiration timestamp; `null` only for a token created before 6.5.0 without an expiration, which never expires |
+| `expiresAt` | ISO 8601 DateTime | Expiration timestamp; `null` only for legacy tokens, which never expire |
 
-<!-- V8: null expiresAt now identifies only tokens created before the default lifetime existed. -->
+Legacy tokens are tokens created before 6.5.0 without an expiration date.
+
+<!-- V8: null expiresAt identifies only legacy tokens created without an expiration date. -->
 
 **Example**:
 ```json

@@ -98,7 +98,8 @@ public interface FileRoot {
 
     // V1: the local directory behind a repository, the anchor the containment checks resolve against.
     /**
-     * Local root directory of a file-backed repository, as its real location.
+     * Local root directory of a file-backed repository, as its real location, or as its absolute
+     * normalized path when the real location cannot be resolved.
      *
      * <p>The repository is unwrapped the way the ancestor lookup unwraps it: through every
      * {@link RepositoryDelegate} (such as {@code SecureRepository} and {@code SecureBranchRepository}),
@@ -119,7 +120,11 @@ public interface FileRoot {
      * <p>The configured root is the anchor: links in its own path are trusted and followed, so the
      * real location is returned. The root is resolved before it is normalized, so a parent segment
      * after a link in it, as in {@code <link>/..}, leads where the repository reads. A root that does
-     * not exist yet is resolved through its deepest existing ancestor.
+     * not exist yet is resolved through its deepest existing ancestor. A root that cannot be resolved,
+     * because a dangling link or a link loop lies in its path, a lookup on it is denied, or neither it
+     * nor any of its ancestors exists, is returned as its absolute normalized path instead. The
+     * containment checks then fail closed: {@link #resolvesInside(Path, String)} and
+     * {@link #atOwnPath(Path, String)} reject such an anchor and every path under it.
      *
      * <p>The repository mount holds its repository inside {@link AuthoringRepository}, which is unwrapped
      * first, here only, through {@code AuthoringRepository.getDelegate()}. It is not a
@@ -134,7 +139,8 @@ public interface FileRoot {
      * reads blobs from its object database, never through working-tree links.
      *
      * @param repo the repository as the caller holds it, possibly wrapped; may be {@code null}
-     * @return the real root directory, or empty when the repository is not file-backed
+     * @return the real location of the root directory, or its absolute normalized path when that cannot
+     * be resolved; empty when the repository is not file-backed
      */
     static Optional<Path> localRoot(@Nullable Repository repo) { // V1: a null repository is not file-backed
         var current = repo;
@@ -169,9 +175,10 @@ public interface FileRoot {
      * never compute it.
      *
      * <p>The boundary is lexical under the real anchor, so a project folder that is itself a link
-     * fails {@link #resolvesInside(Path, String) resolvesInside(boundary, "")}. The boundary applies
-     * to the current state: historical reads of an opened project are checked against its working
-     * copy, which fails closed only when that working-copy path is a link leaving the project.
+     * fails {@link #resolvesInside(Path, String) resolvesInside(boundary, "")}. The boundary of a
+     * {@link RulesProject} applies to its current state. A version-qualified read of it is served as a
+     * plain {@link AProject} over its design repository, and its mount checks that read against the
+     * design-repository project folder this helper computes for that {@link AProject}.
      *
      * @param project the project the mount serves; may be {@code null}
      * @return the project folder, or empty when the project is not stored in a local directory

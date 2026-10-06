@@ -18,6 +18,9 @@ import static org.mockito.Mockito.when;
 import static org.openl.security.acl.AclChangeListener.FAILURE;
 import static org.openl.security.acl.AclChangeListener.SUCCESS;
 
+import java.io.OutputStream;
+import java.io.PrintStream;
+import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -29,12 +32,15 @@ import java.util.List;
 import java.util.Map;
 import java.util.SortedSet;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicReference;
 import javax.sql.DataSource;
 
 import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junitpioneer.jupiter.WritesStdIo;
+import org.slf4j.LoggerFactory;
 import org.springframework.dao.DataAccessException;
 import org.springframework.jdbc.CannotGetJdbcConnectionException;
 import org.springframework.security.acls.domain.GrantedAuthoritySid;
@@ -238,6 +244,44 @@ class AclChangeListenerTest {
         assertEquals(1, throwing.calls);
         assertEquals(1, transactionManager.commits);
         assertTrue(TransactionSynchronizationManager.getResourceMap().isEmpty());
+    }
+
+    @Test
+    @WritesStdIo
+    void throwingListenerDoesNotPropagateOutsideATransactionWhileTheLoggingBackendFails() {
+        var throwing = new ThrowingListener();
+        var sink = new FailingSink();
+        assertSinkFails(sink);
+        var before = sink.writes;
+
+        var threw = throwsWhileStdErrFails(sink, () -> AclChangeListener.record(throwing, "deleteSid", "sid", false));
+
+        assertFalse(threw, "A listener failure must not propagate while the logging backend fails");
+        assertEquals(1, throwing.calls);
+        assertTrue(sink.writes > before, "The report of the listener failure must reach the failing backend");
+    }
+
+    @Test
+    @WritesStdIo
+    void throwingListenerDoesNotPropagateAfterCommitWhileTheLoggingBackendFails() {
+        var throwing = new ThrowingListener();
+        var callbackResult = new Object();
+        var result = new AtomicReference<@Nullable Object>();
+        var sink = new FailingSink();
+        assertSinkFails(sink);
+        var before = sink.writes;
+
+        var threw = throwsWhileStdErrFails(sink, () -> result.set(transaction().execute(status -> {
+            AclChangeListener.record(throwing, "updateSid", "sid", false);
+            return callbackResult;
+        })));
+
+        assertFalse(threw, "A listener failure must not propagate after commit while the logging backend fails");
+        assertSame(callbackResult, result.get());
+        assertEquals(1, throwing.calls);
+        assertEquals(1, transactionManager.commits);
+        assertTrue(TransactionSynchronizationManager.getResourceMap().isEmpty());
+        assertTrue(sink.writes > before, "The report of the listener failure must reach the failing backend");
     }
 
     @Test
@@ -827,6 +871,36 @@ class AclChangeListenerTest {
         }
     }
 
+    /**
+     * Runs the call while {@code System.err}, where slf4j-simple writes every line, is a fresh stream over the sink,
+     * then restores it, and answers whether the call threw. The exception is never formatted, because its message
+     * is a generated sentinel. A fresh stream per call keeps the encoder state that a refused write leaves behind
+     * from reaching the next call.
+     */
+    private static boolean throwsWhileStdErrFails(FailingSink sink, Runnable call) {
+        var original = System.err;
+        System.setErr(new PrintStream(sink, true, StandardCharsets.UTF_8));
+        try {
+            call.run();
+            return false;
+        } catch (RuntimeException e) {
+            return true;
+        } finally {
+            System.setErr(original);
+        }
+    }
+
+    /**
+     * Asserts that a line logged directly to the accumulator's logger throws over the sink, so a test that notifies
+     * a listener there really meets a failing logging backend.
+     */
+    private static void assertSinkFails(FailingSink sink) {
+        var before = sink.writes;
+        var threw = throwsWhileStdErrFails(sink,
+            () -> LoggerFactory.getLogger(AclChangeListener.class).warn("Probe of the failing sink."));
+        assertTrue(threw && sink.writes > before, "A line logged directly must throw while the sink fails");
+    }
+
     private JdbcMutableAclService service(DataSource dataSource, boolean withListener) {
         // ADMIN is the system-wide role SID the application configures; it is a role name, not a credential.
         var service = new JdbcMutableAclService(dataSource,
@@ -902,6 +976,33 @@ class AclChangeListenerTest {
         public void aclChanged(String outcome, int changes, SortedSet<String> kinds, SortedSet<String> objectTypes) {
             calls++;
             throw new IllegalStateException("listener failure");
+        }
+    }
+
+    /**
+     * The output of a logging backend that does not ignore its failures, as a log4j appender with
+     * {@code ignoreExceptions=false}: every write throws, with a generated message. It counts the writes, so a test
+     * can assert that it was reached.
+     */
+    private static final class FailingSink extends OutputStream {
+
+        private final String message = UUID.randomUUID().toString();
+        private int writes;
+
+        @Override
+        public void write(int b) {
+            throw refuse();
+        }
+
+        @Override
+        public void write(byte[] b, int off, int len) {
+            throw refuse();
+        }
+
+        /** Counts one refused write and returns the exception that refuses it. */
+        private IllegalStateException refuse() {
+            writes++;
+            return new IllegalStateException(message);
         }
     }
 

@@ -69,7 +69,9 @@ browser.
   CVE-2026-65183, CVE-2026-65637, CVE-2026-65905, CVE-2026-65927, CVE-2026-66422, CVE-2026-68525, CVE-2026-68569,
   CVE-2026-68763, CVE-2026-75973, CVE-2026-76183, CVE-2026-77762, CVE-2026-77791, CVE-2026-78383, CVE-2026-78437,
   CVE-2026-79677, CVE-2026-86248, CVE-2026-86350 and CVE-2026-87022. Remove the override once Spring Boot manages a
-  fixed Tomcat version.
+  fixed Tomcat version. It also adds `xmlschema.version` (2.3.3), which overrides the `xmlschema-core` 2.3.2 that
+  Apache CXF 4.1.8 manages, for CVE-2026-102495, CVE-2026-102496 and CVE-2026-102497. Remove that override once
+  Apache CXF manages `xmlschema-core` 2.3.3 or later.
   <!-- V13: OWASP and Trivy scanning gates -->
 
 ## Administrators
@@ -104,7 +106,7 @@ browser.
   so its service list, service errors, `MANIFEST.MF` and deployment upload, download and delete stop working while
   authentication is on, and its Swagger UI page cannot list the services. Nothing changes with authentication off,
   the default.
-  <!-- V2: Rule Services /admin/ paths require a JWT -->
+  <!-- V2: Rule Services non-exempt /admin/ paths require a JWT when authentication is enabled -->
 
 * **Workspace folders, project files, new projects and uploaded archives are kept inside their own folders.** A user's
   workspace folder under `user.workspace.home` must be a real folder of its own: one that is a symbolic link into
@@ -128,8 +130,11 @@ browser.
   template over an existing project answers that `400` when any entry of the existing project folder is a symbolic
   link that resolves outside that folder — outside the repository, into another project, or to nothing. Nothing is
   written, no commit is made, and the uploaded files are discarded. There, an archive uploaded over an existing
-  project answers that `400` when one of its entries would be written through such a link. Links that stay inside the
-  project folder do not stop an upload. A `repo-git` design repository writes uploads through that working tree, so
+  project answers that `400` when one of its entries would be written through such a link. In the working tree of a
+  `repo-git` design repository, such an archive also answers that `400` whenever the existing project folder holds a
+  link to a folder outside it; a link to a file or to nothing stops the upload only when an entry would be written
+  through that link. Links that stay inside the project folder do not stop an upload. A `repo-git` design repository
+  writes uploads through that working tree, so
   uploading files, a template or an archive to it also answers that `400` when the project folder would be reached
   through a link there. The files API on its closed projects and on the repository itself, and a project copied into
   it, get the name checks only; opening its projects, and reading the source when one of its closed projects is
@@ -194,7 +199,7 @@ browser.
   `ad`, `saml` and `oauth2` modes they answer `401` to a request that is not authenticated, as the rest of `/rest`
   does; in `single` mode they are unchanged. `openl.json`, `build.json` and `/rest/settings` stay public. Monitoring
   that polls the two endpoints must authenticate.
-  <!-- V10: sys.json and http.json require authentication -->
+  <!-- V10: sys.json and http.json require authentication in every mode with a login -->
 
 * **Security events are logged to `org.openl.security.audit`.** The logger writes one line per authentication
   success or failure, lockout, personal access token creation and revocation, and committed ACL change. Each line

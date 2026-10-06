@@ -5,6 +5,7 @@ import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.security.GeneralSecurityException;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -42,10 +43,10 @@ public class DynamicPropertySource extends EnumerablePropertySource<Object> {
     // V6: how many fingerprints of reported ENC(v2:...) values are remembered at most.
     static final int REPORTED_V2_FAILURES_CAP = 1_000;
 
-    // V6: fingerprints of the undecryptable ENC(v2:...) values already reported, never the values, ordered by their
-    // last failing read. A value is reported once while it stays among the REPORTED_V2_FAILURES_CAP distinct values
-    // that failed most recently, however often it is read; once that many other values have failed after its last
-    // failing read, it is forgotten and its next failing read reports it once more.
+    // V6: fingerprints, never values, of the reported undecryptable ENC(v2:...) values, by their last failing read.
+    // A value is reported once while it stays among the REPORTED_V2_FAILURES_CAP distinct values that failed most
+    // recently, however often it is read; once that many other values have failed after its last failing read, it is
+    // forgotten and its next failing read reports it once more.
     private static final Set<String> REPORTED_V2_FAILURES = Collections
             .synchronizedSet(Collections.newSetFromMap(new LinkedHashMap<String, Boolean>(16, 0.75f, true) {
                 @Override
@@ -54,8 +55,8 @@ public class DynamicPropertySource extends EnumerablePropertySource<Object> {
                 }
             }));
 
-    // V6: set while the keys of an ENC(v2:...) value are resolved on this thread, so that a key which is itself
-    // ENC(v2:...) reads as "" instead of recursing without end.
+    // V6: set while this thread resolves the keys of a v2 value; a key that is itself ENC(v2:...) then reads as "".
+    // This keeps the decryption of such a key from recursing without end.
     private static final ThreadLocal<Boolean> RESOLVING_V2_KEYS = new ThreadLocal<>();
 
     private final FirewallPropertyResolver resolver;
@@ -86,8 +87,8 @@ public class DynamicPropertySource extends EnumerablePropertySource<Object> {
         return visibleSettings().containsKey(name);
     }
 
-    // V6: none for the thread of save() while it reads the defaults, the stored settings for every other thread, so
-    // reading a default, which may derive the key of an ENC(v2:...) value, never hides the settings from readers.
+    // V6: no settings for the thread of save() while it reads the defaults, the stored settings for every other thread.
+    // So reading a default, which may derive the key of an ENC(v2:...) value, never hides the settings from readers.
     private Map<String, String> visibleSettings() {
         return readingDefaults.get() != null ? Map.of() : Objects.requireNonNull(settings.get());
     }
@@ -270,8 +271,8 @@ public class DynamicPropertySource extends EnumerablePropertySource<Object> {
                                 configuredKey,
                                 cipher));
 
-        // V6: every secret left to store is written in the v2 format. The origin is never null once the source has
-        // loaded. A secret that cannot be encrypted throws here, before the settings are published or written.
+        // V6: every secret left is written as v2; a failure throws here, before anything is published or written.
+        // The origin is never null once the source has loaded.
         encryptSecrets(properties, supplied, Objects.requireNonNull(origin), configuredKey, cipher);
 
         // Remove version for correct determining of properties to save
@@ -299,8 +300,8 @@ public class DynamicPropertySource extends EnumerablePropertySource<Object> {
         }
     }
 
-    // V6: replaces the former endsWith("password") check of save(). Here and in the helpers below, jspecify
-    // @Nullable marks the inputs and results that may be null.
+    // V6: a setting whose name ends in password, secret or token is encrypted, except secret.key; null never matches.
+    // Here and in the helpers below, jspecify @Nullable marks the inputs and results that may be null.
     /**
      * Tells whether a property is stored encrypted: its name ends in {@code password}, {@code secret} or
      * {@code token}, and it is not {@code secret.key}, the key the others are encrypted with. The match is
@@ -322,7 +323,8 @@ public class DynamicPropertySource extends EnumerablePropertySource<Object> {
      * is read as {@link #getProperty(String)} reads it: a plain-text value is encrypted, a legacy {@code ENC(...)}
      * value is decrypted and encrypted again, and a v2 value is kept as it is. A legacy value that no key decrypts is
      * kept as it is, with a WARN. A value that fails to encrypt fails the whole save: the caller has published and
-     * written nothing yet, so neither a plain-text value nor the loss of a given one can follow from it.
+     * written nothing yet, so neither a plain-text value nor the loss of a given one can follow from it. The failed
+     * save also drops the cached {@link PassCoder} keys of the ciphertexts it made, since none of them is published.
      *
      * @throws IOException when a secret cannot be encrypted; the message names the property and the cause in fixed
      *             words, never the value, and the failure is not kept as its cause
@@ -332,6 +334,8 @@ public class DynamicPropertySource extends EnumerablePropertySource<Object> {
             Map<String, String> origin,
             String configuredKey,
             String cipher) throws IOException {
+        // V6: the ciphertexts made here; a failed save publishes none of them, so it drops their cached keys.
+        var made = new ArrayList<String>();
         // V6: no entry is removed here; a secret that cannot be encrypted fails the save instead.
         for (var entry : properties.entrySet()) {
             var name = entry.getKey();
@@ -343,19 +347,22 @@ public class DynamicPropertySource extends EnumerablePropertySource<Object> {
             var previous = origin.get(name);
             try {
                 if (supplied.contains(name)) {
-                    // V6: a value from the caller is plain text and is encrypted as it is, even when it looks like
-                    // ENC(...).
-                    entry.setValue(isSameSecret(value, previous, configuredKey)
-                            ? previous
-                            : encodePassword(value, configuredKey));
+                    // V6: a caller's value is plain text and is encrypted as it is, even when it looks like ENC(...).
+                    if (isSameSecret(value, previous, configuredKey)) {
+                        entry.setValue(previous);
+                    } else {
+                        entry.setValue(encodePassword(value, configuredKey));
+                        made.add(entry.getValue());
+                    }
                     continue;
                 }
-                // V6: a stored value is read as getProperty reads it: trimmed, then unwrapped from ENC(...). A value
-                // already in the v2 format is kept as it is, even when it cannot be decrypted, so that nothing is lost.
+                // V6: a stored value is read as getProperty reads it: trimmed, then unwrapped from ENC(...).
+                // A v2 value is kept as it is, even when it cannot be decrypted, so that nothing is lost.
                 var stored = StringUtils.trimToEmpty(value);
                 var inner = encInner(stored);
                 if (inner == null) {
                     entry.setValue(encodePassword(stored, configuredKey));
+                    made.add(entry.getValue());
                 } else if (!inner.startsWith(PassCoder.V2_PREFIX)) {
                     var plain = legacyPlain(inner, configuredKey, cipher);
                     if (plain == null) {
@@ -364,18 +371,22 @@ public class DynamicPropertySource extends EnumerablePropertySource<Object> {
                                 safeLabel(name));
                     } else {
                         entry.setValue(encodePassword(plain, configuredKey));
+                        made.add(entry.getValue());
                     }
                 }
             } catch (IOException | GeneralSecurityException | RuntimeException e) {
                 // V6: never the previous value, which may be plain text, and never a silent drop of a given one.
+                for (var ciphertext : made) {
+                    PassCoder.forget(encInner(ciphertext));
+                }
                 throw cannotEncrypt(name, e, sharedDir().resolve(InstanceSecretKey.FILE_NAME));
             }
         }
     }
 
-    // V6: the failure of a save whose secret cannot be encrypted, also logged as one ERROR line. The cause is given in
-    // fixed words by the type of the failure: the failure's own text may hold anything, and it is neither logged nor
-    // kept as the cause, since the callers log the returned exception with its causes.
+    // V6: the failure of a save whose secret cannot be encrypted, also logged as one ERROR line.
+    // The cause is given in fixed words by the type of the failure: the failure's own text may hold anything, and it
+    // is neither logged nor kept as the cause, since the callers log the returned exception with its causes.
     /**
      * Describes why the secret {@code name} cannot be encrypted, logs it as an ERROR and returns it as the exception
      * that fails the save.
@@ -412,9 +423,9 @@ public class DynamicPropertySource extends EnumerablePropertySource<Object> {
                 && plain.equals(tryDecodeV2(previousInner, configuredKey));
     }
 
-    // V6: an undecryptable stored secret never counts as its default, so it is never dropped by the clean-up. A value
-    // from the caller is plain text; a stored value is read as getProperty reads it. A secret without a default is
-    // not decrypted at all.
+    // V6: an undecryptable stored secret never counts as its default, so the clean-up never drops it.
+    // A value from the caller is plain text; a stored value is read as getProperty reads it. A secret without a
+    // default is not decrypted at all.
     private boolean isSecretDefault(String name,
             String value,
             Set<String> supplied,
@@ -429,7 +440,7 @@ public class DynamicPropertySource extends EnumerablePropertySource<Object> {
         return defaultPlain.equals(plain);
     }
 
-    // V6: always the v2 format; secret.key takes precedence, and a blank secret.key no longer means plain text.
+    // V6: always the v2 format, with secret.key when configured and otherwise the instance key, created on first need.
     /**
      * Encrypts a secret in the v2 format.
      *
@@ -475,8 +486,8 @@ public class DynamicPropertySource extends EnumerablePropertySource<Object> {
         try {
             instanceKey = InstanceSecretKey.get(directory, false);
         } catch (IOException e) {
-            // V6: an unreadable key file counts as no instance key; the caller reports it by the type of its
-            // exception, with the path rendered on one line.
+            // V6: an unreadable key file counts as no instance key; the caller reports it by its exception type.
+            // That report renders the path on one line.
             failure.fail(e);
             return null;
         }
@@ -487,8 +498,7 @@ public class DynamicPropertySource extends EnumerablePropertySource<Object> {
         return decodeV2Quietly(inner, instanceKey, failure);
     }
 
-    // V6: a wrong key fails the GCM tag, which means "not this key"; a malformed value or a missing algorithm is
-    // recorded in failure as the cause.
+    // V6: a failed GCM tag means "not this key"; a malformed value or a missing algorithm is recorded as the cause.
     private static @Nullable String decodeV2Quietly(String inner, String key, V2Failure failure) {
         try {
             return PassCoder.decodeV2(inner, key);
@@ -529,8 +539,9 @@ public class DynamicPropertySource extends EnumerablePropertySource<Object> {
         return legacyPlain(inner, configuredKey, cipher);
     }
 
-    // V6: the content of an ENC(...) wrapper, or null when the value is not wrapped. The one recogniser of the wrapper
-    // for reads and saves: the value must start with "ENC(" and end with ")" exactly, without surrounding blanks.
+    // V6: the content of an ENC(...) wrapper, or null when the value is not wrapped.
+    // It is the one recogniser of the wrapper for reads and saves: the value must start with "ENC(" and end with ")"
+    // exactly, without surrounding blanks.
     private static @Nullable String encInner(@Nullable String value) {
         if (value != null && value.startsWith("ENC(") && value.endsWith(")")) {
             return value.substring(4, value.length() - 1);
@@ -609,9 +620,10 @@ public class DynamicPropertySource extends EnumerablePropertySource<Object> {
         }
     }
 
-    // V6: an undecryptable v2 value reads as "", the existing failure contract, and is reported once per value. The
-    // ERROR names the property when it is known and the cause; the value, its ciphertext and its fingerprint never
-    // reach the log.
+    // V6: an undecryptable v2 value reads as "", the existing failure contract, with an ERROR that holds no value.
+    // The ERROR is deduplicated while the value's fingerprint stays among the REPORTED_V2_FAILURES_CAP remembered
+    // ones, and a value pushed out of them is reported again. It names the property when it is known and the cause;
+    // the value, its ciphertext and its fingerprint never reach the log.
     private static String decodeV2Value(@Nullable String name, String inner) {
         // Null during early start-up: the application properties are read before this source is registered.
         var source = get();
@@ -648,8 +660,8 @@ public class DynamicPropertySource extends EnumerablePropertySource<Object> {
             // V6: counted as reported even with ERROR off; the subject and cause are built only for a logged ERROR.
             var subject = v2Subject(name);
             var error = failure.error;
-            // V6: the cause in fixed words by the type of the failure, and the path rendered on one line; the text of
-            // the failure itself never reaches the log.
+            // V6: the cause is named in fixed words by its type, and the path is rendered on one line.
+            // The text of the failure itself never reaches the log.
             if (error != null) {
                 ConfigLog.LOG.error("{} cannot be decrypted: {}; an empty value is used.",
                         subject,
@@ -666,8 +678,8 @@ public class DynamicPropertySource extends EnumerablePropertySource<Object> {
         return "";
     }
 
-    // V6: what the ERROR of an ENC(v2:...) value that cannot be decrypted is about: its property, with the name
-    // rendered on one line so that it cannot forge another log line, or an unnamed value.
+    // V6: the subject of the ERROR of an undecryptable ENC(v2:...) value: its property, or an unnamed value.
+    // The name is rendered on one line, so that it cannot forge another log line.
     private static String v2Subject(@Nullable String name) {
         return name != null
                 ? "The ENC(v2:...) value of property '" + safeLabel(name) + "'"
@@ -698,9 +710,9 @@ public class DynamicPropertySource extends EnumerablePropertySource<Object> {
         return REPORTED_V2_FAILURES.add(HashingUtils.sha256Hex(inner));
     }
 
-    // V6: why no key decrypts an ENC(v2:...) value, for the ERROR of its read. It holds a path and the first failure,
-    // never a value, a ciphertext or a key; the ERROR gives only the type of the failure, in fixed words, and the path
-    // rendered on one line.
+    // V6: why no key decrypts an ENC(v2:...) value, for the ERROR of its read; never a value, a ciphertext or a key.
+    // It holds a path and the first failure. The ERROR gives only the type of the failure, in fixed words, and the
+    // path rendered on one line.
     private static final class V2Failure {
         // secret.key is configured and does not decrypt the value
         private boolean configuredKeyRejected;

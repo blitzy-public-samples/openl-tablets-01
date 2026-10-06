@@ -166,8 +166,8 @@ class OAuthTest extends AbstractKeycloakTest {
         assertTrue(logoutRedirect.contains("id_token_hint="), "Logout must pass the id_token_hint");
     }
 
-    // V4: the OIDC logout, callback, authorization, REST and catch-all chains send the Spring Security default
-    // security headers, and Strict-Transport-Security on a request marked secure only
+    // V4: the OIDC logout, callback, authorization, REST and catch-all chains send the default security headers
+    // Strict-Transport-Security is sent only on a request marked secure.
     @Test
     void securityHeaders() throws Exception {
         try (var keycloak = keycloak();
@@ -180,10 +180,11 @@ class OAuthTest extends AbstractKeycloakTest {
 
                 var browser = new SsoBrowser(httpClient.getBaseURL());
 
-                // V4: the response that creates the Studio session carries Jetty's own Expires with the new session
-                // cookie, so the cache writer backs off there by design. This first request only creates the session;
-                // every response checked below then comes from that session and must carry the full default set.
-                assertEquals(HttpStatus.SC_MOVED_TEMPORARILY, browser.get("/").statusCode(), "/: session-creating status");
+                // V4: this first request only creates the Studio session for the checks below
+                // Its response carries Jetty's Expires with the new cookie, so the cache writer backs off by design.
+                // Responses below that set no cookie and no cache policy of their own must carry the full default set.
+                assertEquals(HttpStatus.SC_MOVED_TEMPORARILY, browser.get("/").statusCode(),
+                        "/: session-creating status");
 
                 // Before login: the authorization redirect, the REST challenge and the login redirect.
                 assertSecurityHeadersOn(browser, "/oauth2/authorization/webstudio", HttpStatus.SC_MOVED_TEMPORARILY);
@@ -195,8 +196,8 @@ class OAuthTest extends AbstractKeycloakTest {
                         HttpStatus.SC_MOVED_TEMPORARILY);
                 assertSecureSecurityHeadersOn(browser, "/rest/users/profile", HttpStatus.SC_UNAUTHORIZED);
                 assertSecureSecurityHeadersOn(browser, "/", HttpStatus.SC_MOVED_TEMPORARILY);
-                // V4: the callback chain, asked without an authorization response, rejects with Jetty's error page; it
-                // is asked only before login, because the failed authentication clears the security context
+                // V4: the callback chain, asked without an authorization response, rejects with Jetty's error page
+                // It is asked only before login, because the failed authentication clears the security context.
                 assertCallbackChainSecurityHeadersOn(browser,
                         "/login/oauth2/code/webstudio",
                         HttpStatus.SC_UNAUTHORIZED);
@@ -204,14 +205,14 @@ class OAuthTest extends AbstractKeycloakTest {
                 // After login: the REST chain serving the authenticated session.
                 browser.loginViaOAuth2("admin", password("admin"));
                 assertSecurityHeadersOn(browser, "/rest/users/profile", HttpStatus.SC_OK);
-                // V4: the real IdP callback rotates the session ID and sets the new cookie, which Jetty marks with its
-                // own Expires, so the cache writer backs off on it by design; the other headers must still be there
+                // V4: the real IdP callback rotates the session ID and still carries the response-independent headers
+                // Jetty adds its own Expires to that cookie-setting response, so the cache writer backs off by design.
                 var callback = browser.lastStudioResponse("/login/oauth2/code/webstudio");
                 assertEquals(HttpStatus.SC_MOVED_TEMPORARILY, callback.statusCode(), "/login/oauth2/code/**: status");
                 assertCookieSettingSecurityHeaders(callback, "/login/oauth2/code/**");
 
-                // V4: the logout chain ends the session with a redirect to the IdP, then answers a request marked
-                // secure on the ended session
+                // V4: the logout chain ends the session with a redirect to the IdP
+                // It then answers a request marked secure on the ended session.
                 assertSecurityHeadersOn(browser, "/logout", HttpStatus.SC_MOVED_TEMPORARILY);
                 assertSecureSecurityHeadersOn(browser, "/logout", HttpStatus.SC_MOVED_TEMPORARILY);
             }
@@ -274,14 +275,14 @@ class OAuthTest extends AbstractKeycloakTest {
         }
     }
 
-    // V12: an IdP login whose group matches an ADMIN-holding OpenL group is warned about; a login matching only
-    // non-ADMIN groups and a personal access token request, which replays the stored groups, are not
+    // V12: an IdP login whose group matches an ADMIN-holding OpenL group is warned about
+    // A login matching only non-ADMIN groups is not warned about, nor is a PAT request replaying stored groups.
     @Test
     @StdIo
     void adminGroupMatchWarns(StdOut out, StdErr err) throws Exception {
-        // V12: @StdIo takes the streams over from the leak guard's tees, so both captures go to the guard, which scans
-        // them, Studio start-up and shutdown included, for every generated and issued secret after the test, passed
-        // or failed
+        // V12: both @StdIo captures go to the leak guard, which scans them after the test, passed or failed
+        // @StdIo takes the streams from the guard's tees, so what this test writes reaches the captures, not the tees.
+        // The scan covers Studio start-up and shutdown and looks for every generated and issued secret.
         scanCapturedAfterTest(out::capturedString);
         scanCapturedAfterTest(err::capturedString);
         try (var keycloak = keycloak();
@@ -323,12 +324,14 @@ class OAuthTest extends AbstractKeycloakTest {
                 assertNotNull(adminBearerToken, "ADMIN_ACCESS_TOKEN");
                 var pat = getPersonalAccessTokenForUser(httpClient,
                         adminBearerToken,
-                        new CreatePersonalAccessTokenRequest("admin-warning-pat", Date.from(Instant.now().plusSeconds(3600))));
+                        new CreatePersonalAccessTokenRequest("admin-warning-pat",
+                                Date.from(Instant.now().plusSeconds(3600))));
                 var patToken = pat.token();
                 mark = Mark.of(out, err);
-                // V12: the cookie-less JDK client sends only the PAT, so the token alone authenticates this request. With
-                // a remembered session cookie, as the harness client keeps, PatAuthenticationFilter would still resolve
-                // and map the PAT, but would keep the same user's session context instead of the token's.
+                // V12: the cookie-less JDK client sends only the PAT, so the token alone authenticates this request
+                // The harness client would also send its remembered session cookie, which belongs to the same user.
+                // PatAuthenticationFilter would still resolve and map the PAT on such a request.
+                // It would keep the same user's session context, though, instead of the token's.
                 var patRequest = HttpRequest.newBuilder(httpClient.getBaseURL().resolve("/rest/users/profile"))
                         .header(HttpHeaders.AUTHORIZATION, "Token " + patToken)
                         .timeout(Duration.ofMillis(Integer.parseInt(System.getProperty("http.timeout.read"))))
@@ -358,9 +361,8 @@ class OAuthTest extends AbstractKeycloakTest {
                 err.capturedString().substring(mark.err()).lines());
     }
 
-    // V12: polls with a JDK loop until a line after the mark matches (true) or the timeout elapses (false). The loop
-    // is bounded by the timeout; Awaitility is not on this module's test classpath, and the module POM gains no
-    // dependency, so it is not used here.
+    // V12: this JDK loop polls until a line after the mark matches (true) or the timeout elapses (false)
+    // A JDK loop is used because Awaitility is not on this module's test classpath and its POM gains no dependency.
     private static boolean awaitLineAfter(StdOut out,
                                           StdErr err,
                                           Mark mark,
@@ -376,8 +378,8 @@ class OAuthTest extends AbstractKeycloakTest {
         return true;
     }
 
-    // V12: the secret part of a PAT, the text after the first '.' that follows the openl_pat_ prefix; the leak guard
-    // scans for it as well as for the whole token
+    // V12: the leak guard scans for a PAT's secret part as well as for the whole token
+    // The secret part is the text after the first '.' that follows the openl_pat_ prefix.
     private static String patSecret(String token) {
         assertTrue(token.startsWith(PAT_PREFIX), "personal access token must start with " + PAT_PREFIX);
         var separator = token.indexOf('.', PAT_PREFIX.length());
@@ -387,29 +389,45 @@ class OAuthTest extends AbstractKeycloakTest {
     }
 
     // V3: package-private, so a failure part-way through the acquisitions is tested without Keycloak
-    Map<String, String> retrieveBearerAccessTokens(String authServerUrl) throws URISyntaxException, IOException, InterruptedException {
+    Map<String, String> retrieveBearerAccessTokens(String authServerUrl)
+            throws URISyntaxException, IOException, InterruptedException {
         Map<String, String> tokens = new HashMap<>();
         // V3: realm passwords are generated at runtime
         tokens.put("ADMIN_ACCESS_TOKEN", getAccessTokenForUser(authServerUrl, "admin", password("admin")));
         tokens.put("USER1_ACCESS_TOKEN", getAccessTokenForUser(authServerUrl, "user1", password("user1")));
         tokens.put("GUEST_ACCESS_TOKEN", getAccessTokenForUser(authServerUrl, "guest", password("guest")));
-        tokens.put("EPBDS12973_DEPLOYER_TOKEN", getAccessTokenForUser(authServerUrl, "epbds12973_deployer", password("epbds12973_deployer")));
-        tokens.put("EPBDS12973_EDITOR_TOKEN", getAccessTokenForUser(authServerUrl, "epbds12973_editor", password("epbds12973_editor")));
-        tokens.put("EPBDS12973_VIEWER_TOKEN", getAccessTokenForUser(authServerUrl, "epbds12973_viewer", password("epbds12973_viewer")));
-        tokens.put("EPBDS14584_MANAGER_TOKEN", getAccessTokenForUser(authServerUrl, "epbds14584_manager", password("epbds14584_manager")));
-        tokens.put("EPBDS14584_CONTRIBUTOR_TOKEN", getAccessTokenForUser(authServerUrl, "epbds14584_contributor", password("epbds14584_contributor")));
-        tokens.put("EPBDS14584_VIEWER_TOKEN", getAccessTokenForUser(authServerUrl, "epbds14584_viewer", password("epbds14584_viewer")));
-        tokens.put("EPBDS14670_MANAGER_TOKEN", getAccessTokenForUser(authServerUrl, "epbds14670_manager", password("epbds14670_manager")));
-        tokens.put("EPBDS14670_CONTRIBUTOR_TOKEN", getAccessTokenForUser(authServerUrl, "epbds14670_contributor", password("epbds14670_contributor")));
-        tokens.put("EPBDS14670_VIEWER_TOKEN", getAccessTokenForUser(authServerUrl, "epbds14670_viewer", password("epbds14670_viewer")));
-        tokens.put("EPBDS14670R_MANAGER_TOKEN", getAccessTokenForUser(authServerUrl, "epbds14670r_manager", password("epbds14670r_manager")));
-        tokens.put("EPBDS14670R_CONTRIBUTOR_TOKEN", getAccessTokenForUser(authServerUrl, "epbds14670r_contributor", password("epbds14670r_contributor")));
-        tokens.put("EPBDS14670R_VIEWER_TOKEN", getAccessTokenForUser(authServerUrl, "epbds14670r_viewer", password("epbds14670r_viewer")));
-        tokens.put("EPBDS15131_ADMIN_TOKEN", getAccessTokenForUser(authServerUrl, "epbds15131_admin", password("epbds15131_admin")));
-        tokens.put("EPBDS15134_USER_TOKEN", getAccessTokenForUser(authServerUrl, "epbds15134_user", password("epbds15134_user")));
-        tokens.put("EPBDS15621_USER_TOKEN", getAccessTokenForUser(authServerUrl, "epbds15621_user", password("epbds15621_user")));
-        // V3: a per-run JWT-shaped token that no realm key signs, kept for the leak scans of this class as soon as it
-        // exists; each issued token was kept by getAccessTokenForUser when Keycloak returned it
+        tokens.put("EPBDS12973_DEPLOYER_TOKEN",
+                getAccessTokenForUser(authServerUrl, "epbds12973_deployer", password("epbds12973_deployer")));
+        tokens.put("EPBDS12973_EDITOR_TOKEN",
+                getAccessTokenForUser(authServerUrl, "epbds12973_editor", password("epbds12973_editor")));
+        tokens.put("EPBDS12973_VIEWER_TOKEN",
+                getAccessTokenForUser(authServerUrl, "epbds12973_viewer", password("epbds12973_viewer")));
+        tokens.put("EPBDS14584_MANAGER_TOKEN",
+                getAccessTokenForUser(authServerUrl, "epbds14584_manager", password("epbds14584_manager")));
+        tokens.put("EPBDS14584_CONTRIBUTOR_TOKEN",
+                getAccessTokenForUser(authServerUrl, "epbds14584_contributor", password("epbds14584_contributor")));
+        tokens.put("EPBDS14584_VIEWER_TOKEN",
+                getAccessTokenForUser(authServerUrl, "epbds14584_viewer", password("epbds14584_viewer")));
+        tokens.put("EPBDS14670_MANAGER_TOKEN",
+                getAccessTokenForUser(authServerUrl, "epbds14670_manager", password("epbds14670_manager")));
+        tokens.put("EPBDS14670_CONTRIBUTOR_TOKEN",
+                getAccessTokenForUser(authServerUrl, "epbds14670_contributor", password("epbds14670_contributor")));
+        tokens.put("EPBDS14670_VIEWER_TOKEN",
+                getAccessTokenForUser(authServerUrl, "epbds14670_viewer", password("epbds14670_viewer")));
+        tokens.put("EPBDS14670R_MANAGER_TOKEN",
+                getAccessTokenForUser(authServerUrl, "epbds14670r_manager", password("epbds14670r_manager")));
+        tokens.put("EPBDS14670R_CONTRIBUTOR_TOKEN",
+                getAccessTokenForUser(authServerUrl, "epbds14670r_contributor", password("epbds14670r_contributor")));
+        tokens.put("EPBDS14670R_VIEWER_TOKEN",
+                getAccessTokenForUser(authServerUrl, "epbds14670r_viewer", password("epbds14670r_viewer")));
+        tokens.put("EPBDS15131_ADMIN_TOKEN",
+                getAccessTokenForUser(authServerUrl, "epbds15131_admin", password("epbds15131_admin")));
+        tokens.put("EPBDS15134_USER_TOKEN",
+                getAccessTokenForUser(authServerUrl, "epbds15134_user", password("epbds15134_user")));
+        tokens.put("EPBDS15621_USER_TOKEN",
+                getAccessTokenForUser(authServerUrl, "epbds15621_user", password("epbds15621_user")));
+        // V3: a per-run JWT-shaped token that no realm key signs is kept for the leak scans as soon as it exists
+        // Each issued token is kept by getAccessTokenForUser the moment Keycloak returns it.
         var unknownAccessToken = unknownAccessToken();
         registerSecret("unknown access token", unknownAccessToken);
         tokens.put("UNKNOWN_ACCESS_TOKEN", unknownAccessToken);
@@ -439,7 +457,8 @@ class OAuthTest extends AbstractKeycloakTest {
     }
 
     // V3: package-private, so the token-free failure message is tested without Keycloak
-    String getAccessTokenForUser(String authServerUrl, String username, String password) throws URISyntaxException, IOException, InterruptedException {
+    String getAccessTokenForUser(String authServerUrl, String username, String password)
+            throws URISyntaxException, IOException, InterruptedException {
         var request = HttpRequest.newBuilder()
                 .uri(new URI(authServerUrl + "/realms/openlstudio/protocol/openid-connect/token"))
                 .header(HttpHeaders.CONTENT_TYPE, MediaType.APPLICATION_FORM_URLENCODED)
@@ -455,8 +474,9 @@ class OAuthTest extends AbstractKeycloakTest {
         if (response.statusCode() == HttpStatus.SC_OK) {
             String responseBody = response.body();
             var responseNode = mapper.readTree(responseBody);
-            // V3: every token Keycloak issues is kept for the leak scans of this class the moment it arrives, so a
-            // later failed acquisition leaves none unscanned; the ID and refresh tokens only when the response has them
+            // V3: every token Keycloak issues is kept for the leak scans of this class the moment it arrives
+            // A later failed acquisition therefore leaves no issued token unscanned.
+            // The ID and refresh tokens are kept only when the response has them.
             registerSecret("ID token", responseNode.path("id_token").asText(null));
             registerSecret("refresh token", responseNode.path("refresh_token").asText(null));
             var accessToken = responseNode.get("access_token").asText();

@@ -8,6 +8,8 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -28,6 +30,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import javax.crypto.Cipher;
@@ -48,6 +51,7 @@ import org.junit.jupiter.api.function.Executable;
 import org.junit.jupiter.api.io.TempDir;
 import org.junitpioneer.jupiter.StdErr;
 import org.junitpioneer.jupiter.StdIo;
+import org.mockito.Mockito;
 import org.slf4j.simple.SimpleLogger;
 import org.springframework.core.env.MapPropertySource;
 import org.springframework.core.env.MutablePropertySources;
@@ -887,6 +891,52 @@ class DynamicPropertySourceSecretsTest {
         assertNoneLogged(String.valueOf(failure.getMessage()), List.of(fresh, other));
     }
 
+    // V6: a save that fails on a later secret drops the cached keys of the ciphertexts it made and never published.
+    @Test
+    @StdIo
+    void failedSaveDropsTheCachedKeysOfTheCiphertextsItMade(StdErr err, @TempDir Path home) throws Exception {
+        var source = open(home, null, Map.of());
+        var instanceKey = key();
+        var material = HashingUtils.sha256Hex(instanceKey);
+        var first = hex();
+        var second = hex();
+        var causeText = hex();
+        var calls = new AtomicInteger();
+        var made = new ArrayList<String>();
+        IOException failure;
+        // The instance key serves the first secret; the lookup for the second fails once the first is encrypted.
+        try (var keys = Mockito.mockStatic(InstanceSecretKey.class)) {
+            keys.when(() -> InstanceSecretKey.get(any(Path.class), eq(true))).thenAnswer(call -> {
+                if (calls.incrementAndGet() == 1) {
+                    return instanceKey;
+                }
+                made.addAll(saltsAuthenticatedBy(material));
+                throw new IOException(causeText);
+            });
+
+            failure = assertThrows(IOException.class,
+                    () -> source.save(Map.of("a.password", first, "b.password", second)));
+        }
+
+        assertEquals(2, calls.get(), "Both secrets must be encrypted, in the order of their names");
+        assertEquals(1, made.size(), "The first secret must be encrypted, proving its key, before the second fails");
+        var slot = new PassCoder.KeySlot(made.get(0), material);
+        assertNull(PassCoder.KEYS.get(slot), "The key of a ciphertext a failed save made must no longer be cached");
+        assertTrue(saltsAuthenticatedBy(material).isEmpty(), "No key of a failed save may stay cached");
+        var expected = "Cannot encrypt the value of property 'b.password' (the instance key file '"
+                + home.resolve(InstanceSecretKey.FILE_NAME)
+                + "' cannot be read or created); the settings are not saved.";
+        assertSecret(expected, failure.getMessage(), "The failure must name the property and the cause");
+        assertNull(failure.getCause(), "The failure must not carry its cause, whose text may be unsafe in a log");
+        assertTrue(source.getProperties().isEmpty(), "Nothing of a failed save may be published");
+        assertFalse(Files.exists(settingsFile(home)), "A failed save must not write the file");
+        var log = err.capturedString();
+        assertEquals(1, count(log, "ERROR"), "A failed save must log one ERROR");
+        assertEquals(1, count(log, "ERROR", expected), "The ERROR must name the property and the cause");
+        assertNoneLogged(log, List.of(first, second, instanceKey, causeText));
+        assertNoneLogged(String.valueOf(failure.getMessage()), List.of(first, second, instanceKey, causeText));
+    }
+
     // V6: the cause of a failed encryption is named by the type of the failure, never by its text, and logged once.
     @Test
     @StdIo
@@ -1394,6 +1444,27 @@ class DynamicPropertySourceSecretsTest {
         var payload = Base64.getDecoder().decode(stored.substring(V2_STORED.length(), stored.length() - 1));
         return new PassCoder.KeySlot(Base64.getEncoder().encodeToString(Arrays.copyOf(payload, 16)),
                 HashingUtils.sha256Hex(keyMaterial));
+    }
+
+    /**
+     * V6: the salts whose group in {@link PassCoder#KEYS} holds the key of the given material as authenticated, read
+     * under the lock of the cache from its private map of groups.
+     *
+     * @param material the hex SHA-256 of a key material
+     */
+    private static List<String> saltsAuthenticatedBy(String material) throws ReflectiveOperationException {
+        var groups = PassCoder.KeyCache.class.getDeclaredField("groups");
+        groups.setAccessible(true);
+        var salts = new ArrayList<String>();
+        synchronized (PassCoder.KEYS) {
+            for (var salt : ((Map<?, ?>) groups.get(PassCoder.KEYS)).keySet()) {
+                var slot = new PassCoder.KeySlot((String) salt, material);
+                if (PassCoder.KEYS.isAuthenticated(slot)) {
+                    salts.add(slot.salt());
+                }
+            }
+        }
+        return salts;
     }
 
     private static String stored(DynamicPropertySource source, String name) {

@@ -96,8 +96,8 @@ public class ProjectFileLookupServiceImpl implements ProjectFileLookupService {
         }
         String anchorDir = FilePaths.parent(FilePaths.trimSlashes(anchorPath));
         String base = FilePaths.trimSlashes(project.getRealPath());
-        // V1: the local project folder the artefacts are read from; empty when not file-backed. Resolved
-        // at most once, at the first candidate that passes every other check.
+        // V1: the local project folder that anchors the link check of each candidate; empty when not file-backed.
+        // The folder is resolved at most once, at the first candidate that passes every other check.
         Supplier<Optional<Path>> boundary = SingletonSupplier.of(() -> FileRoot.projectBoundary(project));
 
         var candidates = new ArrayList<Candidate>();
@@ -108,8 +108,8 @@ public class ProjectFileLookupServiceImpl implements ProjectFileLookupService {
         // project has no design repository ({@code null}), so the search covers just its own files.
         // Each match is authorized individually, so the search never surfaces a file the user cannot read.
         if (repository != null && repository.supports().folders()) {
-            // V1: the unwrapped repository's local root anchors the link check of each match; it is
-            // resolved at most once, at the first match.
+            // V1: the unwrapped repository's local root anchors the link check of each match.
+            // The root is resolved at most once, at the first match.
             var unwrapped = unwrapRepository(repository);
             collectFromRepository(unwrapped, repository.getId(), anchorDir, fileName, base,
                     SingletonSupplier.of(() -> FileRoot.localRoot(unwrapped)), candidates);
@@ -125,8 +125,8 @@ public class ProjectFileLookupServiceImpl implements ProjectFileLookupService {
         }
         String anchorDir = FilePaths.parent(FilePaths.trimSlashes(anchorPath));
         var candidates = new ArrayList<Candidate>();
-        // V1: the unwrapped repository's local root anchors the link check of each match; it is resolved
-        // at most once, at the first match.
+        // V1: the unwrapped repository's local root anchors the link check of each match.
+        // The root is resolved at most once, at the first match.
         var unwrapped = unwrapRepository(repository);
         collectFromRepository(unwrapped, repository.getId(), anchorDir, fileName, null,
                 SingletonSupplier.of(() -> FileRoot.localRoot(unwrapped)), candidates);
@@ -149,10 +149,11 @@ public class ProjectFileLookupServiceImpl implements ProjectFileLookupService {
     }
 
     // V1: boundary supplies the local project folder, resolved only for a candidate that passes every other check.
-    // V1: the return is declared nullable, as the JavaDoc states; the link check adds a third null return.
+    // V1: the result is nullable: a candidate that is unacceptable or reached through a link yields none.
     /**
-     * Builds a candidate for a project file that matches by name, lies on the anchor's upward line and
-     * is readable by the current user; {@code null} when any of these does not hold.
+     * Builds a candidate for a project file that matches by name, lies on the anchor's upward line, is
+     * readable by the current user and, in a file-backed project, sits at its own path under the
+     * project folder; {@code null} when any of these does not hold.
      */
     private @Nullable Candidate candidateFromArtefact(AProjectArtefact artefact, String base, String anchorDir,
                                                       String fileName, Supplier<Optional<Path>> boundary) {

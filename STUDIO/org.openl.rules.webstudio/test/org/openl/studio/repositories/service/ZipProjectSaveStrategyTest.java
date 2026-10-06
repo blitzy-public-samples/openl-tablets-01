@@ -1,8 +1,6 @@
 package org.openl.studio.repositories.service;
 
-// V1-D: never, LinkedHashMap, ThreadLocalRandom, ZipArchiveEntry, ZipArchiveOutputStream, Executable, MessageDigest,
-// NoSuchAlgorithmException, HexFormat and TreeMap serve the surface D link tests; the import block itself cannot hold a
-// comment, as Spotless rewrites it.
+// V1-D: this test also covers the upload destination, archive entry and folder-link containment of surface D
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -362,8 +360,8 @@ class ZipProjectSaveStrategyTest {
     }
 
     // ---------------------------------------------------------------------------------------------
-    // V1: the upload destination guard over a file repository built from its settings, as the
-    // application builds it, and so behind PathCheckedRepository and the secured wrapper
+    // V1: the upload destination guard over a file repository built from its settings, as the application builds it
+    // Such a repository sits behind PathCheckedRepository and the secured wrapper.
     // ---------------------------------------------------------------------------------------------
 
     @Test
@@ -482,8 +480,8 @@ class ZipProjectSaveStrategyTest {
     }
 
     // ---------------------------------------------------------------------------------------------
-    // V1: the same guard over a Git repository built from its settings, which writes the files it
-    // saves through its local working tree, so a link in that tree leads a write wherever it points
+    // V1: the same guard over a Git repository built from its settings, which saves through its local working tree
+    // A link in that tree leads a write wherever it points.
     // ---------------------------------------------------------------------------------------------
 
     @Test
@@ -623,10 +621,83 @@ class ZipProjectSaveStrategyTest {
                 "The removal of a file the archive does not hold is committed");
     }
 
+    // V1-D: a full Git save's cleanup enters folder links, so a committed folder link out of the project is refused
+    @Test
+    @DisabledOnOs(OS.WINDOWS)
+    void overwritingAProjectOfAConfiguredGitRepositoryRejectsACommittedFolderLinkOutOfTheProject() throws Exception {
+        var root = tmp.resolve("design");
+        var outside = Files.createDirectories(tmp.resolve("outside"));
+        Files.writeString(outside.resolve("canary.txt"), "kept");
+        var repository = secured(configuredGitRepository(root));
+        saveNewProject(repository, "Existing", null);
+        // No archive entry reaches this link; only the cleanup of the full save would descend into it.
+        var linkPath = BASE_RULES_LOCATION + "Existing/vendor";
+        commitLink(root, linkPath, outside);
+        var outsideBefore = snapshot(outside);
+        var model = new CreateUpdateProjectModel("design", "jsmith", "Existing", null, null, true);
+
+        assertPathRejected(() -> saveStrategy.save(repository, model, PROJECT_ARCHIVE));
+
+        assertEquals(outsideBefore, snapshot(outside), "Nothing outside the project is touched");
+        assertTrue(Files.isSymbolicLink(root.resolve(linkPath)), "The link is left as it was");
+        assertNotNull(repository.check(BASE_RULES_LOCATION + "Existing/Main.xlsx"), "The project is left as it was");
+    }
+
+    // V1-D: a committed folder link to the rules location, an ancestor outside the project, is refused as well
+    @Test
+    @DisabledOnOs(OS.WINDOWS)
+    void overwritingAProjectOfAConfiguredGitRepositoryRejectsACommittedFolderLinkToAnAncestor() throws Exception {
+        var root = tmp.resolve("design");
+        var repository = secured(configuredGitRepository(root));
+        saveNewProject(repository, "Existing", null);
+        saveNewProject(repository, "Sibling", null);
+        // The link leads back to the rules location, so the cleanup would walk the sibling and itself again.
+        var linkPath = BASE_RULES_LOCATION + "Existing/loop";
+        commitLink(root, linkPath, Path.of(".."));
+        var rulesLocation = root.resolve(BASE_RULES_LOCATION);
+        var rulesBefore = snapshot(rulesLocation);
+        var model = new CreateUpdateProjectModel("design", "jsmith", "Existing", null, null, true);
+
+        assertPathRejected(() -> saveStrategy.save(repository, model, PROJECT_ARCHIVE));
+
+        assertEquals(rulesBefore, snapshot(rulesLocation), "Nothing in the rules location is removed or written");
+        assertTrue(Files.isSymbolicLink(root.resolve(linkPath)), "The link is left as it was");
+        assertNotNull(repository.check(BASE_RULES_LOCATION + "Existing/Main.xlsx"), "The project is left as it was");
+        assertNotNull(repository.check(BASE_RULES_LOCATION + "Sibling/Main.xlsx"), "The sibling is left as it was");
+    }
+
+    // V1-D: a Git overwrite runs when its folder holds only a file link, a dangling link and a folder link inside it
+    @Test
+    @DisabledOnOs(OS.WINDOWS)
+    void overwritingAProjectOfAConfiguredGitRepositoryWhoseFolderHoldsOnlyLinksItsCleanupRemovesSucceeds()
+            throws Exception {
+        var root = tmp.resolve("design");
+        var outside = Files.createDirectories(tmp.resolve("outside"));
+        var canary = Files.writeString(outside.resolve("canary.txt"), "kept");
+        var repository = secured(configuredGitRepository(root));
+        var first = new CreateUpdateProjectModel("design", "jsmith", "Existing", null, null, false);
+        assertNotNull(saveStrategy.save(repository, first, PROJECT_ARCHIVE),
+                "Fixture: the project holds a rules folder");
+        var project = root.resolve(BASE_RULES_LOCATION + "Existing");
+        commitLink(root, BASE_RULES_LOCATION + "Existing/notes.txt", canary);
+        commitLink(root, BASE_RULES_LOCATION + "Existing/ghost", outside.resolve("missing"));
+        commitLink(root, BASE_RULES_LOCATION + "Existing/alias", project.resolve("rules"));
+        var outsideBefore = snapshot(outside);
+        var model = new CreateUpdateProjectModel("design", "jsmith", "Existing", null, null, true);
+
+        assertNotNull(saveStrategy.save(repository, model, PROJECT_ARCHIVE), "The saved project folder is reported");
+
+        assertEquals(outsideBefore, snapshot(outside), "Nothing outside the project is touched");
+        assertNotNull(repository.check(BASE_RULES_LOCATION + "Existing/rules/Project2-Main.xlsx"),
+                "The archive entry is committed");
+        assertNull(repository.check(BASE_RULES_LOCATION + "Existing/notes.txt"),
+                "The link to a file the archive does not hold is removed");
+    }
+
     // ---------------------------------------------------------------------------------------------
-    // V1: a Git repository checks out the branch it saves to only once it writes, and that branch may
-    // hold a link the tree checked out before did not, so every entry is checked in the tree it is
-    // written through
+    // V1: every entry is checked in the tree it is written through, that of the branch the Git save checks out
+    // A Git repository checks out the branch it saves to only once it writes, and that branch may hold a link the
+    // tree checked out before did not.
     // ---------------------------------------------------------------------------------------------
 
     @Test
@@ -882,8 +953,7 @@ class ZipProjectSaveStrategyTest {
     }
 
     // ---------------------------------------------------------------------------------------------
-    // V1-D: the remaining upload-project link payloads of the surface D matrix, over the secured file repository the
-    // REST archive route receives
+    // V1-D: the remaining surface D link payloads, over the secured file repository the REST archive route receives
     // ---------------------------------------------------------------------------------------------
 
     // V1-D: the rules location itself is a link to outside, so the new project folder below it would leave the root

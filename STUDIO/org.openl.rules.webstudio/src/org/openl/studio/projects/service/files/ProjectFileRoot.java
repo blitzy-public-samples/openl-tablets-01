@@ -59,33 +59,34 @@ public class ProjectFileRoot implements FileRoot {
      */
     private final Supplier<UserInfo> author;
     private final DesignTimeRepository designTimeRepository;
-    // V1: the project folder on disk that contains() keeps paths inside, resolved once per mount.
+    // V1: the project folder on disk that contains() keeps paths inside, resolved once per read source.
     /**
-     * Folder of the project on disk, a lazily resolved cache that lives as long as the mount.
+     * Folder on disk of the tree the mount reads, a lazily resolved cache that lives until the mount
+     * reads another tree.
      *
-     * <p>{@link #contains(String)} resolves it on its first call from
-     * {@link FileRoot#projectBoundary(AProject)} and then sets {@link #boundaryResolved}. After that,
-     * {@code null} means the project is not stored in a local directory, so every path is accepted.
-     * When resolving it fails on an unparsable project path or a denied lookup,
-     * {@link #boundaryUnresolvable} is set as well, and every path is rejected without resolving it
-     * again.
+     * <p>{@link #readFolder(String)} records the tree it serves in {@link #source}: the project for the
+     * current state, or the revision it reads from the design repository for a version. A read of
+     * another tree than the previous one drops the cache. {@link #contains(String)} resolves it on its
+     * first call for a tree from {@link FileRoot#projectBoundary(AProject)}, applied to that tree, or to
+     * the project before any read, and then sets {@link #boundaryResolved}. After that, {@code null}
+     * means the tree is not stored in a local directory, so every path is accepted. When resolving it
+     * fails on an unparsable project path or a denied lookup, {@link #boundaryUnresolvable} is set as
+     * well, and every path is rejected without resolving it again for that tree. Any other failure
+     * propagates and leaves the cache unresolved, so the next call resolves it again.
      *
      * <p>No synchronization is needed: {@link ProjectFileRootFactory} builds a new mount for each
      * request, so the mount is never shared between threads.
      */
     private @Nullable Path boundary;
-    /**
-     * Whether {@link #boundary} has been resolved, or has been found unresolvable.
-     */
     private boolean boundaryResolved;
-    /**
-     * Whether the project folder could not be resolved, so the mount contains no path.
-     */
     private boolean boundaryUnresolvable;
+    // V1: the tree readFolder last served, whose folder contains() checks; null before the first read.
+    private @Nullable AProject source;
 
     @Override
     public AProjectFolder readFolder(String version) {
         if (StringUtils.isBlank(version)) {
+            readFrom(project); // V1: the current state is contained in the project's own folder
             return wrap(project);
         }
         var historical = new AProject(project.getDesignRepository(), project.getDesignFolderName(), version);
@@ -93,7 +94,9 @@ public class ProjectFileRoot implements FileRoot {
             if (historical.getFileData() == null) {
                 throw new NotFoundException("file.version.not.found.message");
             }
-            return wrap(historical);
+            var folder = wrap(historical);
+            readFrom(historical); // V1: a found revision is contained in its folder of the design repository
+            return folder;
         } catch (NotFoundException e) {
             throw e;
         } catch (RuntimeException e) {
@@ -258,9 +261,14 @@ public class ProjectFileRoot implements FileRoot {
      * JDBC, S3, Azure Blob, mocks) has an empty boundary: every path is accepted, and the service's
      * two lexical validators still apply.
      *
-     * <p>The check applies to the current state. Historical reads through {@link #readFolder(String)}
-     * come from the versioned design repository; for an opened project they are checked against the
-     * working copy, which only fails closed where a working-copy path is a link leaving the project.
+     * <p>Paths are checked against the tree {@link #readFolder(String)} last served, and against the
+     * current state before any read. The current state is checked as described above. A
+     * version-qualified read comes from the design repository, where a versioned backend serves that
+     * revision and a file repository serves its current state. Its paths are checked against the
+     * project's folder in that design repository, as for a closed project: the anchor is the file
+     * design repository's root and the boundary is {@code <anchor>/<getRealPath()>} of that revision.
+     * A link that exists only in the design repository is therefore rejected even when the working copy
+     * of an opened project is clean.
      *
      * @param path mount-relative path; empty for the project folder
      * @return {@code false} when the path resolves outside the project folder or the boundary cannot
@@ -269,10 +277,9 @@ public class ProjectFileRoot implements FileRoot {
     @Override
     public boolean contains(String path) {
         if (!boundaryResolved) {
-            // V1: resolved once per mount. An unparsable project path or a denied lookup is remembered,
-            // so the mount fails closed from then on; any other failure propagates and is retried.
+            // V1: resolved once per read source; an unparsable path or a denied lookup fails closed for it.
             try {
-                boundary = FileRoot.projectBoundary(project).orElse(null);
+                boundary = FileRoot.projectBoundary(boundarySource()).orElse(null);
             } catch (IllegalArgumentException | SecurityException e) {
                 boundaryUnresolvable = true;
             }
@@ -281,6 +288,21 @@ public class ProjectFileRoot implements FileRoot {
         var folder = boundary;
         return !boundaryUnresolvable
                 && (folder == null || FileRoot.resolvesInside(folder, FilePaths.trimSlashes(path)));
+    }
+
+    // V1: records the tree a read serves; a read of another tree drops the boundary resolved for the previous one.
+    private void readFrom(AProject tree) {
+        if (tree != boundarySource()) {
+            boundary = null;
+            boundaryResolved = false;
+            boundaryUnresolvable = false;
+        }
+        source = tree;
+    }
+
+    // V1: the tree whose folder contains() checks: the one readFolder last served, or the project before any read.
+    private AProject boundarySource() {
+        return source == null ? project : source;
     }
 
     /**

@@ -119,7 +119,8 @@ final class AclChangeAccumulator implements TransactionSynchronization {
      * The only route to {@link AclChangeListener#aclChanged}. It hands out unmodifiable copies and contains a
      * listener failure: the exception is swallowed, never rethrown, and only fixed text and the exception's class
      * name are logged, never its message or stack trace, because either could quote the values the change
-     * concerned.
+     * concerned. A failure of the logging backend while reporting it is swallowed too, so nothing reaches the
+     * transaction or the caller of the mutation.
      */
     static void notifySafely(AclChangeListener listener,
                              String outcome,
@@ -132,7 +133,11 @@ final class AclChangeAccumulator implements TransactionSynchronization {
                 Collections.unmodifiableSortedSet(new TreeSet<>(kinds)),
                 Collections.unmodifiableSortedSet(new TreeSet<>(objectTypes)));
         } catch (RuntimeException e) {
-            log.warn("ACL change listener failed ({}).", e.getClass().getSimpleName());
+            try {
+                log.warn("ACL change listener failed ({}).", e.getClass().getSimpleName());
+            } catch (RuntimeException ignored) {
+                // The logging backend itself failed, so nothing is left to report to, and the caller must not fail.
+            }
         }
     }
 

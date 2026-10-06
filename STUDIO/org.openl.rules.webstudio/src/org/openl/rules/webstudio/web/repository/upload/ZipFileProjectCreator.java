@@ -246,7 +246,7 @@ public class ZipFileProjectCreator extends AProjectCreator {
                 }
             }
         }
-        // V1: the full entry name must also be a valid relative path (closes the last-segment gap).
+        // V1: the whole entry name, not only each of its segments, must also be a valid relative path.
         if (invalidNames.size() == before && !isValidEntryPath(item.getName())) {
             invalidNames.add(item.getName());
         }

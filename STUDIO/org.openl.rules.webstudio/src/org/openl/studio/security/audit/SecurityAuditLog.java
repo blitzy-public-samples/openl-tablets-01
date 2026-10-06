@@ -29,7 +29,8 @@ import org.springframework.web.context.request.ServletRequestAttributes;
  *
  * <p>Successful authentications, token lifecycle events and committed ACL changes are written at INFO.
  * Failed authentications, lockouts and ACL changes whose transaction did not commit are written at WARN. When the
- * level an event is written at is disabled, nothing of the event is read and no line is built.
+ * level an event is written at is disabled, no principal, request, address or detail collection of the event is
+ * inspected and no line is built; only the outcome of an ACL change is inspected, because it chooses the level.
  *
  * <p>A line carries nothing but user names, the public identifiers of personal access tokens, counts,
  * code-defined names (events, authentication token classes, ACL mutators and object types), addresses and
@@ -48,9 +49,10 @@ import org.springframework.web.context.request.ServletRequestAttributes;
  * {@code ForwardedHeaderFilter} declared in {@code web.xml} rewrites only the scheme, host, port and context prefix
  * of a request, never its remote address.
  *
- * <p>Writing an event never fails its caller: a problem while building a line is reported with a fixed
- * message and swallowed, so auditing cannot break a login, a token request or an ACL transaction. The class is
- * stateless and thread-safe.
+ * <p>Writing an event never fails its caller: a problem while building or writing a line is reported with a fixed
+ * message and swallowed, and a failure of the logging backend, including one while reporting such a problem, is
+ * swallowed too, so auditing cannot break a login, a token request or an ACL transaction. The class is stateless
+ * and thread-safe.
  */
 public final class SecurityAuditLog {
 
@@ -89,10 +91,8 @@ public final class SecurityAuditLog {
      */
     private static final String UNSAFE_CHARACTERS = "\"" + "\\" + "\u2028" + "\u2029";
 
-    /** The number of characters of a value that is written; a longer value is cut there and marked. */
     private static final int MAX_VALUE_LENGTH = 256;
 
-    /** Appended to a value that was cut at {@link #MAX_VALUE_LENGTH} characters. */
     private static final String TRUNCATION_MARKER = "...";
 
     private SecurityAuditLog() {
@@ -283,12 +283,10 @@ public final class SecurityAuditLog {
         return attempt == null ? null : attempt.getClass().getSimpleName();
     }
 
-    /** The name of the current authentication, or the given value when there is none. */
     private static @Nullable String userOf(@Nullable Authentication authentication, String whenAbsent) {
         return authentication == null ? whenAbsent : authentication.getName();
     }
 
-    /** The remote address of an authentication, as {@link #address(Authentication, Authentication)} finds it. */
     private static @Nullable String address(@Nullable Authentication authentication) {
         return address(authentication, null);
     }
@@ -396,14 +394,14 @@ public final class SecurityAuditLog {
     }
 
     /**
-     * Whether the level an event is written at, WARN or INFO, is enabled. Each event checks it before it reads any
-     * value or builds its line.
+     * Whether the level an event is written at, WARN or INFO, is enabled. Each event checks it before it inspects
+     * any principal, request, address or detail collection or builds its line; an ACL change inspects its outcome
+     * first, to choose the level.
      */
     private static boolean enabled(boolean warn) {
         return warn ? LOG.isWarnEnabled() : LOG.isInfoEnabled();
     }
 
-    /** Writes one finished line, at WARN or at INFO. */
     private static void write(boolean warn, String line) {
         if (warn) {
             LOG.warn("{}", line);
@@ -414,9 +412,14 @@ public final class SecurityAuditLog {
 
     /**
      * Reports that an event could not be written. Only the event name and the exception class are logged: an
-     * exception message could quote the values the event was about.
+     * exception message could quote the values the event was about. A failure of the logging backend while
+     * reporting is swallowed as well, so the report never fails the caller.
      */
     private static void writeFailed(String event, RuntimeException e) {
-        LOG.warn("Failed to write the security audit event '{}' ({}).", event, e.getClass().getSimpleName());
+        try {
+            LOG.warn("Failed to write the security audit event '{}' ({}).", event, e.getClass().getSimpleName());
+        } catch (RuntimeException ignored) {
+            // The logging backend itself failed, so nothing is left to report to, and the caller must not fail.
+        }
     }
 }

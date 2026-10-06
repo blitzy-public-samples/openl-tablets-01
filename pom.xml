@@ -140,6 +140,13 @@
         <jackson.version>2.22.3</jackson.version>
         <json-path.version>3.0.0</json-path.version>
         <cxf.version>4.1.8</cxf.version>
+        <!-- Newer than the xmlschema-core 2.3.2 that Apache CXF 4.1.8 manages by default, fixing CVE-2026-102495
+             (unbounded recursion through nested schema imports and includes, CVSS 7.5) and CVE-2026-102496
+             (unbounded recursion through deeply nested schema structures, CVSS 7.5), plus CVE-2026-102497
+             (missing cycle detection in xmlschema-walker, CVSS 7.5), which dependency-check maps onto
+             xmlschema-core. 2.3.3 is the lowest release that fixes all three.
+             Remove once Apache CXF manages xmlschema-core 2.3.3 or later. -->
+        <xmlschema.version>2.3.3</xmlschema.version>
 
         <!-- OpenAPI -->
         <swagger.core.version>2.2.55</swagger.core.version>
@@ -685,6 +692,13 @@
                 <version>${cxf.version}</version>
                 <type>pom</type>
                 <scope>import</scope>
+            </dependency>
+            <!-- Override the xmlschema-core that cxf-core requires with a newer release fixing CVE-2026-102495,
+                 CVE-2026-102496 and CVE-2026-102497. Remove once Apache CXF manages a fixed version by default. -->
+            <dependency>
+                <groupId>org.apache.ws.xmlschema</groupId>
+                <artifactId>xmlschema-core</artifactId>
+                <version>${xmlschema.version}</version>
             </dependency>
             <dependency>
                 <groupId>jakarta.ws.rs</groupId>

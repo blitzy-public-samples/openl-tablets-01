@@ -56,8 +56,8 @@ class SamlTest extends AbstractKeycloakTest {
         }
     }
 
-    // V3: a browser withholds the SameSite=Lax session cookie on the IdP's cross-site POST, and the login still
-    // completes, because Studio finds its AuthnRequest by RelayState instead of by session
+    // V3: the SAML login completes when the IdP's cross-site POST carries no Studio session cookie
+    // A browser withholds the SameSite=Lax session cookie on that POST, so Studio finds its AuthnRequest by RelayState.
     @Test
     void crossSiteSamlCallback() throws Exception {
         withSamlStudio(browser -> {
@@ -72,28 +72,29 @@ class SamlTest extends AbstractKeycloakTest {
         });
     }
 
-    // V4: the SAML logout, metadata, assertion consumer, AuthnRequest, REST and catch-all chains send the default
-    // security headers, before and after login, and Strict-Transport-Security on a request marked secure only
+    // V4: every SAML chain sends the default security headers, before and after login
+    // The chains are logout, metadata, assertion consumer, AuthnRequest, REST and catch-all.
+    // They add Strict-Transport-Security only when the request is marked secure.
     @Test
     void securityHeaders() throws Exception {
         withSamlStudio(browser -> {
-            // V4: the first GET / creates the pre-login session, and Jetty marks every response that sets a cookie
-            // "Expires: Thu, 01 Jan 1970", so Spring's cache writer backs off on that one response. The checks below
-            // run with the session it created, so they see the complete default set.
+            // V4: the first GET / creates the pre-login session that the checks before login run with
+            // Jetty marks every cookie-setting response with its own Expires, so Spring's cache writer backs off on it.
+            // The full default set is expected only on responses that set no cookie and no cache policy of their own.
             assertEquals(HttpStatus.SC_MOVED_TEMPORARILY, browser.get("/").statusCode(), "/ creating the session");
 
             // Before login: the metadata chain serves, the REST chain rejects, the catch-all chain redirects.
             assertStatusAndSecurityHeaders(browser, "/saml2/service-provider-metadata/webstudio", HttpStatus.SC_OK);
             assertStatusAndSecurityHeaders(browser, "/rest/users/profile", HttpStatus.SC_UNAUTHORIZED);
             assertStatusAndSecurityHeaders(browser, "/", HttpStatus.SC_MOVED_TEMPORARILY);
-            // V4: the same chains and the AuthnRequest chain marked secure (X-Forwarded-Proto: https) also send
-            // Strict-Transport-Security
+            // V4: these chains and the AuthnRequest chain add Strict-Transport-Security on a request marked secure
+            // The request is marked secure with X-Forwarded-Proto: https.
             assertSecureSecurityHeadersOn(browser, "/saml2/service-provider-metadata/webstudio", HttpStatus.SC_OK);
             assertSecureSecurityHeadersOn(browser, "/rest/users/profile", HttpStatus.SC_UNAUTHORIZED);
             assertSecureSecurityHeadersOn(browser, "/", HttpStatus.SC_MOVED_TEMPORARILY);
             assertSecureSecurityHeadersOn(browser, "/saml2/authenticate/webstudio", HttpStatus.SC_OK);
-            // V4: the assertion consumer chain, asked without a SAMLResponse, rejects with Jetty's error page; it is
-            // asked only before login, because the failed authentication clears the security context
+            // V4: the assertion consumer chain, asked without a SAMLResponse, rejects with Jetty's error page
+            // It is asked only before login, because the failed authentication clears the security context.
             assertCallbackChainSecurityHeadersOn(browser, "/login/saml2/sso/webstudio", HttpStatus.SC_UNAUTHORIZED);
 
             // After login: the REST chain serves the authenticated session.
@@ -103,15 +104,16 @@ class SamlTest extends AbstractKeycloakTest {
             var authnRequest = browser.lastStudioResponse("/saml2/authenticate/webstudio");
             assertEquals(HttpStatus.SC_OK, authnRequest.statusCode(), "/saml2/authenticate/**: status");
             assertSecurityHeaders(authnRequest, "/saml2/authenticate/**");
-            // V4: the real assertion consumer callback rotates the session ID and sets the new cookie, which Jetty
-            // marks with its own Expires, so the cache writer backs off on it by design; the other headers must stay
+            // V4: the real assertion consumer callback rotates the session ID and sets the session cookie
+            // Jetty marks that response with its own Expires, so the cache writer backs off on it by design.
+            // The other security headers must stay.
             var callback = browser.lastStudioResponse("/login/saml2/sso/webstudio");
             assertEquals(HttpStatus.SC_MOVED_TEMPORARILY, callback.statusCode(), "/login/saml2/**: status");
             assertCookieSettingSecurityHeaders(callback, "/login/saml2/**");
 
-            // V4: logging out answers with the LogoutRequest form and the cookie of the session that keeps the
-            // request, so the cache writer backs off there too; the ended session then gets the full set, plain and
-            // marked secure
+            // V4: logging out answers with the LogoutRequest form and the cookie of the session that keeps the request
+            // Jetty's Expires on that cookie-setting response makes the cache writer back off there too.
+            // The ended session then gets the full set, plain and marked secure.
             var logout = browser.get("/logout");
             assertEquals(HttpStatus.SC_OK, logout.statusCode(), "/logout: status");
             assertCookieSettingSecurityHeaders(logout, "/logout");
@@ -163,8 +165,8 @@ class SamlTest extends AbstractKeycloakTest {
         void run(SsoBrowser browser) throws Exception;
     }
 
-    // V3: starts Keycloak, the S3 mock and a SAML-configured Studio as singleLogout does, then runs the scenario
-    // in a fresh browser; used only by the security checks
+    // V3: this starts Keycloak, the S3 mock and a SAML-configured Studio, then runs the scenario in a fresh browser
+    // It starts them as singleLogout does, and only the security checks use it.
     private void withSamlStudio(SamlScenario scenario) throws Exception {
         try (var keycloak = keycloak();
              var s3 = new S3MockContainer("latest")) {
@@ -179,8 +181,8 @@ class SamlTest extends AbstractKeycloakTest {
         }
     }
 
-    // V4: fetches url without following redirects, then checks its status and default security headers; the
-    // messages name the URL only
+    // V4: this fetches url without following redirects, then checks its status and default security headers
+    // Its failure messages name the URL only.
     private static void assertStatusAndSecurityHeaders(SsoBrowser browser,
                                                        String url,
                                                        int expectedStatus) throws Exception {

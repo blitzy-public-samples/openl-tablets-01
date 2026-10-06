@@ -1552,6 +1552,75 @@ class ProjectFilesServiceTest {
         }
     }
 
+    // V1: surface B payloads B16 and B17 with a version on an opened project whose links exist only in the design copy
+    /**
+     * A version-qualified read of an opened project is served from its folder in the design repository, which a file
+     * repository serves at its current state, while the working copy stays clean. The links {@code docs/leak.txt} to
+     * the outside file and {@code docs/sib.xml} to the design copy of the sibling's {@code rules.xml} exist only in
+     * that design folder. Every read, listing, export and search that takes the version checks them against the
+     * design folder it reads, so they are rejected or omitted before their content is opened.
+     */
+    @Test
+    @DisabledOnOs(OS.WINDOWS)
+    void versionQualifiedReadsOfAnOpenedProjectAreContainedInTheDesignFolderTheyReadFrom() throws Exception {
+        var mount = openedMount();
+        var root = mount.root();
+        var design = tmp.resolve("matrix-opened-design");
+        var docs = Files.createDirectories(design.resolve("P1/docs"));
+        Files.createSymbolicLink(docs.resolve("leak.txt"), outsideFile());
+        Files.createSymbolicLink(docs.resolve("sib.xml"), design.resolve("P2/rules.xml"));
+        assertFalse(Files.exists(mount.project().resolve("docs"), LinkOption.NOFOLLOW_LINKS),
+                "Fixture: the working copy of P1 holds no docs folder");
+        var designSource = Files.readString(design.resolve("P1").resolve(SOURCE));
+        assertNotEquals(Files.readString(mount.project().resolve(SOURCE)), designSource,
+                "Fixture: the working copy and the design copy of " + SOURCE + " differ");
+        var service = service(mount.acl(), new FileNodeMapperImpl());
+        var version = marker();
+        var before = snapshot(mount);
+
+        // Positive control: the version-qualified read serves the design copy, so the rejections below come from it.
+        try (var content = service.getResource(root, mount.path(SOURCE), version).getContent()) {
+            assertEquals(designSource, new String(content.readAllBytes(), StandardCharsets.UTF_8),
+                    "A version-qualified read of " + SOURCE + " on OPENED serves the design copy");
+        }
+        for (var link : LINKED_FILES) {
+            var path = mount.path("docs/" + link);
+            var row = "Version-qualified reads of the design-only docs/" + link + " on OPENED";
+            assertPathRejected(row + " through getResource", () -> service.getResource(root, path, version));
+            assertPathRejected(row + " through getNode", () -> service.getNode(root, path, version));
+        }
+        for (var viewMode : FileViewMode.values()) {
+            var row = "Version-qualified recursive " + viewMode + " listing on OPENED";
+            var listed = pathsOf(
+                    service.getResources(root, FileCriteriaQuery.builder().build(), true, viewMode, version));
+            assertTrue(listed.contains(mount.path(SOURCE)), row + " lists " + SOURCE);
+            for (var link : LINKED_FILES) {
+                assertFalse(listed.contains(mount.path("docs/" + link)), row + " omits docs/" + link);
+            }
+        }
+        var found = service.search(root,
+                FileSearchQuery.builder().content(outsideSecret).recursive(true).version(version).build());
+        assertEquals(List.of(), pathsOf(found),
+                "A version-qualified content search on OPENED finds nothing behind docs/leak.txt");
+        var export = new ByteArrayOutputStream();
+        assertPathRejected("Version-qualified writeFolderAsZip docs on OPENED",
+                () -> service.writeFolderAsZip(root, mount.path("docs"), export, version));
+        assertEquals(0, export.size(), "The rejected version-qualified export on OPENED streams nothing");
+        for (var link : LINKED_FILES) {
+            assertNeverOpened("Version-qualified reads on OPENED", mount, "docs/" + link);
+        }
+
+        // The current state is read from the clean working copy, which has no docs/leak.txt.
+        var current = assertThrows(NotFoundException.class,
+                () -> service.getResource(root, mount.path("docs/leak.txt"), null),
+                "The current read of docs/leak.txt on OPENED is not found");
+        assertEquals(NOT_FOUND, current.getErrorCode(), "The current read of docs/leak.txt on OPENED keeps its 404");
+        assertNothingWritten("Version-qualified reads on OPENED", mount, before);
+        for (var link : LINKED_FILES) {
+            assertTrue(Files.isSymbolicLink(docs.resolve(link)), "The design-only link docs/" + link + " is kept");
+        }
+    }
+
     // ---------------------------------------------------------------------------------------------
     // V1: fixtures of the surface B matrix
     // ---------------------------------------------------------------------------------------------

@@ -25,8 +25,8 @@ import org.openl.security.acl.AclChangeListener;
  * as for grants made at start-up.
  *
  * <p>The listener runs after the transaction has completed, so it must never throw: a failure to write the line is
- * reported with a fixed message and swallowed, and the ACL write and its caller are never affected. The class is
- * stateless and thread-safe.
+ * reported with a fixed message and swallowed, a failure of the logging backend while reporting it is swallowed
+ * too, and the ACL write and its caller are never affected. The class is stateless and thread-safe.
  */
 @Slf4j
 @Component
@@ -39,7 +39,11 @@ public class AclChangeAuditListener implements AclChangeListener {
         } catch (RuntimeException e) {
             // Only the exception class is logged: its message, or the notice itself, could quote the values the
             // change was about.
-            log.warn("Failed to write the ACL change audit event ({}).", e.getClass().getSimpleName());
+            try {
+                log.warn("Failed to write the ACL change audit event ({}).", e.getClass().getSimpleName());
+            } catch (RuntimeException ignored) {
+                // The logging backend itself failed, so nothing is left to report to, and the caller must not fail.
+            }
         }
     }
 }

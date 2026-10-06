@@ -8,6 +8,10 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.Mockito.times;
 
+import java.io.ByteArrayOutputStream;
+import java.io.OutputStream;
+import java.io.PrintStream;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -20,8 +24,10 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junitpioneer.jupiter.StdErr;
 import org.junitpioneer.jupiter.StdIo;
+import org.junitpioneer.jupiter.WritesStdIo;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
+import org.slf4j.LoggerFactory;
 import org.springframework.mock.web.MockHttpServletRequest;
 import org.springframework.mock.web.MockHttpSession;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
@@ -264,6 +270,35 @@ class AclChangeAuditListenerTest {
                 "The next notification must be written with its own counts and names");
     }
 
+    @Test
+    @WritesStdIo
+    void swallowsAFailingAuditWriteWhileTheLoggingBackendFails() {
+        var message = randomValue(24);
+        var kinds = sortedSet("updateAcl");
+        var objectTypes = sortedSet("ProjectArtifact");
+        var sink = new FailingSink(randomValue(24));
+        try (MockedStatic<SecurityAuditLog> audit = Mockito.mockStatic(SecurityAuditLog.class)) {
+            audit.when(() -> SecurityAuditLog.aclChange(any(), anyInt(), any(), any()))
+                    .thenThrow(new IllegalStateException(message));
+            assertSinkFails(sink);
+            var before = sink.writes;
+
+            var threw = throwsWhileStdErrFails(sink,
+                    () -> listener.aclChanged(AclChangeListener.SUCCESS, 1, kinds, objectTypes));
+
+            assertFalse(threw, "A failing audit write must be swallowed while the logging backend fails");
+            assertTrue(sink.writes > before, "The report of the failing audit write must reach the failing backend");
+            audit.verify(() -> SecurityAuditLog.aclChange(AclChangeListener.SUCCESS, 1, kinds, objectTypes),
+                    times(1));
+        }
+
+        // Both exception messages are generated sentinels: neither may be handed to the logging backend.
+        var handed = sink.refused.toString(StandardCharsets.UTF_8);
+        for (var value : List.of(message, sink.message)) {
+            assertFalse(handed.contains(value), "A generated sentinel was handed to the logging backend.");
+        }
+    }
+
     // ---------------------------------------------------------------------------------------------------------
     // Helpers
     // ---------------------------------------------------------------------------------------------------------
@@ -318,6 +353,32 @@ class AclChangeAuditListenerTest {
         }
     }
 
+    /**
+     * Runs the call while {@code System.err}, where slf4j-simple writes every line, is a fresh stream over the sink,
+     * then restores it, and answers as {@link #callThrows} does. A fresh stream per call keeps the encoder state that
+     * a refused write leaves behind from reaching the next call.
+     */
+    private static boolean throwsWhileStdErrFails(FailingSink sink, Runnable call) {
+        var original = System.err;
+        System.setErr(new PrintStream(sink, true, StandardCharsets.UTF_8));
+        try {
+            return callThrows(call);
+        } finally {
+            System.setErr(original);
+        }
+    }
+
+    /**
+     * Asserts that a line logged directly to the listener's logger throws over the sink, so a test that notifies
+     * the listener there really meets a failing logging backend.
+     */
+    private static void assertSinkFails(FailingSink sink) {
+        var before = sink.writes;
+        var threw = throwsWhileStdErrFails(sink,
+                () -> LoggerFactory.getLogger(AclChangeAuditListener.class).warn("Probe of the failing sink."));
+        assertTrue(threw && sink.writes > before, "A line logged directly must throw while the sink fails");
+    }
+
     /** Puts an authenticated user name and password authentication of {@code jdoe} into the security context. */
     private static void authenticateInContext(String password) {
         SecurityContextHolder.getContext()
@@ -343,5 +404,39 @@ class AclChangeAuditListenerTest {
 
     private static String randomValue(int length) {
         return RandomStringUtils.secure().nextAlphanumeric(length);
+    }
+
+    /**
+     * The output of a logging backend that does not ignore its failures, as a log4j appender with
+     * {@code ignoreExceptions=false}: every write throws, with a generated message. It counts the writes and keeps
+     * their bytes, so a test can assert that it was reached and that no generated sentinel was handed to it.
+     */
+    private static final class FailingSink extends OutputStream {
+
+        private final String message;
+        private final ByteArrayOutputStream refused = new ByteArrayOutputStream();
+        private int writes;
+
+        private FailingSink(String message) {
+            this.message = message;
+        }
+
+        @Override
+        public void write(int b) {
+            refused.write(b);
+            throw refuse();
+        }
+
+        @Override
+        public void write(byte[] b, int off, int len) {
+            refused.write(b, off, len);
+            throw refuse();
+        }
+
+        /** Counts one refused write and returns the exception that refuses it. */
+        private IllegalStateException refuse() {
+            writes++;
+            return new IllegalStateException(message);
+        }
     }
 }

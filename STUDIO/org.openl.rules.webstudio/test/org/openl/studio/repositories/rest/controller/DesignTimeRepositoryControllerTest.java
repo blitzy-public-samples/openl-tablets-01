@@ -69,7 +69,7 @@ import org.openl.studio.repositories.service.ZipProjectSaveStrategy;
 import org.openl.studio.repositories.validator.CreateUpdateProjectModelValidator;
 import org.openl.studio.repositories.validator.ZipArchiveValidator;
 
-// V1: new imports serve the V1-C/D rejection tests
+// V1: part of the imports serves the V1-C/D path containment rejection tests
 class DesignTimeRepositoryControllerTest {
 
     private static final String REPOSITORY_ID = "design";
@@ -483,7 +483,7 @@ class DesignTimeRepositoryControllerTest {
         verify(designRepositoryAclService, never()).createAcl(any(AProject.class), anyList(), any(Boolean.class));
     }
 
-    // V1-C: the template route surfaces the new path guard as 400 file.path.invalid.message, never as a 409
+    // V1-C: the template route surfaces the path containment guard as 400 file.path.invalid.message, never as a 409
     @Test
     void templateRoutePathGuardRejectionIsABadRequest() throws Exception {
         when(projectCreationService.createFromTemplate(eq(repository), eq("link"), any(), any(), any(), any(), any(),
@@ -498,7 +498,7 @@ class DesignTimeRepositoryControllerTest {
         verify(projectCreationService, never()).applyStatusAfterCreate(any(Repository.class), any(), any());
     }
 
-    // V1-C: the files route surfaces the new path guard as 400 file.path.invalid.message, never as a 409
+    // V1-C: the files route surfaces the path containment guard as 400 file.path.invalid.message, never as a 409
     @Test
     void filesRoutePathGuardRejectionIsABadRequest() throws Exception {
         var file = mock(MultipartFile.class);
@@ -517,7 +517,7 @@ class DesignTimeRepositoryControllerTest {
         verify(projectCreationService, never()).applyStatusAfterCreate(any(Repository.class), any(), any());
     }
 
-    // V1-D: the archive route surfaces the new destination guard as 400, finalizes nothing and releases its lock
+    // V1-D: the archive route surfaces the destination containment guard as 400, finalizes nothing, releases its lock
     @Test
     void archiveRoutePathGuardRejectionIsABadRequestAndReleasesTheLock() throws Exception {
         var archive = mock(MultipartFile.class);
@@ -553,7 +553,7 @@ class DesignTimeRepositoryControllerTest {
         verify(projectCreationService).applyStatusAfterCreate(repository, "Project", null);
     }
 
-    // V1-D: an archive overwrite (payload D15 route) passes its WRITE check, then surfaces the new guard as 400
+    // V1-D: an archive overwrite (payload D15 route) passes its WRITE check, then surfaces the containment guard as 400
     @Test
     void archiveOverwritePathGuardRejectionIsABadRequest() throws Exception {
         var archive = mock(MultipartFile.class);
@@ -574,7 +574,7 @@ class DesignTimeRepositoryControllerTest {
         verify(designRepositoryAclService).isGranted(REPOSITORY_ID, "Project", List.of(BasePermission.WRITE));
     }
 
-    // V1-C: the from-project route surfaces the new path guard as 400 file.path.invalid.message, never as a 409
+    // V1-C: the from-project route surfaces the path containment guard as 400 file.path.invalid.message, never as a 409
     @Test
     void copyRoutePathGuardRejectionIsABadRequest() throws Exception {
         var source = sourceProject("Source");

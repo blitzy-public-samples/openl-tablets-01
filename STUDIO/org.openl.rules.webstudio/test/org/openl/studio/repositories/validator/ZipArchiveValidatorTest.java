@@ -131,8 +131,8 @@ class ZipArchiveValidatorTest extends AbstractConstraintValidatorTest {
                 Arguments.of("D13 nested zip-slip", "a/../../evil.xlsx"));
     }
 
-    // V1-D: a NUL byte keeps the rejection it has today: the InvalidPathException of the zipfs view propagates with
-    // the whole name, never truncated, and the existing InvalidPathException handler answers it with its 400.
+    // V1-D: a NUL byte keeps its existing rejection, an InvalidPathException holding the whole, untruncated name.
+    // The InvalidPathException of the zipfs view propagates, and the existing handler answers it with its 400.
     // NUL is shown as '\0' in the compared values, so a failure report holds no raw NUL character.
     @Test
     void testArchives_NullByteKeepsItsInvalidPathRejection() throws IOException {
@@ -147,16 +147,16 @@ class ZipArchiveValidatorTest extends AbstractConstraintValidatorTest {
                 "D9 null byte: the message of the existing 400 body must be kept");
     }
 
-    // V1-D: a name that only starts with a reserved word is accepted today and stays accepted (no rule is loosened
-    // or tightened beyond the matrix).
+    // V1-D: a name that only starts with a reserved word stays accepted.
+    // No rule is loosened or tightened beyond the matrix.
     @Test
     void testArchives_ReservedWordPrefixAccepted() throws IOException {
         assertNull(validate("D11 reserved-word prefix", archive("CON.xlsx")),
                 "D11 reserved-word prefix: the name must stay accepted");
     }
 
-    // V1-D: a Unix symlink entry is a regular name here: 'link' and 'link/passwd' are valid names. That no link is
-    // created and nothing is written outside the project is proven where the archive is saved
+    // V1-D: a Unix symlink entry is a regular name here: 'link' and 'link/passwd' are valid names.
+    // That no link is created and nothing is written outside the project is proven where the archive is saved
     // (ZipProjectSaveStrategyTest) and by the upload ITEST, not by this validator.
     @Test
     void testArchives_SymlinkEntry() throws IOException {
@@ -178,8 +178,8 @@ class ZipArchiveValidatorTest extends AbstractConstraintValidatorTest {
                 Arguments.of("D14 fullwidth dots and solidus", "\uFF0E\uFF0E\uFF0Fevil.xlsx"));
     }
 
-    // V1-D: when the zipfs walk already rejected a name, the raw-name check adds nothing, so an existing rejection
-    // keeps exactly its errors ('a//d.xlsx' is normalized by zipfs and caught by the raw check only).
+    // V1-D: when the zipfs walk already rejected a name, an existing rejection keeps exactly its errors.
+    // The raw-name check adds nothing then: 'a//d.xlsx' is normalized by zipfs and caught by the raw check only.
     @Test
     void testArchives_ExistingRejectionKeepsItsErrors() throws IOException {
         var result = validate("zipfs error present", archive("b%c.xlsx", "a//d.xlsx"));
@@ -187,8 +187,8 @@ class ZipArchiveValidatorTest extends AbstractConstraintValidatorTest {
         assertEquals(1, result.getGlobalErrorCount(), "zipfs error present: only the zipfs walk error is reported");
     }
 
-    // V1-D: an archive the zipfs view cannot open ('.' segment) is rejected by its raw names, one error for each
-    // distinct violation: the Repository.validatePath one and the NameChecker one.
+    // V1-D: an archive the zipfs view cannot open ('.' segment) is rejected by its raw names.
+    // There is one error for each distinct violation: the Repository.validatePath one and the NameChecker one.
     @Test
     void testArchives_UnopenableArchiveRejectedByRawNames() throws IOException {
         var result = validate("zipfs cannot open", archive("./a.xlsx", "b%c.xlsx"));
@@ -199,8 +199,8 @@ class ZipArchiveValidatorTest extends AbstractConstraintValidatorTest {
         }
     }
 
-    // V1-D: 15 distinct traversal names still reject the archive, with the raw-name errors capped at 10 (the
-    // validator's MAX_RAW_VIOLATIONS), so the entry count cannot grow the 400 body.
+    // V1-D: 15 distinct traversal names reject the archive with at most 10 raw-name errors.
+    // The cap is the validator's MAX_RAW_VIOLATIONS, so the entry count cannot grow the 400 body.
     @Test
     void testArchives_RawViolationsCapped() throws IOException {
         var names = new String[15];
@@ -237,8 +237,9 @@ class ZipArchiveValidatorTest extends AbstractConstraintValidatorTest {
                 "filtered entry: a dropped entry gets no NameChecker check");
     }
 
-    // V1-D: a traversal name the upload filter drops is still rejected as a path: the filter decides what is written,
-    // not what is safe, and the '..' segment would otherwise stop the zipfs view from opening the archive (a 500).
+    // V1-D: a traversal name the upload filter drops is still rejected as a path.
+    // The filter decides what is written, not what is safe, and the '..' segment would otherwise stop the zipfs view
+    // from opening the archive (a 500).
     @Test
     void testArchives_FilteredTraversalRejected() throws IOException {
         var filtering = new ZipArchiveValidator(path -> !path.contains("filtered"), zipCharsetDetector);
@@ -248,8 +249,7 @@ class ZipArchiveValidatorTest extends AbstractConstraintValidatorTest {
         assertEntryRejected("filtered traversal", result, UNKNOWN_ARCHIVE_PATH);
     }
 
-    // V1-D: with the upload filter of the application, a traversal inside the SVN or CVS metadata it drops is
-    // rejected as a path, never answered with a 500.
+    // V1-D: a traversal in SVN or CVS metadata the application's upload filter drops is a path rejection, never a 500
     @ParameterizedTest(name = "{0}")
     @MethodSource("uploadFilteredTraversalNames")
     void testArchives_UploadFilteredTraversalRejected(String rowId, String rawName) throws IOException {
@@ -267,8 +267,8 @@ class ZipArchiveValidatorTest extends AbstractConstraintValidatorTest {
                 Arguments.of("dot-dot onto .cvsignore", "x/../.cvsignore"));
     }
 
-    // V1-D: SVN and CVS metadata the upload filter drops stays accepted: it is never written, so only its traversal
-    // is checked and a name NameChecker refuses (':') is not newly rejected.
+    // V1-D: SVN and CVS metadata the upload filter drops stays accepted.
+    // It is never written, so only its traversal is checked, and a name NameChecker refuses (':') stays accepted.
     @Test
     void testArchives_UploadFilteredMetadataAccepted() throws IOException {
         var file = archive(".svn/", ".svn/entries", "CVS/Root", ".cvsignore", ".svn/a:b");
@@ -276,8 +276,8 @@ class ZipArchiveValidatorTest extends AbstractConstraintValidatorTest {
                 "filtered metadata: SVN and CVS metadata must stay accepted");
     }
 
-    // V1-D: when the zipfs view cannot open the archive for a reason no raw name explains, the zipfs failure
-    // propagates as the cause instead of being turned into a path rejection.
+    // V1-D: a zipfs failure to open the archive that no raw name explains propagates as the cause.
+    // It is not turned into a path rejection.
     @Test
     void testArchives_UnopenableArchiveWithoutRawViolationPropagates() throws IOException {
         var file = archive("rules/Main.xlsx");
@@ -289,8 +289,8 @@ class ZipArchiveValidatorTest extends AbstractConstraintValidatorTest {
         }
     }
 
-    // V1-D: an unchecked failure of the zipfs walk with no raw violation to report (the filter drops the raw name,
-    // which has no leading '/', but keeps the zipfs path, which has one) propagates unchanged.
+    // V1-D: an unchecked failure of the zipfs walk with no raw violation to report propagates unchanged.
+    // The filter drops the raw name, which has no leading '/', but keeps the zipfs path, which has one.
     @Test
     void testArchives_WalkFailureWithoutRawViolationPropagates() throws IOException {
         var rawNamesFiltered = new ZipArchiveValidator(path -> path.startsWith("/") || !path.contains("\u0000"),
@@ -330,8 +330,8 @@ class ZipArchiveValidatorTest extends AbstractConstraintValidatorTest {
         assertEquals(1, result.getGlobalErrorCount(), "truncated archive: one error");
     }
 
-    // V1-D: the checks before the entry names keep their codes - a name no configured charset decodes to a valid
-    // name (ISO-8859-1 bytes with a ':' are no UTF-8 and hold a forbidden character in every other charset).
+    // V1-D: the checks before the entry names keep their codes - a name no configured charset decodes validly.
+    // ISO-8859-1 bytes with a ':' are no UTF-8 and hold a forbidden character in every other charset.
     @Test
     void testArchives_UnknownCharset() throws IOException {
         var file = archive(StandardCharsets.ISO_8859_1, List.of(Entry.empty("a:\u00FF.xlsx")));
@@ -346,16 +346,16 @@ class ZipArchiveValidatorTest extends AbstractConstraintValidatorTest {
                 rowId + ": validation must not throw");
     }
 
-    // V1-D: a validator with the upload filter the application configures ('zipFilter' in webstudio.xml), which drops
-    // the SVN and CVS metadata folders and the '.cvsignore' files.
+    // V1-D: a validator with the upload filter the application configures ('zipFilter' in webstudio.xml).
+    // That filter drops the SVN and CVS metadata folders and the '.cvsignore' files.
     private ZipArchiveValidator uploadFilterValidator() {
         var uploadFilter = new AndPathFilter(List.of(new FolderNamePathFilter(Set.of(".svn", "CVS")),
                 new FileNamePathFilter(Set.of(".cvsignore"))));
         return new ZipArchiveValidator(uploadFilter, zipCharsetDetector);
     }
 
-    // V1-D: the archive is rejected as a whole (global errors only), every error is an archive error, and one of
-    // them carries the expected code when one is given.
+    // V1-D: the archive is rejected as a whole (global errors only) and every error is an archive error.
+    // When an expected code is given, one of the errors carries it.
     private static void assertEntryRejected(String rowId, BindingResult result, String expectedCode) {
         assertNotNull(result, rowId + ": the archive must be rejected");
         assertEquals(0, result.getFieldErrorCount(), rowId + ": no field error is expected");
@@ -407,8 +407,9 @@ class ZipArchiveValidatorTest extends AbstractConstraintValidatorTest {
         out.closeArchiveEntry();
     }
 
-    // V1-D: one payload entry. Payload content stays empty, because the integrity check opens a non-empty entry with
-    // an Excel name as a workbook, which would hide the entry-name checks.
+    // V1-D: one payload entry.
+    // Payload content stays empty, because the integrity check opens a non-empty entry with an Excel name as a
+    // workbook, which would hide the entry-name checks.
     private record Entry(String name, String content, Integer unixMode) {
 
         // V1-D: an empty regular entry.
@@ -417,8 +418,9 @@ class ZipArchiveValidatorTest extends AbstractConstraintValidatorTest {
         }
     }
 
-    // V1-D: an entry that keeps its name as given. On the default FAT platform commons-compress turns '\' into '/'
-    // in a name without '/', which would rewrite the backslash payloads before they reach the validator.
+    // V1-D: an entry that keeps its name as given.
+    // On the default FAT platform commons-compress turns '\' into '/' in a name without '/', which would rewrite the
+    // backslash payloads before they reach the validator.
     private static final class RawNameEntry extends ZipArchiveEntry {
 
         RawNameEntry(String name) {

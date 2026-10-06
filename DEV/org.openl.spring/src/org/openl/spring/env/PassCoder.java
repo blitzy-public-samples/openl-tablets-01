@@ -34,11 +34,13 @@ import org.openl.util.StringUtils;
 /**
  * Encrypts and decrypts the values of secret settings.
  * <p>
- * The legacy {@link #decode} reads existing {@code ENC(...)} values: its key is the first 16 bytes of the SHA-1 of
- * {@code secret.key}, its cipher is the configured {@code secret.cipher} ({@code AES/CBC/PKCS5Padding} by default),
- * and its IV is zero. The legacy {@link #encode} is no longer used to write settings. Settings are written in the v2
- * format of {@link #encodeV2} and {@link #decodeV2}: AES-256-GCM, a PBKDF2-derived key, and a random salt and nonce
- * per value.
+ * Settings are written in the v2 format: {@link #encodeV2} writes it and {@link #decodeV2} reads it. The v2
+ * format uses AES-256-GCM, a PBKDF2-derived key, and a random salt and nonce per value.
+ * <p>
+ * The legacy {@link #encode} and {@link #decode} keep compatibility with the CBC format of existing {@code ENC(...)}
+ * values. Their key is the first 16 bytes of the SHA-1 of {@code secret.key}. Their cipher is the configured
+ * {@code secret.cipher}, {@code AES/CBC/PKCS5Padding} by default, and their IV is zero. {@link #decode} reads the
+ * existing values. Settings writes never use {@link #encode}.
  *
  * @author Pavel Tarasevich
  */
@@ -63,13 +65,15 @@ final class PassCoder {
     private static final byte[] AAD = "openl-enc-v2".getBytes(StandardCharsets.UTF_8);
     private static final SecureRandom RANDOM = new SecureRandom();
     // Reads decode on every property access; the cache keeps them from repeating the 600,000 PBKDF2 iterations.
-    // V6: the keys of live ciphertexts stay as long as the configuration holds them, apart from 256 candidates.
+    // V6: the keys of a ciphertext stay from their proof until forget drops them; candidates are capped at 256.
     /**
      * The derived keys of the v2 values. It keeps at most 256 candidates, the keys of salts that no key has
-     * authenticated, and one group per {@code ENC(v2:...)} ciphertext the current configuration holds, with the
-     * key that authenticated it and at most {@value KeyCache#REJECTED_PER_SALT} keys it rejected.
-     * {@link DynamicPropertySource} drops the group of every ciphertext its settings replace or remove through
-     * {@link #forget(String)}. No plain text is cached; see {@link KeyCache}.
+     * authenticated, and one group per proven {@code ENC(v2:...)} ciphertext, with the key that authenticated it and
+     * at most {@value KeyCache#REJECTED_PER_SALT} keys it rejected, from the proof until {@link #forget(String)}
+     * drops the group. {@link DynamicPropertySource} drops the group of every ciphertext its settings replace or
+     * remove and of every ciphertext a failed save made but never published, so the groups are those of the current
+     * configuration, apart from the ciphertexts of a save in progress and the read race {@link KeyCache} describes.
+     * No plain text is cached; see {@link KeyCache}.
      */
     static final KeyCache KEYS = new KeyCache(256);
 
@@ -215,8 +219,8 @@ final class PassCoder {
         cipher.init(Cipher.DECRYPT_MODE, key, new GCMParameterSpec(TAG_BITS, payload, SALT_BYTES, NONCE_BYTES));
         cipher.updateAAD(AAD);
         var plain = cipher.doFinal(payload, header, payload.length - header);
-        // V6: only a key that authenticated the value is proven; a key the GCM tag rejected stays a candidate or a
-        // rejected key of the salt.
+        // V6: only a key that authenticated the value becomes an authenticated key of its salt.
+        // For a key the GCM tag rejects, doFinal throws; that key stays a candidate or a rejected key of the salt.
         KEYS.prove(slot, key);
         return new String(plain, StandardCharsets.UTF_8);
     }
@@ -297,8 +301,7 @@ final class PassCoder {
     record KeySlot(String salt, String material) {
     }
 
-    // V6: two-tier store of derived keys, safe for concurrent property reads: bounded candidates of unauthenticated
-    // salts, and per authenticated salt its authenticated keys apart from the few keys it rejected.
+    // V6: a thread-safe two-tier cache of derived keys: bounded candidates, and one group per authenticated salt.
     /**
      * A cache of derived keys in two tiers. It holds keys only, never a plain text or a decoded value, and a lookup
      * needs the key material itself, so a value whose key material is lost, or not yet available early in startup,
@@ -314,12 +317,14 @@ final class PassCoder {
      * instance key. The first proof of a salt turns its candidates into rejected keys, and a key derived later for
      * the salt is a rejected key until it is proven, so a rejected key never displaces an authenticated one.</li>
      * </ul>
-     * No group is evicted by count or by time; its lifetime is that of its ciphertext in the configuration. Only a
-     * genuine ciphertext creates a group, and {@link DynamicPropertySource} forgets the salt of every
-     * {@code ENC(v2:...)} value its settings replace or remove, so the cache holds at most {@code capacity}
-     * candidates and one group per {@code ENC(v2:...)} ciphertext of the current configuration. A read that decrypts
-     * a value while a save replaces that value can prove the replaced ciphertext again after it was forgotten, which
-     * keeps at most one more group per value replaced that way.
+     * No group is evicted by count or by time: a group lives from the first proof of its salt until {@link #forget}
+     * drops it. Only a genuine ciphertext creates a group, and {@link DynamicPropertySource} forgets the salt of every
+     * {@code ENC(v2:...)} value its settings replace or remove and of every ciphertext a failed save made but never
+     * published. So the cache holds at most {@code capacity} candidates, and its groups are those of the
+     * {@code ENC(v2:...)} ciphertexts of the current configuration, apart from the ciphertexts of a save still in
+     * progress, which are proven before the settings are published. A read that decrypts a value while a save
+     * replaces that value can prove the replaced ciphertext again after it was forgotten, which keeps at most one
+     * more group per value replaced that way.
      * <p>
      * A changed {@code secret.key} or a replaced instance key has another SHA-256, so the keys of the old material
      * never serve the new one, and a deleted instance key leaves no material to look a key up with.
@@ -466,8 +471,8 @@ final class PassCoder {
             }
         }
 
-        // V6: a key derived for an authenticated salt is one of its rejected keys unless it authenticated the salt
-        // meanwhile; any other key is a candidate.
+        // V6: stores a derived key as a candidate, or as a rejected key once a key has authenticated its salt.
+        // A key that authenticated the salt meanwhile is already an authenticated key and stays only there.
         private void store(KeySlot slot, SecretKey key) {
             var group = groups.get(slot.salt());
             if (group == null) {
@@ -507,8 +512,8 @@ final class PassCoder {
             }
         }
 
-        // V6: the keys of one salt by the SHA-256 of their key material: those that authenticated its ciphertext, and
-        // apart from them the rejected ones, least recently used first.
+        // V6: the keys of one salt by the SHA-256 of their key material: authenticated keys and rejected keys.
+        // The rejected keys are kept apart from the authenticated ones, least recently used first.
         private static final class Group {
             private final Map<String, SecretKey> authenticated = new HashMap<>();
             private final Map<String, SecretKey> rejected = new LinkedHashMap<>(8, 0.75f, true) {

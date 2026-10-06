@@ -1,10 +1,10 @@
 package org.openl.studio.repositories.service;
 
-// V1: Iterator, LinkOption, Nullable, LocalWorkingTree, PathCheckedRepository, RepositoryDelegate,
-// FileSystemRepository, NameChecker, FolderMapper and BadRequestException serve the upload destination guard.
+// V1: part of these imports serves the upload destination and write containment guard
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.UncheckedIOException;
 import java.nio.file.FileSystem;
 import java.nio.file.FileSystems;
 import java.nio.file.Files;
@@ -113,7 +113,8 @@ public class ZipProjectSaveStrategy {
                     // V1: each entry is checked again as the repository writes it, in the tree of its target branch
                     var savedChanges = boundary == null
                             ? projectChanges
-                            : containedChanges(boundary, projectData.getName(), projectChanges);
+                            : containedChanges(boundary, inWorkingTree(repository), projectData.getName(),
+                                    projectChanges);
                     return saveContained(repository, projectData, savedChanges);
                 }
             }
@@ -275,6 +276,30 @@ public class ZipProjectSaveStrategy {
         return current instanceof FileSystemRepository fileSystem ? fileSystem.getRoot() : null;
     }
 
+    // V1: tells a Git working tree, whose full save descends into folder links, apart from a file repository root
+    /**
+     * Tells whether the local folder {@link #localRoot} finds for the repository is the working tree of a
+     * {@link LocalWorkingTree}, such as a Git repository, rather than the root folder of a file-system repository.
+     *
+     * <p>The wrappers are unwrapped as {@link #localRoot} unwraps them. It is asked only for a repository that
+     * {@link #localRoot} finds a local folder for.
+     *
+     * @return {@code true} for a working tree, {@code false} for the root folder of a file-system repository
+     */
+    private static boolean inWorkingTree(Repository repository) {
+        var current = repository;
+        while (current instanceof RepositoryDelegate delegate) {
+            current = delegate.getOriginal();
+        }
+        if (current instanceof FolderMapper mapper) {
+            current = mapper.getDelegate();
+        }
+        if (current instanceof PathCheckedRepository pathChecked) {
+            return pathChecked.getLocalRoot() == null;
+        }
+        return current instanceof LocalWorkingTree;
+    }
+
     // V1: resolves the existing part of a path through its links; the part still to be created holds none
     /**
      * Resolves the deepest existing ancestor of the path, the path itself included, to its real location and
@@ -344,16 +369,22 @@ public class ZipProjectSaveStrategy {
      * out of the archive in one pass, so they are passed on one at a time and never collected. A refused change has
      * its stream closed and ends the save with an {@link EntryRefused}.
      *
+     * <p>In a working tree, the project folder and its folder links are also checked once, when the repository asks
+     * for the changes, before it takes the first one ({@link #requireContainedTree}). A refusal there ends the save
+     * with an {@link EntryRefused} too.
+     *
      * @param boundary      the project folder, at its own place below the repository root
+     * @param workingTree   whether the project folder lies in a Git working tree rather than a file repository root
      * @param projectFolder the name of the project folder in the repository, which every change is named under
      * @param changes       the changes of the save
      * @return the same changes in the same order, each checked as it is taken
      */
     private static Iterable<FileItem> containedChanges(Path boundary,
+                                                       boolean workingTree,
                                                        String projectFolder,
                                                        Iterable<FileItem> changes) {
         var prefix = projectFolder + "/";
-        return () -> new Iterator<>() {
+        Iterable<FileItem> checked = () -> new Iterator<>() {
             private final Iterator<FileItem> source = changes.iterator();
 
             @Override
@@ -382,6 +413,54 @@ public class ZipProjectSaveStrategy {
                 return name.substring(prefix.length());
             }
         };
+        if (!workingTree) {
+            return checked;
+        }
+        // V1: asked for once the repository has checked out the branch it saves to, before it writes or cleans up
+        return () -> {
+            try {
+                requireContainedTree(boundary);
+            } catch (BadRequestException e) {
+                throw new EntryRefused(e);
+            }
+            return checked.iterator();
+        };
+    }
+
+    // V1: the project folder in the checked-out tree, and every folder link the cleanup of a full save enters
+    /**
+     * Rejects the save when the project folder of the tree the repository has checked out does not sit at its own
+     * place, or holds a folder link that leads out of it.
+     *
+     * <p>A Git repository removes what a full save does not carry by descending into each folder link of the project
+     * folder, so a link out of it would lead that cleanup outside the folder, and a link to one of its ancestors
+     * would lead it round in circles. A link to a file and a link to nothing are only removed, and a folder link that
+     * stays inside the project folder leads the cleanup nowhere else, so these are accepted.
+     *
+     * @param boundary the project folder, at its own place below the working tree
+     * @throws BadRequestException {@code file.path.invalid.message} when the tree is rejected
+     */
+    private static void requireContainedTree(Path boundary) {
+        try {
+            if (!realPathOf(boundary).startsWith(boundary)) {
+                throw new BadRequestException("file.path.invalid.message");
+            }
+            if (!Files.isDirectory(boundary, LinkOption.NOFOLLOW_LINKS)) {
+                return;
+            }
+            try (var entries = Files.walk(boundary)) {
+                for (var iterator = entries.iterator(); iterator.hasNext(); ) {
+                    var entry = iterator.next();
+                    if (Files.isSymbolicLink(entry) && Files.isDirectory(entry)
+                            && !entry.toRealPath().startsWith(boundary)) {
+                        throw new BadRequestException("file.path.invalid.message");
+                    }
+                }
+            }
+        } catch (IOException | UncheckedIOException | IllegalArgumentException e) {
+            // A folder the walk cannot read, or a path the file system cannot resolve, is a rejection, not a 500.
+            throw new BadRequestException("file.path.invalid.message");
+        }
     }
 
     // V1: a refused entry ends the save with that refusal, however the repository reported it
@@ -414,7 +493,7 @@ public class ZipProjectSaveStrategy {
     }
 
     // V1: marks a refusal raised while the repository takes the entries, to tell it apart from the repository's own
-    /** A change refused by {@link #containedChanges} while the repository was already taking the changes. */
+    /** A change or tree refused by {@link #containedChanges} while the repository was already taking the changes. */
     private static final class EntryRefused extends RuntimeException {
         private final BadRequestException refusal;
 
