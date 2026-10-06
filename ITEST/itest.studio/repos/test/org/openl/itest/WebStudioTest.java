@@ -37,8 +37,9 @@ class WebStudioTest {
     private static final SecureRandom RANDOM = new SecureRandom();
     private static final String ALPHANUMERIC = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 
-    // V10: the V10 folder's form login, and the http.json request that carries only the session cookie it sets. The
-    // latter lies outside test-resources, so the generic runner never sends, compares, prints or saves its answer.
+    // V10: the V10 folder's form login, and the http.json request that carries only the session cookie it sets.
+    // The http.json request lies outside test-resources, so the generic runner never sends, compares, prints or
+    // saves its answer.
     private static final Path V10_LOGIN_REQUEST = Path.of("test-resources", "security-V10-sysinfo", "020-login.req");
     private static final Path V10_HTTP_JSON_REQUEST = Path.of("test-resources-security-V10-sysinfo",
             "031-http-json-session.req");
@@ -54,8 +55,8 @@ class WebStudioTest {
             putAdminCredentials(client, generated); // V1: the derived administrator header is scanned for too
             putPasswordPolicyValues(client, generated); // V7: generated local-user passwords
             putLockoutValues(client, generated); // V9: generated lockout-scenario credentials
-            // V10: the http.json session check runs after the generic run, also when that run failed, whose failure
-            // then stays the reported one and carries the check's failure as suppressed
+            // V10: the http.json session check runs after the generic run, also when that run failed.
+            // The generic failure stays the reported one and carries the check's failure as suppressed.
             try {
                 client.test("test-resources");
             } catch (Throwable generic) {
@@ -88,7 +89,7 @@ class WebStudioTest {
         }
     }
 
-    // V1: the administrator header, derived from the configured administrator instead of a literal in itest.env
+    // V1: the administrator password and Basic header, derived at runtime from the first configured administrator
     static void putAdminCredentials(HttpClient client) {
         Properties properties = new Properties();
         try (Reader reader = Files.newBufferedReader(Path.of("openl-repository", "application.properties"),
@@ -107,15 +108,16 @@ class WebStudioTest {
         client.localEnv.put("ADMIN_AUTH_TOCKEN", basic(name, name));
     }
 
-    // V1: as above, and registers the derived administrator header for the saved-response scan, which searches for
-    // its Base64 part only. ADMIN_PASSWORD is not registered: it equals the administrator name, which responses show.
+    // V1: puts the administrator credentials and registers the derived administrator header for the secret scans.
+    // ADMIN_PASSWORD is not registered, because it equals the administrator name, which responses show.
     static void putAdminCredentials(HttpClient client, Map<String, String> generated) {
         putAdminCredentials(client);
         generated.put("ADMIN_AUTH_TOCKEN", client.localEnv.get("ADMIN_AUTH_TOCKEN"));
     }
 
-    // V8: an expiresAt 400 days ahead, beyond the 365-day maximum. Only PatExpiryITest sends the request that reads
-    // it, never the generic runner, because an unexpected 201 would carry a token; so repos() does not call this.
+    // V8: an expiresAt 400 days ahead, beyond the 365-day maximum.
+    // Only PatExpiryITest sends the request that reads it, never the generic runner, because an unexpected 201 would
+    // carry a token; so repos() does not call this.
     static void putPatExpiryValues(HttpClient client) {
         client.localEnv.put("PAT_EXPIRES_TOO_FAR", Instant.now().plus(Duration.ofDays(400)).toString());
     }
@@ -189,7 +191,7 @@ class WebStudioTest {
         if (minMb.getBytes(StandardCharsets.UTF_8).length > 72) {
             fail("V7_MIN_MB");
         }
-        // More than 25 code points, so the former 25-character maximum rejects this accepted value.
+        // The accepted 72-byte multibyte value has more than 25 code points, so only the byte limit decides it.
         if (maxMb.codePointCount(0, maxMb.length()) <= 25) {
             fail("V7_MAX_MB");
         }
@@ -236,9 +238,10 @@ class WebStudioTest {
         generated.put("V9_RESET_WRONG_PASSWORD", resetWrongPassword);
     }
 
-    // V10: http.json echoes the request's headers and cookies, so it is sent through a JDK client that discards both
-    // answers, never through the generic runner, which prints and saves a mismatching one. The session cookie of a
-    // form login alone must get 200, and the session ID joins the generated secrets before it is sent anywhere.
+    // V10: asserts that the session cookie of a form login alone gets 200 from http.json.
+    // http.json echoes the request's headers and cookies, so it is sent through a JDK client that discards both
+    // answers, never through the generic runner, which prints and saves a mismatching one.
+    // The session ID joins the generated secrets before it is sent anywhere.
     static void assertHttpJsonNeedsOnlySession(HttpClient client, Map<String, String> generated)
             throws IOException, InterruptedException {
         // HTTP/1.1, as the harness client uses; by default redirects are not followed and no cookie is stored.
@@ -326,9 +329,10 @@ class WebStudioTest {
         }
     }
 
-    // V1: fails, naming only the sorted keys, when a generated secret appears in the captured stdout or stderr. A Basic
-    // value is searched for by its Base64 part, which also covers the full header, and each value as its stream's
-    // encoding prints it, so a character that encoding cannot represent is matched as it was printed.
+    // V1: fails, naming only the sorted keys, when a generated secret appears in the captured stdout or stderr.
+    // A Basic value is searched for by its Base64 part, which also covers the full header.
+    // Each value is searched for as its stream's encoding prints it, so a character that encoding cannot represent
+    // is matched as it was printed.
     static void assertNoSecretsPrinted(Map<String, String> generated, OutputCapture capture) {
         String out = capture.out();
         String err = capture.err();
@@ -349,8 +353,8 @@ class WebStudioTest {
         }
     }
 
-    // V1: runs the captured-output scan, then the saved-response scan whatever the first did; a saved-response
-    // failure is attached to a captured-output failure, which is the one thrown
+    // V1: runs the captured-output scan, then the saved-response scan whatever the first did.
+    // A saved-response failure is attached to a captured-output failure, which is the one thrown.
     static void assertNoSecretsLeaked(Map<String, String> generated, OutputCapture capture) {
         try {
             assertNoSecretsPrinted(generated, capture);
@@ -370,8 +374,8 @@ class WebStudioTest {
         return new String(text.getBytes(charset), charset);
     }
 
-    // V1: copies System.out and System.err while they still reach the console, which shows a mismatching response and
-    // the run's progress, so the run's output can be scanned for generated secrets once the server has stopped
+    // V1: copies System.out and System.err so the output can be scanned for generated secrets once the server stops.
+    // Both streams also reach the console, which shows a mismatching response and the run's progress.
     static final class OutputCapture implements AutoCloseable {
         private final PrintStream originalOut = System.out;
         private final PrintStream originalErr = System.err;

@@ -28,7 +28,6 @@ class AuthenticationDisabledWarningITest {
 
     // The property and value the warning names; no line may carry it while authentication is enabled.
     private static final String DISABLED = "ruleservice.authentication.enabled=false";
-    // The complete warning, word for word as the component logs it.
     private static final String MESSAGE = "ruleservice.authentication.enabled=false: every Rule Services endpoint,"
             + " including /admin/deploy when the deployer is enabled, is reachable without authentication.";
     // The logger name. slf4j-simple ("[main] WARN logger - msg") and the ITEST log4j2 pattern ("%c{20} - %msg")

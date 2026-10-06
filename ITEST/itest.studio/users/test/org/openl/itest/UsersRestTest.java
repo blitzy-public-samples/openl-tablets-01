@@ -99,7 +99,7 @@ class UsersRestTest {
         client.localEnv.put("JSMITH_BASIC_2", basic("jsmith", jsmithPassword2));
         client.localEnv.put("JSMITH_BASIC_3", basic("jsmith", jsmithPassword3));
 
-        mailPassword = randomSecret(); // V7: generated SMTP password instead of a literal
+        mailPassword = randomSecret(); // V7: the SMTP password is generated at runtime
         smtpServer = new GreenMail(new ServerSetup(0, null, ServerSetup.PROTOCOL_SMTP));
         smtpServer.setUser("username@email", mailPassword); // V7: generated at runtime
         smtpServer.start();
@@ -302,9 +302,10 @@ class UsersRestTest {
                 .encodeToString((user + ":" + password).getBytes(StandardCharsets.UTF_8));
     }
 
-    // V7: the secrets both scans track. ADMIN_AUTH_TOCKEN is a Basic encoding derived at runtime and is scanned by its
-    // Base64 part too, as the repos runners do. HttpData.log prints and saves only responses, never request headers,
-    // so the literal administrator headers in unedited .req fixtures cannot trip the scans.
+    // V7: the secrets both scans track, each Basic value also by its Base64 part
+    // ADMIN_AUTH_TOCKEN is a Basic encoding derived at runtime, scanned by its Base64 part as the repos runners do.
+    // HttpData.log prints and saves only responses, never request headers, so the literal administrator headers in
+    // unedited .req fixtures cannot trip the scans.
     static Map<String, String> trackedSecrets(Map<String, String> env,
             @Nullable String smtpPassword,
             @Nullable String verificationToken) {
@@ -324,9 +325,9 @@ class UsersRestTest {
         return secrets;
     }
 
-    // V7: fails, naming only variables and counts, when a saved mismatching response or the captured output holds a
-    // tracked secret. Both scans always run. Their errors are suppressed onto the primary failure; without one, the
-    // first error is thrown with the other suppressed onto it.
+    // V7: fails, naming only variables and counts, when a mismatching saved response or captured output holds a secret
+    // Both scans always run. Their errors are suppressed onto the primary failure; without one, the first error is
+    // thrown with the other suppressed onto it.
     static void assertNoGeneratedSecretsSaved(Path root,
             Map<String, String> secrets,
             String stdout,
@@ -424,8 +425,8 @@ class UsersRestTest {
         }
     }
 
-    // V7: tees System.out and System.err to the original streams and to memory, so the scans see what the run printed
-    // while the console still shows every line, a mismatching response included
+    // V7: tees System.out and System.err to the original streams and to memory for the credential scans
+    // The console still shows every line, a mismatching response included.
     private static final class ConsoleCapture {
         private final PrintStream originalOut = System.out;
         private final PrintStream originalErr = System.err;

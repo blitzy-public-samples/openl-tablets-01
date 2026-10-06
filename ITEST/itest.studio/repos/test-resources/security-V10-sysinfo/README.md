@@ -1,8 +1,9 @@
 # V10: system information needs a session
 
-`sys.json` and `http.json` describe the host, the JVM and the request, so since V10 they require authentication in
-every mode that has a login: `SecurityConfig.staticResourcesFilterChain` no longer matches them, and the mode's
-`/rest/**` chain decides. In this `multi` suite, `010` and `011` answer `401` without credentials or a cookie,
+`sys.json` and `http.json` describe the host, the JVM and the request, so they require authentication in every mode
+that has a login. `SecurityConfig.staticResourcesFilterChain`'s matcher excludes them, which leaves them to each
+mode's `/rest/**` chain: it answers `401` without an authentication and serves them to an authenticated session. In
+this `repos` suite, which runs `multi` mode, `010` and `011` answer `401` without credentials or a cookie,
 `020` signs in through the login form, and `030` answers `200` with nothing but the session cookie that sign-in set.
 `http.json` gets the same session-only check from `WebStudioTest`, not from a fixture of this folder (see below).
 `040` logs out, and `050` and `051` show `sys.json` and `http.json` answering `401` again. `060` shows that

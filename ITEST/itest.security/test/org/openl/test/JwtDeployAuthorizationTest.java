@@ -102,17 +102,16 @@ class JwtDeployAuthorizationTest {
 
     @Test
     void test() throws Exception {
-        // V2: HttpClient.test passes on a folder that holds no requests, so this check stops the class passing
-        // without its fixtures. It runs before the server starts.
+        // V2: fail before the server starts when a request fixture is missing.
+        // HttpClient.test passes on a folder that holds no requests; this check stops the class passing without them.
         var missing = REQUESTS.stream()
                 .map(name -> name + ".req")
                 .filter(file -> !Files.isRegularFile(Path.of(TEST_RESOURCES, file)))
                 .toList();
         assertEquals(List.of(), missing, "Request fixtures missing from " + TEST_RESOURCES);
 
-        // V2: both console streams are copied while the server runs; the capture is the first resource, so it is
-        // restored only after the server has stopped. Then the copied output is scanned for the token and the
-        // private key members.
+        // V2: both console streams are copied while the server runs and scanned for the token and private key members.
+        // The capture is the first try resource, so it is restored only after the server has stopped, then scanned.
         var console = new ConsoleCapture();
         try (console; var client = JettyServer.get().withProfile("jwt-deploy").start()) {
             // The fixtures send the token as Authorization: Bearer ${JWT_TOKEN}.
@@ -132,8 +131,8 @@ class JwtDeployAuthorizationTest {
         }
     }
 
-    // V2: the failure, naming the variables only, when the copied console output holds the generated token or a
-    // private member of the generated signing key
+    // V2: the failure, naming the labels and never the values, when the copied console output holds a generated secret.
+    // The generated secrets are the token and the private members of the signing key.
     private static @Nullable AssertionError tokenPrinted(ConsoleCapture console) {
         var secrets = new LinkedHashMap<String, String>();
         secrets.put("JWT_TOKEN", token);
@@ -196,9 +195,9 @@ class JwtDeployAuthorizationTest {
         return members;
     }
 
-    // V2: while open, System.out and System.err pass everything on to the console, so the harness progress and a
-    // mismatching response are still shown, and keep a copy for the token scan. Closing restores both streams; a
-    // second close does nothing.
+    // V2: while open, System.out and System.err pass everything on to the console and keep a copy for the token scan.
+    // The harness progress and a mismatching response are therefore still shown.
+    // Closing restores both streams; a second close does nothing.
     private static final class ConsoleCapture implements AutoCloseable {
         private final PrintStream originalOut = System.out;
         private final PrintStream originalErr = System.err;
@@ -245,8 +244,8 @@ class JwtDeployAuthorizationTest {
             return errCopy.toString(originalErr.charset());
         }
 
-        // V2: the sorted variables whose non-empty value either stream received; each is searched for as that
-        // stream's charset encodes it
+        // V2: the sorted names whose non-empty value either stream received.
+        // Each value is searched for as that stream's charset encodes it.
         Set<String> printed(Map<String, String> secrets) {
             var outText = out();
             var errText = err();

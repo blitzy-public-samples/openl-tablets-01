@@ -67,8 +67,9 @@ class PatExpiryITest {
     /** V8: the message key of the 400 answer to an {@code expiresAt} beyond the maximum lifetime. */
     private static final String EXPIRES_AT_MAX_KEY = "openl.error.400.pat.expires-at.max.message";
 
-    // V8: the token format of OpenL Studio's PatToken, which is not on this classpath: PREFIX, then a public ID of
-    // PUBLIC_ID_LENGTH Base62 characters, then '.' and the secret.
+    // V8: recognize the PAT prefix and Base62 public ID without loading Studio's token class
+    // OpenL Studio's PatToken is not on this classpath. A token is PAT_PREFIX, then a public ID of PUBLIC_ID_LENGTH
+    // Base62 characters, then '.' and the secret.
     private static final String PAT_PREFIX = "openl_pat_";
     private static final int PUBLIC_ID_LENGTH = 16;
     private static final Pattern PUBLIC_ID = Pattern.compile("[0-9A-Za-z]{" + PUBLIC_ID_LENGTH + "}");
@@ -82,8 +83,9 @@ class PatExpiryITest {
 
     @Test
     void tokenWithoutExpiryExpiresAfterDefaultLifetime() throws Exception {
-        // V8: the generated secrets, searched for in the captured console output and the saved responses: the
-        // administrator header by its Base64 part, the created token and its secret part.
+        // V8: scan generated credentials in captured output and saved responses
+        // The values scanned for are the administrator header by its Base64 part, the created token and
+        // its secret part.
         Map<String, String> generated = new HashMap<>();
         // The scan runs once the server has stopped, on success and on failure alike. It is not thrown from a
         // finally block, so a scan failure never replaces the test failure; it is attached to it instead.
@@ -103,8 +105,9 @@ class PatExpiryITest {
                     admin);
             var after = Instant.now();
 
-            // V8: the token is registered for the scan, and the ID to revoke it by is taken, before any field is
-            // required, so a response that lacks a field still has its token revoked.
+            // V8: register credentials and the revocation ID before asserting response fields
+            // Taking both first means a response that lacks a required field still has its token
+            // scanned for and revoked.
             String token = optionalText(created, "token");
             if (token != null) {
                 generated.put("PAT_TOKEN", token);
@@ -146,15 +149,16 @@ class PatExpiryITest {
             }
             throw t;
         }
-        capture.close(); // V8: as on the failure path
+        capture.close(); // V8: restore the console before scanning the successful run
         WebStudioTest.assertNoSecretsLeaked(generated, capture);
     }
 
     // V8: the over-maximum request is sent from Java, so an unexpected token-bearing answer is never printed or saved
     @Test
     void tokenBeyondMaximumLifetimeIsRejected() throws Exception {
-        // V8: the generated secrets, searched for in the captured console output and the saved responses: the
-        // administrator header by its Base64 part, and the token and its secret part if one is issued by mistake.
+        // V8: scan generated credentials in captured output and saved responses
+        // The values scanned for are the administrator header by its Base64 part, and the token and its secret part
+        // if one is issued by mistake.
         Map<String, String> generated = new HashMap<>();
         // The scan runs once the server has stopped, on success and on failure alike, and a scan failure is attached
         // to the test failure instead of replacing it.
@@ -171,7 +175,8 @@ class PatExpiryITest {
             try (var http = HttpClient.newBuilder().version(HttpClient.Version.HTTP_1_1).build()) {
                 response = http.send(request, HttpResponse.BodyHandlers.ofByteArray());
             }
-            // The body is never printed, logged or put into a message; only its status and its code field are read.
+            // The body is never printed, logged or put into a message; only its status and its code field are asserted.
+            // On an unexpected success, its token and publicId fields are read only to scan for and revoke the token.
             int status = response.statusCode();
             JsonNode body = json(response.body());
             if (status != 400) {
@@ -210,7 +215,7 @@ class PatExpiryITest {
             }
             throw t;
         }
-        capture.close(); // V8: as on the failure path
+        capture.close(); // V8: restore the console before scanning the successful run
         WebStudioTest.assertNoSecretsLeaked(generated, capture);
     }
 
@@ -281,7 +286,9 @@ class PatExpiryITest {
 
     /**
      * V8: returns the public ID to revoke a created token by: the {@code publicId} field when it is a valid ID,
-     * otherwise the ID the token carries when it is a valid one, otherwise {@code null}.
+     * otherwise the public-ID segment of the token when the token starts with {@link #PAT_PREFIX} and carries a valid
+     * public ID followed by '.', otherwise {@code null}. The secret is not checked: a recognizable prefix and a valid
+     * public-ID segment are enough for cleanup.
      */
     private static @Nullable String cleanupId(@Nullable JsonNode created, @Nullable String token) {
         String publicId = optionalText(created, "publicId");

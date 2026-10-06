@@ -86,8 +86,7 @@ public class JWTValidator implements AuthorizationChecker {
     @Override
     public boolean authorize(HttpServletRequest httpRequest) {
         var pathInfo = httpRequest.getPathInfo();
-        // V2: only the health-check, info and config admin paths are public; any other /admin/ path,
-        // OpenAPI documents included, needs a JWT.
+        // V2: only /admin/healthcheck/, info/ and config/ are public; other /admin/ paths, OpenAPI too, need a JWT.
         if (pathInfo.startsWith("/admin/")) {
             if (PUBLIC_ADMIN_PREFIXES.stream().anyMatch(pathInfo::startsWith)) {
                 return true;

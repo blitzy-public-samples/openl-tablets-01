@@ -46,9 +46,9 @@ class WebStudioTest {
         var scanned = new LinkedHashMap<String, String>(secrets);
         scanned.put("ADMIN_AUTH_TOCKEN", adminAuth);
 
-        // V7: the suite runs with the runtime credentials while both console streams are copied; the capture is the
-        // first resource, so it is restored only after the server has stopped. Then the copied output and the saved
-        // responses are scanned for the credentials.
+        // V7: the suite runs with the runtime credentials while both console streams are copied for the scan
+        // The capture is the first resource, so it is restored only after the server has stopped; then the copied
+        // output and the saved responses are scanned for the credentials.
         var console = new ConsoleCapture();
         try (console; var client = JettyServer.get().start()) {
             client.localEnv.put("ADMIN_AUTH_TOCKEN", adminAuth);
@@ -88,7 +88,7 @@ class WebStudioTest {
                 .encodeToString((user + ":" + password).getBytes(StandardCharsets.UTF_8));
     }
 
-    // V7: the administrator header is derived from the configured administrator instead of a literal
+    // V7: the administrator header is derived at runtime from the first configured administrator
     private static String adminAuthorization() throws IOException {
         var path = Path.of("openl-repository", "application.properties");
         var properties = new Properties();
@@ -103,9 +103,9 @@ class WebStudioTest {
         return basic(name, name);
     }
 
-    // V7: fails, naming the variables only, when a generated credential reached the copied console output or a saved
-    // response. Given a suite failure, both scans attach their failures to it; otherwise a console finding is thrown
-    // with the saved-response scan's failure attached.
+    // V7: fails, naming the variables only, when a generated credential reached the console copy or a saved response
+    // Given a suite failure, both scans attach their failures to it; otherwise a console finding is thrown with the
+    // saved-response scan's failure attached.
     private static void assertNotLeaked(ConsoleCapture console, Map<String, String> secrets,
             @Nullable Throwable failure) throws IOException {
         var names = console.printed(secrets);
@@ -171,9 +171,9 @@ class WebStudioTest {
         }
     }
 
-    // V7: while open, System.out and System.err pass everything on to the console, so the harness progress and a
-    // mismatching response are still shown, and keep a copy for the credential scan. Closing restores both streams;
-    // a second close does nothing.
+    // V7: while open, tees System.out and System.err to the console and keeps a copy of both for the credential scan
+    // The harness progress and a mismatching response are therefore still shown. Closing restores both streams; a
+    // second close does nothing.
     private static final class ConsoleCapture implements AutoCloseable {
         private final PrintStream originalOut = System.out;
         private final PrintStream originalErr = System.err;
@@ -220,8 +220,8 @@ class WebStudioTest {
             return errCopy.toString(originalErr.charset());
         }
 
-        // V7: the sorted variables whose value, or the Base64 part of a Basic value, either stream received; each is
-        // searched for as that stream's charset encodes it
+        // V7: the sorted variables whose value, or the Base64 part of a Basic value, either stream received
+        // Each is searched for as that stream's charset encodes it
         Set<String> printed(Map<String, String> secrets) {
             var outText = out();
             var errText = err();
