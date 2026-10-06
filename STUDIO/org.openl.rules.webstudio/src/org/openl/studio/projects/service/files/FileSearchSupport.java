@@ -62,8 +62,8 @@ class FileSearchSupport {
         while (!queue.isEmpty()) {
             var folder = queue.poll();
             for (AProjectArtefact artefact : folder.getArtefacts()) {
-                // V1: an entry a link places outside the mount is not matched, read or descended into. A folder
-                // the walk descends into is checked here; any other entry once its cheap criteria pass.
+                // V1: an entry a link places outside the mount is not matched, read or descended into.
+                // A folder the walk descends into is checked here; any other entry once its cheap criteria pass.
                 boolean descend = query.recursive() && artefact.isFolder();
                 if (descend && !root.contains(artefact.getInternalPath())) {
                     continue;
@@ -83,8 +83,9 @@ class FileSearchSupport {
     // V1: containment on disk runs after the in-memory criteria and before the content read.
     /**
      * Tests one artefact against the search criteria. The in-memory criteria (type, extension,
-     * pattern) run first; the checks touching storage (containment on disk, content read, ACL) run
-     * last.
+     * pattern) run first; the checks touching storage run last, in this order: containment on disk,
+     * then the ACL, then the content read, so the content of an entry the user may not read is never
+     * opened.
      *
      * @param root             the mount the artefact belongs to
      * @param checkContainment whether the artefact still has to be checked with
@@ -115,10 +116,11 @@ class FileSearchSupport {
         if (checkContainment && !root.contains(artefact.getInternalPath())) {
             return false;
         }
-        if (contentNeedle != null && !containsText(artefact, contentNeedle)) {
+        // V1: READ runs before the content read, so a mount that checks no ACL itself never opens a denied file.
+        if (!aclProjectsHelper.hasPermission(artefact, BasePermission.READ)) {
             return false;
         }
-        return aclProjectsHelper.hasPermission(artefact, BasePermission.READ);
+        return contentNeedle == null || containsText(artefact, contentNeedle);
     }
 
     /** Whether the artefact is a file with one of the extensions. */

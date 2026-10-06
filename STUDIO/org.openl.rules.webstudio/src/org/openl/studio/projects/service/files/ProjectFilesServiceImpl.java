@@ -6,7 +6,9 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Deque;
+import java.util.HashSet;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Set;
@@ -146,6 +148,7 @@ public class ProjectFilesServiceImpl implements ProjectFilesService {
                 throw new NotFoundException("file.not.found.message");
             }
             requirePermission(found, BasePermission.DELETE);
+            requireDescendantPermission(found, BasePermission.DELETE); // V1: DELETE on every entry the delete removes
             lockForEditing(root, path);
             if (root instanceof ProjectFileRoot projectRoot) {
                 descriptorCleaner.unregisterModules(projectRoot.getProject(), found);
@@ -173,8 +176,11 @@ public class ProjectFilesServiceImpl implements ProjectFilesService {
             // V1: after the existing checks, so they keep their rejections; a linked-out source is not copied from.
             requireContained(root, sourcePath);
             requireContainedCopy(root, source, destinationPath); // V1: every descendant, before anything is copied
+            var writeFolder = root.writeFolder(); // V1: resolved once, for the ACL preflight and for the copy
+            requireDescendantPermission(source, BasePermission.READ); // V1: READ on every entry the copy reads
+            requireCreatableDestinations(writeFolder, source, destinationPath); // V1: CREATE where each entry lands
             lockForEditing(root, destinationPath);
-            var targetFolder = resolveOrCreateFolders(root.writeFolder(), destinationPath,
+            var targetFolder = resolveOrCreateFolders(writeFolder, destinationPath,
                     true, "file.copy.path.conflict.message");
             copyArtefact(source, targetFolder, FilePaths.name(destinationPath));
             awaitIndexIfClosed(root);
@@ -200,8 +206,12 @@ public class ProjectFilesServiceImpl implements ProjectFilesService {
             // V1: after the existing checks, so they keep their rejections; a linked-out source is not moved from.
             requireContained(root, sourcePath);
             requireContainedCopy(root, source, destinationPath); // V1: every descendant, before anything is moved
+            var writeFolder = root.writeFolder(); // V1: resolved once, for the ACL preflight and for the move
+            requireDescendantPermission(source, BasePermission.READ); // V1: READ on every entry the move reads
+            requireDescendantPermission(source, BasePermission.DELETE); // V1: DELETE on every entry the move removes
+            requireCreatableDestinations(writeFolder, source, destinationPath); // V1: CREATE where each entry lands
             lockForEditing(root, sourcePath, destinationPath);
-            var targetFolder = resolveOrCreateFolders(root.writeFolder(), destinationPath,
+            var targetFolder = resolveOrCreateFolders(writeFolder, destinationPath,
                     true, "file.move.path.conflict.message");
             String fileName = FilePaths.name(destinationPath);
             copyArtefact(source, targetFolder, fileName);
@@ -282,8 +292,8 @@ public class ProjectFilesServiceImpl implements ProjectFilesService {
             throw new BadRequestException("file.base-path.not-folder.message", new Object[]{path});
         }
         requirePermission(artefact, BasePermission.READ);
-        // V1: after the existing checks, so they keep their rejections; the mount root is checked as "", because the
-        // root folder's internal path is not mount-relative.
+        // V1: the export base is checked after the existing checks, so they keep their rejections.
+        // The mount root is checked as "", because the root folder's internal path is not mount-relative.
         requireContained(root, StringUtils.isBlank(path) ? "" : path);
         requireContainedTree(root, (AProjectFolder) artefact); // V1: no entry a link places outside is zipped
         archiveSupport.writeZip((AProjectFolder) artefact, out);
@@ -337,7 +347,10 @@ public class ProjectFilesServiceImpl implements ProjectFilesService {
      * <p>For {@code FAIL}, {@code SKIP} and {@code OVERWRITE} the changeset only adds and
      * overwrites files, honoring the policy per entry; nothing is committed when every entry is
      * skipped. For {@code REPLACE} the base folder is made to contain exactly the uploaded
-     * entries, and the user must be allowed to delete every file the replace removes.
+     * entries, and the user must be allowed to delete every file and folder the replace removes.
+     *
+     * <p>Every entry the changeset writes must be allowed at its own path, as checked by
+     * {@link #requirePermittedEntries}, before anything is written.
      */
     private void writeEntries(FileRoot root,
                               String basePath,
@@ -362,8 +375,11 @@ public class ProjectFilesServiceImpl implements ProjectFilesService {
         }
         if (conflictPolicy == ConflictPolicy.REPLACE) {
             requireRemovedFilesDeletable(current, basePath, entries);
+            // V1: entries are authorized after the removals, so a denied removal answers 403 before any conflict.
+            requirePermittedEntries(root, current, items);
             root.writeBatch(basePath, items, ChangesetType.FULL, comment);
         } else if (!items.isEmpty()) {
+            requirePermittedEntries(root, current, items); // V1: each entry written is authorized at its own path
             root.writeBatch(basePath, items, ChangesetType.DIFF, comment);
         }
     }
@@ -385,8 +401,10 @@ public class ProjectFilesServiceImpl implements ProjectFilesService {
     }
 
     /**
-     * Verifies the user may delete every file that the full replace removes: the files under the
-     * base folder that are not part of the upload.
+     * Verifies the user may delete everything that the full replace removes: the files under the
+     * base folder that are not part of the upload, and the folders below it that hold none of the
+     * uploaded entries, which the storage removes once the replace has emptied them. A folder that
+     * keeps an uploaded entry stays, so it is not checked.
      */
     private void requireRemovedFilesDeletable(AProjectFolder current, String basePath, List<FileEntry> entries) {
         AProjectArtefact base = basePath.isEmpty() ? current : findArtefactByPath(current, basePath);
@@ -394,11 +412,22 @@ public class ProjectFilesServiceImpl implements ProjectFilesService {
             return;
         }
         Set<String> kept = entries.stream().map(FileEntry::fullPath).collect(Collectors.toSet());
+        // V1: the paths an uploaded entry stays at or below; a folder at none of them is removed with its files.
+        Set<String> retained = new HashSet<>();
+        for (String path : kept) {
+            for (int slash = path.indexOf('/'); slash >= 0; slash = path.indexOf('/', slash + 1)) {
+                retained.add(path.substring(0, slash));
+            }
+            retained.add(path);
+        }
         Deque<AProjectFolder> queue = new ArrayDeque<>();
         queue.add(folder);
         while (!queue.isEmpty()) {
             for (AProjectArtefact artefact : queue.poll().getArtefacts()) {
                 if (artefact.isFolder()) {
+                    if (!retained.contains(artefact.getInternalPath())) {
+                        requirePermission(artefact, BasePermission.DELETE); // V1: DELETE on a removed folder
+                    }
                     queue.add((AProjectFolder) artefact);
                 } else if (!kept.contains(artefact.getInternalPath())) {
                     requirePermission(artefact, BasePermission.DELETE);
@@ -837,6 +866,162 @@ public class ProjectFilesServiceImpl implements ProjectFilesService {
         }
     }
 
+    // V1: a whole-subtree read or removal is authorized per descendant, as a mounted delegate checks no ACL itself.
+    /**
+     * Verifies the user holds the permission on every descendant of a folder that an operation reads or
+     * removes as a whole: the source of a copy or move, or a deleted folder.
+     *
+     * <p>A repository mount over a mapped repository bypasses the secured wrapper and reaches the
+     * repository behind it, which checks no path ACL, so each descendant is authorized here. The walk runs
+     * before the mount is reserved and before anything is read, written or deleted, so a denied entry
+     * leaves no partial copy, move or delete behind. It is iterative, like the listings. A file has no
+     * descendants, so the caller's check of the artefact itself is all it needs.
+     *
+     * @throws ForbiddenException with {@code default.message} if a descendant lacks the permission
+     */
+    private void requireDescendantPermission(AProjectArtefact artefact,
+                                             org.springframework.security.acls.model.Permission permission) {
+        if (!artefact.isFolder()) {
+            return;
+        }
+        Deque<AProjectFolder> queue = new ArrayDeque<>();
+        queue.add((AProjectFolder) artefact);
+        while (!queue.isEmpty()) {
+            for (AProjectArtefact descendant : queue.poll().getArtefacts()) {
+                requirePermission(descendant, permission);
+                if (descendant.isFolder()) {
+                    queue.add((AProjectFolder) descendant);
+                }
+            }
+        }
+    }
+
+    // V1: the destination half of the copy and move preflight: CREATE wherever the transfer creates an entry.
+    /**
+     * Verifies the user may create every entry a copy or move writes: CREATE at the deepest existing
+     * ancestor of the destination and, for a folder source, of the path of each descendant, so an entry
+     * is never created inside an existing folder the user may not create in.
+     *
+     * <p>The descendant paths are the ones {@link #requireContainedCopy} checks: a destination that ends
+     * in a slash places the descendants in the folder above its last named segment. A destination below
+     * an existing file is left to {@link #resolveOrCreateFolders}, which rejects it with its existing
+     * conflict before anything is written. Each ancestor is checked once.
+     *
+     * @param writeFolder the tree the transfer writes to, as {@link FileRoot#writeFolder()} returns it
+     * @throws ForbiddenException with {@code default.message} if CREATE is denied where an entry lands
+     */
+    private void requireCreatableDestinations(AProjectFolder writeFolder,
+                                              AProjectArtefact source,
+                                              String destinationPath) {
+        AProjectArtefact ancestor = deepestExistingAncestor(writeFolder, destinationPath);
+        if (!ancestor.isFolder()) {
+            return;
+        }
+        Set<AProjectArtefact> checked = Collections.newSetFromMap(new IdentityHashMap<>());
+        checked.add(ancestor);
+        requirePermission(ancestor, BasePermission.CREATE);
+        if (!source.isFolder()) {
+            return;
+        }
+        record Pending(AProjectFolder folder, String destinationPath) {}
+
+        // V1: the folder copyArtefact fills, as in requireContainedCopy; a trailing slash leaves the folder above.
+        String filled = FilePaths.name(destinationPath).isEmpty()
+                ? FilePaths.parent(destinationPath.substring(0, destinationPath.length() - 1))
+                : destinationPath;
+        Deque<Pending> queue = new ArrayDeque<>();
+        queue.add(new Pending((AProjectFolder) source, filled));
+        while (!queue.isEmpty()) {
+            var pending = queue.poll();
+            for (AProjectArtefact artefact : pending.folder().getArtefacts()) {
+                String destination = pending.destinationPath().isEmpty()
+                        ? artefact.getName()
+                        : pending.destinationPath() + "/" + artefact.getName();
+                AProjectArtefact landing = deepestExistingAncestor(writeFolder, destination);
+                if (checked.add(landing)) {
+                    requirePermission(landing, BasePermission.CREATE);
+                }
+                if (artefact.isFolder()) {
+                    queue.add(new Pending((AProjectFolder) artefact, destination));
+                }
+            }
+        }
+    }
+
+    // V1: the ACL preflight of a batch upload: every entry is authorized at its own path before the batch is written.
+    /**
+     * Verifies the user may write every entry of a batch at its own path: WRITE on an existing entry the
+     * batch overwrites, with DELETE on each descendant of an existing folder it replaces, and CREATE at
+     * the deepest existing ancestor of a new entry. Entries the conflict policy skips are not written, so
+     * they are not checked.
+     *
+     * <p>The tree is the one the conflict policy was applied to. Where a new entry has no existing
+     * ancestor, the mount root is checked as {@link FileRoot#writeFolder()} returns it, as
+     * {@link #requireWritableBase} checks it. Each ancestor is checked once.
+     *
+     * <p>A new entry below an existing file keeps the conflict its write raises, as a copy or move below a
+     * file keeps its own. With CREATE at that file it is left to the storage write, which rejects it on a
+     * file system or Git before anything is written. Without CREATE there, it is refused with the same
+     * conflict once every other entry has been checked, because a backend that stores paths as keys, such as
+     * a blob store, would store it.
+     *
+     * @throws ForbiddenException with {@code default.message} if a permission is denied
+     * @throws ConflictException with {@code file.archive.upload.failed.message} if an entry below an existing
+     *                           file may not be created there
+     */
+    private void requirePermittedEntries(FileRoot root, AProjectFolder current, List<FileItem> items) {
+        Set<AProjectArtefact> checked = Collections.newSetFromMap(new IdentityHashMap<>());
+        AProjectFolder mountFolder = null;
+        boolean belowDeniedFile = false;
+        for (FileItem item : items) {
+            String path = item.getData().getName();
+            AProjectArtefact existing = findArtefactByPath(current, path);
+            if (existing != null) {
+                requirePermission(existing, BasePermission.WRITE);
+                requireDescendantPermission(existing, BasePermission.DELETE);
+                continue;
+            }
+            AProjectArtefact ancestor = deepestExistingAncestor(current, path);
+            if (!ancestor.isFolder()) {
+                // V1: an entry below an existing file keeps the 409 of its write instead of a 403.
+                if (!belowDeniedFile && !aclProjectsHelper.hasPermission(ancestor, BasePermission.CREATE)) {
+                    belowDeniedFile = true;
+                }
+                continue;
+            }
+            if (ancestor == current) {
+                // V1: resolved only when a new entry lands at the mount root, as building it may list the mount.
+                mountFolder = mountFolder == null ? root.writeFolder() : mountFolder;
+                ancestor = mountFolder;
+            }
+            if (checked.add(ancestor)) {
+                requirePermission(ancestor, BasePermission.CREATE);
+            }
+        }
+        if (belowDeniedFile) {
+            throw new ConflictException("file.archive.upload.failed.message"); // V1: the conflict the write raises
+        }
+    }
+
+    // V1: where a new entry of the mount lands: the deepest of its ancestors that exists already.
+    /**
+     * The deepest existing ancestor of a mount path in the tree, the tree itself when no ancestor of the
+     * path exists. A file met on the way ends the walk and is returned, because a write below it lands at
+     * its path.
+     */
+    private AProjectArtefact deepestExistingAncestor(AProjectFolder tree, String path) {
+        String[] segments = path.split("/");
+        AProjectArtefact current = tree;
+        for (int i = 0; i < segments.length - 1 && current.isFolder(); i++) {
+            AProjectArtefact next = findArtefactByPath((AProjectFolder) current, segments[i]);
+            if (next == null) {
+                break;
+            }
+            current = next;
+        }
+        return current;
+    }
+
     private AProjectArtefact findArtefactByPath(AProjectFolder rootFolder, String path) {
         String[] segments = path.split("/");
         AProjectArtefact current = rootFolder;
@@ -976,8 +1161,9 @@ public class ProjectFilesServiceImpl implements ProjectFilesService {
             });
         }
 
-        // V1: an entry a link places outside the mount is omitted. The check resolves the entry on disk, so it runs
-        // after the cheap criteria above and is skipped for a folder that has been checked already.
+        // V1: an entry a link places outside the mount is omitted.
+        // The check resolves the entry on disk, so it runs after the cheap criteria above and is skipped for a folder
+        // that has been checked already.
         filter = filter.and(artefact -> (foldersChecked && artefact.isFolder())
                 || root.contains(artefact.getInternalPath()));
 
@@ -1000,8 +1186,9 @@ public class ProjectFilesServiceImpl implements ProjectFilesService {
         while (!queue.isEmpty()) {
             AProjectFolder folder = queue.poll();
             for (AProjectArtefact artefact : folder.getArtefacts()) {
-                // V1: a folder the listing descends into is checked first, so one a link places outside is neither
-                // listed nor descended into. Every other entry is checked by the filter, once its cheap criteria pass.
+                // V1: a folder a link places outside the mount is neither listed nor descended into.
+                // A folder the listing descends into is checked first; every other entry is checked by the filter,
+                // once its cheap criteria pass.
                 if (recursive && artefact.isFolder() && !root.contains(artefact.getInternalPath())) {
                     continue;
                 }

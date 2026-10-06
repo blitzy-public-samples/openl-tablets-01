@@ -147,6 +147,21 @@ browser.
   copied, are unchanged. JDBC, S3 and Azure Blob repositories keep no local folder, so no link check applies to them:
   they get the name checks only. Before upgrading, replace such links with regular folders or with copies of their
   content inside the project, or remove them.
+
+  The repository files API, `/rest/repos/{repo-name}/files/...` with its `file-copy`, `file-move` and `file-search`
+  routes, now checks the permission on every entry an operation reads, writes or removes. Deleting a folder needs Delete
+  on every entry in it. Copying needs View on every copied entry, moving needs View and Delete on every moved entry, and
+  both need Create in the deepest existing folder where the destination and each entry land. Uploading files or an
+  archive to a folder, under every conflict policy, needs Edit on each existing entry it overwrites, Delete on the
+  entries inside an existing folder it overwrites, and Create in the deepest existing folder of each new entry; entries
+  that `SKIP` leaves out are not checked. `REPLACE` also needs Delete on every file and folder it removes, including a
+  folder it empties, but not on a folder that keeps an uploaded entry. A refusal answers `403` with
+  `openl.error.403.default.message` before anything is written, copied, moved or deleted. Folder export
+  (`?download=true`) still answers `200` and leaves out the entries the user may not view, an uploaded entry below an
+  existing file still answers `409` with `openl.error.409.file.archive.upload.failed.message`, and content search, which
+  now checks View before it reads a file, returns the same results. Before upgrading, give users who copy, move, delete
+  or upload folders through this API these permissions on the entries inside those folders, for example the Contributor
+  role on each project such a folder holds, so that what worked for them before keeps working.
   <!-- V1: path containment on the workspace, file, project and upload surfaces (A, B, C, D) -->
 
 * **The OpenL Studio session cookie is now `SameSite=Lax`.** SAML login keeps working, but the identity provider's

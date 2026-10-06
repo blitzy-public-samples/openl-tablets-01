@@ -11,6 +11,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeFalse;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.endsWith;
@@ -22,6 +23,7 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
 import java.io.ByteArrayInputStream;
@@ -73,8 +75,10 @@ import org.openl.rules.project.impl.local.MetainfoRegistry;
 import org.openl.rules.project.impl.local.ProjectMetainfo;
 import org.openl.rules.repository.PathCheckedRepository;
 import org.openl.rules.repository.RepositoryInstatiator;
+import org.openl.rules.repository.api.ChangesetType;
 import org.openl.rules.repository.api.FeaturesBuilder;
 import org.openl.rules.repository.api.FileData;
+import org.openl.rules.repository.api.FileItem;
 import org.openl.rules.repository.api.Repository;
 import org.openl.rules.repository.api.UserInfo;
 import org.openl.rules.repository.file.FileSystemRepository;
@@ -657,8 +661,9 @@ class ProjectFilesServiceTest {
         assertLexicallyRejected("B8", operation, "%2e%2e%2fx.xlsx");
     }
 
-    // V1: surface B payload B9 (NUL byte). The path parser's unchecked InvalidPathException is kept, which the API
-    // answers with 400 openl.error.400.default.message, so the existing rejection keeps its status and key.
+    // V1: surface B payload B9 (NUL byte) keeps its existing rejection and writes nothing.
+    // The path parser's unchecked InvalidPathException is kept, which the API answers with 400
+    // openl.error.400.default.message, so the existing rejection keeps its status and key.
     @ParameterizedTest
     @EnumSource(PathOperation.class)
     void b09NulByteKeepsItsExistingRejectionAndWritesNothing(PathOperation operation) throws IOException {
@@ -748,8 +753,8 @@ class ProjectFilesServiceTest {
         }
     }
 
-    // V1: surface B payload B15 (listing base path above the project): rejected with an existing key, or nothing
-    // outside P1 is listed
+    // V1: surface B payload B15 (listing base path above the project) lists nothing outside P1.
+    // The base path is rejected with an existing key, or nothing outside P1 is listed.
     @ParameterizedTest
     @EnumSource(FileViewMode.class)
     void b15BasePathAboveTheProjectListsNothingOutsideIt(FileViewMode viewMode) throws IOException {
@@ -864,8 +869,8 @@ class ProjectFilesServiceTest {
         assertEquals(0, export.size(), "B16 on " + kind + ": the rejected export of docs streams nothing");
         assertTrue(Files.isSymbolicLink(mount.project().resolve("docs/leak.txt")),
                 "B16 on " + kind + ": the link docs/leak.txt is kept");
-        // V1: positive control: a direct read of the contained docs/ok.txt is seen through the same spied repository;
-        // the reads of the search are forgotten first, so only this read can satisfy it.
+        // V1: positive control: a direct read of the contained docs/ok.txt is seen through the same spied repository.
+        // The reads of the search are forgotten first, so only this read can satisfy it.
         clearInvocations(mount.storage().toArray());
         var row = "B16 getResource docs/ok.txt on " + kind;
         try (var content = service.getResource(root, mount.path("docs/ok.txt"), null).getContent()) {
@@ -895,8 +900,9 @@ class ProjectFilesServiceTest {
         assertNothingWritten("B17 link into P2 on " + kind, mount, before);
     }
 
-    // V1: surface B payload B17 on the repository mount: it authorizes each repository path on its own, so a link at
-    // the repository root and a link that stays inside the repository are refused as well
+    // V1: surface B payload B17 on the repository mount: links at its root and inside it are refused.
+    // The repository mount authorizes each repository path on its own, so a link at the repository root and a link
+    // that stays inside the repository are refused as well.
     @Test
     @DisabledOnOs(OS.WINDOWS)
     void b17RepositoryMountRefusesLinksAtItsRootAndInsideIt() throws IOException {
@@ -965,8 +971,8 @@ class ProjectFilesServiceTest {
         assertEquals(FORBIDDEN, denied.getErrorCode(), "B18 on " + kind + ": the read keeps its 403");
     }
 
-    // V1: surface B payload B18 (ACL through the secured wrapper): a mount the user may not write keeps its 403, so
-    // no ACL check is bypassed for a destination behind a link
+    // V1: surface B payload B18 (ACL through the secured wrapper): a mount the user may not write keeps its 403.
+    // No ACL check is bypassed for a destination behind a link.
     @ParameterizedTest
     @EnumSource(MountKind.class)
     @DisabledOnOs(OS.WINDOWS)
@@ -985,8 +991,8 @@ class ProjectFilesServiceTest {
         assertNothingWritten("B18 write without permission on " + kind, mount, before);
     }
 
-    // V1: surface B payload B18 (ACL through the secured wrapper): a file linked out of P1 that the user may not read
-    // keeps its 403, because the existing READ check runs before the containment guard
+    // V1: surface B payload B18: a file linked out of P1 that the user may not read keeps its 403.
+    // The ACL is checked through the secured wrapper, and the existing READ check runs before the containment guard.
     @ParameterizedTest
     @EnumSource(MountKind.class)
     @DisabledOnOs(OS.WINDOWS)
@@ -1017,8 +1023,9 @@ class ProjectFilesServiceTest {
         assertLinkedFilesKept("B18 without READ permission on " + kind, mount);
     }
 
-    // V1: surface B payload B18 (ACL through the secured wrapper): a file linked out of P1 that the user may read but
-    // not write or delete keeps the 403 of the WRITE and DELETE checks, which run before the containment guard
+    // V1: surface B payload B18: a file linked out of P1 that the user may read but not write or delete keeps its 403.
+    // The ACL is checked through the secured wrapper; the WRITE and DELETE checks that answer with that 403 run
+    // before the containment guard.
     @ParameterizedTest
     @EnumSource(MountKind.class)
     @DisabledOnOs(OS.WINDOWS)
@@ -1053,8 +1060,8 @@ class ProjectFilesServiceTest {
         assertLinkedFilesKept("B18 without WRITE and DELETE permission on " + kind, mount);
     }
 
-    // V1: surface B payload B16 (file link outside) as an export base: it keeps the existing rejection of a base
-    // that is not a folder, which runs before the containment guard
+    // V1: surface B payload B16 (file link outside) as an export base keeps its existing rejection.
+    // The rejection of a base that is not a folder runs before the containment guard.
     @ParameterizedTest
     @EnumSource(MountKind.class)
     @DisabledOnOs(OS.WINDOWS)
@@ -1077,8 +1084,8 @@ class ProjectFilesServiceTest {
         assertLinkedFilesKept("B16 export base on " + kind, mount);
     }
 
-    // V1: positive control on every mount: a missing path keeps its 404 on every read and source the containment
-    // guard checks, because the guard runs only once the artefact is found
+    // V1: positive control on every mount: a missing path keeps its 404 on every read and source the guard checks.
+    // The containment guard runs only once the artefact is found.
     @ParameterizedTest
     @EnumSource(MountKind.class)
     void missingReadOrSourcePathStaysNotFound(MountKind kind) throws IOException {
@@ -1105,8 +1112,8 @@ class ProjectFilesServiceTest {
         assertEquals(0, export.size(), "The export of docs/missing.txt on " + kind + " streams nothing");
     }
 
-    // V1: surface B payload B19 (ancestor search through a link): linked candidates are omitted unread, and regular
-    // files above the anchor, the one above the project included, are still found with their content
+    // V1: surface B payload B19 (ancestor search through a link): linked candidates are omitted unread.
+    // Regular files above the anchor, the one above the project included, are still found with their content.
     @ParameterizedTest
     @EnumSource(value = MountKind.class, names = {"CLOSED_FLAT", "REPO"})
     @DisabledOnOs(OS.WINDOWS)
@@ -1160,8 +1167,9 @@ class ProjectFilesServiceTest {
         assertOutsideAndSiblingUnchanged("newdir/sub/x.txt on " + kind, mount, before);
     }
 
-    // V1: surface B payload B3 (absolute POSIX path) on the operations that take it as a path to write, delete or read:
-    // rejected with an existing key and nothing written, or kept inside P1; it is never written outside
+    // V1: surface B payload B3 (absolute POSIX path) is rejected or kept inside P1, and never written outside.
+    // On each operation that takes it as a path to write, delete or read, it is rejected with an existing key and
+    // nothing written, or kept inside P1.
     @ParameterizedTest
     @EnumSource(value = PathOperation.class, names = "UPLOAD", mode = EnumSource.Mode.EXCLUDE)
     void b03AbsolutePathIsRejectedOrKeptInsideTheProject(PathOperation operation) throws IOException {
@@ -1199,8 +1207,7 @@ class ProjectFilesServiceTest {
         assertChangesOnlyInsideTheProject(row, mount, before);
     }
 
-    // V1: positive control on every mount: the containment checks still export contained entries and still find them
-    // by content
+    // V1: positive control on every mount: the containment checks still export and find contained entries by content.
     @ParameterizedTest
     @EnumSource(MountKind.class)
     void containedEntriesAreStillExportedAndFoundByContent(MountKind kind) throws IOException {
@@ -1228,9 +1235,10 @@ class ProjectFilesServiceTest {
         assertOutsideAndSiblingUnchanged("Export and content search on " + kind, mount, before);
     }
 
-    // V1: surface B payload B16 (file link outside) in filtered listings, on every mount (B18): a listing resolves on
-    // disk only the entries its type, name or extension criteria keep, checks a folder it descends into once, before
-    // it does, and still omits a matching file a link places outside the mount and a folder the mount places outside
+    // V1: surface B payload B16 (file link outside) in filtered listings, on every mount (B18).
+    // A listing resolves on disk only the entries its type, name or extension criteria keep, and checks a folder it
+    // descends into once, before it does. It still omits a matching file a link places outside the mount and a folder
+    // the mount places outside.
     @ParameterizedTest
     @EnumSource(MountKind.class)
     @DisabledOnOs(OS.WINDOWS)
@@ -1330,8 +1338,9 @@ class ProjectFilesServiceTest {
     private static final String NOT_MODIFIABLE = "openl.error.409.project.status.update.failed.message";
     private static final String READ_FAILED = "openl.error.409.file.read.failed.message";
 
-    // V1: surface B preservation (ACL through the secured wrapper): without READ permission on the project, every read,
-    // listing, export and search of a project mount keeps its 403, before anything is read or looked up
+    // V1: surface B preservation (ACL through the secured wrapper): a read without READ permission keeps its 403.
+    // Without READ permission on the project, every read, listing, export and search of a project mount keeps its 403,
+    // before anything is read or looked up.
     @ParameterizedTest
     @EnumSource(value = MountKind.class, names = {"OPENED", "CLOSED_FLAT", "CLOSED_MAPPED"})
     void readWithoutPermissionOnTheProjectIsStillForbidden(MountKind kind) throws IOException {
@@ -1369,8 +1378,9 @@ class ProjectFilesServiceTest {
         assertOpened("Project READ granted: content search on " + kind, mount, SOURCE);
     }
 
-    // V1: surface B preservation: a project whose state does not let the user modify it keeps the mount's 409 on every
-    // write, before any path is validated or resolved on disk, so a destination behind a link changes nothing either
+    // V1: surface B preservation: a project whose state does not let the user modify it keeps the mount's 409.
+    // Every write keeps that 409 before any path is validated or resolved on disk, so a destination behind a link
+    // changes nothing either.
     @ParameterizedTest
     @EnumSource(value = MountKind.class, names = {"OPENED", "CLOSED_FLAT", "CLOSED_MAPPED"})
     @DisabledOnOs(OS.WINDOWS)
@@ -1409,9 +1419,10 @@ class ProjectFilesServiceTest {
                 "The rejected move and delete on " + kind + " leave " + SOURCE + " in P1");
     }
 
-    // V1: surface B preservation (historical reads): on a versioned backend that is not file-backed, as Git, JDBC, S3
-    // and Azure Blob are, a version the design repository does not hold keeps its 404 on every call that takes a
-    // version, and so does a version the backend fails to resolve; a version it holds is still served
+    // V1: surface B preservation (historical reads): a missing or unresolvable version keeps its 404.
+    // On a versioned backend that is not file-backed, as Git, JDBC, S3 and Azure Blob are, a version the design
+    // repository does not hold keeps its 404 on every call that takes a version, and so does a version the backend
+    // fails to resolve; a version it holds is still served.
     @Test
     void missingOrUnresolvableVersionStaysNotFound() throws IOException {
         var versioned = versionedBackend(marker());
@@ -1456,9 +1467,9 @@ class ProjectFilesServiceTest {
         }
     }
 
-    // V1: surface B payloads B16 and B17 with a version: a file repository keeps no history, so a version-qualified
-    // read of a closed project serves its current state, and the containment guard still applies to every read,
-    // listing, export and search that takes the version
+    // V1: surface B payloads B16 and B17 with a version: the containment guard applies to version-qualified calls.
+    // A file repository keeps no history, so a version-qualified read of a closed project serves its current state,
+    // and the containment guard still applies to every read, listing, export and search that takes the version.
     @ParameterizedTest
     @EnumSource(value = MountKind.class, names = {"CLOSED_FLAT", "CLOSED_MAPPED"})
     @DisabledOnOs(OS.WINDOWS)
@@ -1504,8 +1515,8 @@ class ProjectFilesServiceTest {
         assertLinkedFilesKept("Version-qualified reads on " + kind, mount);
     }
 
-    // V1: surface B preservation (ancestor search): a lookup that fails to read keeps the project mount's 409, and the
-    // lookup is anchored at the lookup path inside the project's repository-internal path
+    // V1: surface B preservation (ancestor search): a lookup that fails to read keeps the project mount's 409.
+    // The lookup is anchored at the lookup path inside the project's repository-internal path.
     @ParameterizedTest
     @EnumSource(value = MountKind.class, names = {"OPENED", "CLOSED_FLAT", "CLOSED_MAPPED"})
     void ancestorSearchKeepsItsConflictWhenTheLookupFailsToRead(MountKind kind) throws IOException {
@@ -1528,8 +1539,9 @@ class ProjectFilesServiceTest {
         verify(lookup).lookup(project, project.getDesignRepository(), realPath + "/sub/AGENTS.md", true);
     }
 
-    // V1: surface B preservation (ancestor search): a project at the root of its repository, whose repository-internal
-    // path is empty, anchors the lookup at the lookup path itself and returns what the lookup finds
+    // V1: surface B preservation (ancestor search): a project at its repository root anchors at the lookup path.
+    // Its repository-internal path is empty, so the lookup is anchored at the lookup path itself and returns what the
+    // lookup finds.
     @Test
     void ancestorSearchOfAProjectAtItsRepositoryRootIsAnchoredAtTheLookupPath() throws IOException {
         var design = mock(Repository.class);
@@ -1619,6 +1631,609 @@ class ProjectFilesServiceTest {
         for (var link : LINKED_FILES) {
             assertTrue(Files.isSymbolicLink(docs.resolve(link)), "The design-only link docs/" + link + " is kept");
         }
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // V1: the per-path ACL of the repository mount, whose storage behind the mapping checks no ACL itself
+    // ---------------------------------------------------------------------------------------------
+
+    // V1: the child folder the repository-mount ACL rows deny, and the file it holds, relative to P1.
+    private static final String DENIED = "P1/secret";
+    private static final String HIDDEN = "secret/hidden.txt";
+    private static final String COPY_CONFLICT = "openl.error.409.file.copy.path.conflict.message";
+    private static final String MOVE_CONFLICT = "openl.error.409.file.move.path.conflict.message";
+    private static final String ENTRY_EXISTS = "openl.error.409.file.archive.entry.exists.message";
+    private static final String UPLOAD_FAILED = "openl.error.409.file.archive.upload.failed.message";
+
+    // V1: a copy or move of a folder holding a denied child is forbidden before anything is read, written or deleted.
+    @ParameterizedTest
+    @EnumSource(Transfer.class)
+    void repositoryMountTransferOfAFolderHoldingADeniedChildIsForbidden(Transfer transfer) throws IOException {
+        var mount = repoMountWithDeniedChild();
+        var root = mount.root();
+        var service = service(mount.acl(), new FileNodeMapperImpl());
+        var row = "SB-F03 " + transfer + " of P1, which holds the denied " + DENIED + ", on REPO";
+        var before = snapshot(mount);
+        clearInvocations(mount.storage().toArray());
+
+        assertForbidden(row, () -> transfer(transfer, service, root, "P1", transfer.target));
+
+        assertNothingWritten(row, mount, before);
+        assertNeverOpened(row, mount, HIDDEN);
+        assertNothingSavedOrDeleted(row, mount);
+        // V1: positive control: a folder holding no denied entry is still transferred with its content.
+        var inside = Files.readString(mount.project().resolve(SOURCE));
+        transfer(transfer, service, root, mount.path("sub"), transfer.target);
+        assertEquals(inside, Files.readString(mount.store().resolve(transfer.target).resolve("inside.txt")),
+                "The " + transfer + " of P1/sub on REPO writes its file to the destination");
+        assertEquals(transfer == Transfer.COPY, Files.exists(mount.project().resolve(SOURCE)),
+                "A copy of P1/sub on REPO keeps its source and a move removes it");
+    }
+
+    // V1: a copy or move onto an existing denied folder is forbidden, as its entries would be created inside it.
+    @ParameterizedTest
+    @EnumSource(Transfer.class)
+    void repositoryMountTransferIntoADeniedFolderIsForbidden(Transfer transfer) throws IOException {
+        var mount = repoMountWithDeniedChild();
+        var root = mount.root();
+        var service = service(mount.acl(), new FileNodeMapperImpl());
+        var payloads = List.of(
+                new Payload("folder P1/sub onto " + DENIED, () -> transfer(transfer, service, root, "P1/sub", DENIED)),
+                new Payload("folder P1/sub into " + DENIED + "/new",
+                        () -> transfer(transfer, service, root, "P1/sub", DENIED + "/new")),
+                new Payload("file P1/" + SOURCE + " into " + DENIED,
+                        () -> transfer(transfer, service, root, mount.path(SOURCE), DENIED + "/copied.txt")));
+        for (var payload : payloads) {
+            var row = "SB-F03 " + transfer + " of the " + payload.description() + " on REPO";
+            var before = snapshot(mount);
+            clearInvocations(mount.storage().toArray());
+            assertForbidden(row, payload.call());
+            assertNothingWritten(row, mount, before);
+            assertNothingSavedOrDeleted(row, mount);
+        }
+        // V1: positive control: a folder is still transferred onto an existing folder the user may create in.
+        var extra = marker();
+        write(mount.project().resolve("extra/e.txt"), extra);
+        var kept = marker();
+        write(mount.project().resolve("docs/keep.txt"), kept);
+        transfer(transfer, service, root, mount.path("extra"), mount.path("docs"));
+        assertEquals(extra, Files.readString(mount.project().resolve("docs/e.txt")),
+                "The " + transfer + " of the folder P1/extra onto P1/docs on REPO writes its file into P1/docs");
+        assertEquals(kept, Files.readString(mount.project().resolve("docs/keep.txt")),
+                "The " + transfer + " of the folder P1/extra onto P1/docs on REPO keeps the file P1/docs holds");
+        // V1: positive control: a file is still transferred into a folder the user may create in.
+        var inside = Files.readString(mount.project().resolve(SOURCE));
+        transfer(transfer, service, root, mount.path(SOURCE), mount.path("copied.txt"));
+        assertEquals(inside, Files.readString(mount.project().resolve("copied.txt")),
+                "The " + transfer + " of the file P1/" + SOURCE + " to P1/copied.txt on REPO writes its content");
+    }
+
+    // V1: a move also needs DELETE on every entry it removes; READ alone still lets the same folder be copied.
+    @Test
+    void repositoryMountMoveOfAFolderHoldingAnUndeletableChildIsForbidden() throws IOException {
+        var mount = repoMount(mock(ProjectFileLookupService.class));
+        var hidden = marker();
+        write(mount.project().resolve(HIDDEN), hidden);
+        when(mount.acl().hasPermission(argThat((AProjectArtefact artefact) -> inSubtree(artefact, DENIED)),
+                eq(BasePermission.DELETE))).thenReturn(false);
+        var root = mount.root();
+        var service = service(mount.acl(), new FileNodeMapperImpl());
+        var row = "SB-F03 move of P1, which holds the undeletable " + DENIED + ", on REPO";
+        var before = snapshot(mount);
+        clearInvocations(mount.storage().toArray());
+
+        assertForbidden(row, () -> service.moveResource(root, "P1", "moved"));
+
+        assertNothingWritten(row, mount, before);
+        assertNeverOpened(row, mount, HIDDEN);
+        assertNothingSavedOrDeleted(row, mount);
+        // V1: positive control: the user may read every entry, so the copy of the same folder goes through.
+        service.copyResource(root, "P1", "copied");
+        assertEquals(hidden, Files.readString(mount.store().resolve("copied").resolve(HIDDEN)),
+                "The copy of P1 on REPO, which needs READ only, copies " + HIDDEN);
+    }
+
+    // V1: a folder delete needs DELETE on every entry it removes, so a folder holding a denied child is kept whole.
+    @Test
+    void repositoryMountDeleteOfAFolderHoldingADeniedChildIsForbidden() throws IOException {
+        var mount = repoMountWithDeniedChild();
+        var root = mount.root();
+        var service = service(mount.acl(), new FileNodeMapperImpl());
+        var row = "SB-F03 delete of P1, which holds the denied " + DENIED + ", on REPO";
+        var before = snapshot(mount);
+        clearInvocations(mount.storage().toArray());
+
+        assertForbidden(row, () -> service.deleteResource(root, "P1"));
+
+        assertNothingWritten(row, mount, before);
+        assertNothingSavedOrDeleted(row, mount);
+        // V1: positive control: a folder holding no denied entry is still deleted.
+        service.deleteResource(root, mount.path("sub"));
+        assertFalse(Files.exists(mount.project().resolve(SOURCE)), "The delete of P1/sub on REPO removes its file");
+        assertTrue(Files.exists(mount.project().resolve(HIDDEN)), "The delete of P1/sub on REPO keeps " + HIDDEN);
+    }
+
+    // V1: an export skips the denied child unread, as FileArchiveSupport checks READ before it opens each entry.
+    @Test
+    void repositoryMountExportOmitsADeniedChildUnread() throws IOException {
+        var mount = repoMountWithDeniedChild();
+        var root = mount.root();
+        var service = service(mount.acl(), new FileNodeMapperImpl());
+        var before = snapshot(mount);
+        clearInvocations(mount.storage().toArray());
+        var folder = new ByteArrayOutputStream();
+        var whole = new ByteArrayOutputStream();
+
+        service.writeFolderAsZip(root, "P1", folder, null);
+        service.writeFolderAsZip(root, "", whole, null);
+
+        assertEquals(new TreeSet<>(List.of("rules.xml", SOURCE)), new TreeSet<>(unzip(folder.toByteArray()).keySet()),
+                "The export of P1 on REPO holds its readable files only");
+        var exported = unzip(whole.toByteArray()).keySet();
+        assertTrue(exported.containsAll(List.of(mount.path("rules.xml"), mount.path(SOURCE), "P2/rules.xml")),
+                "The export of the whole REPO mount holds every readable file");
+        assertFalse(exported.contains(mount.path(HIDDEN)), "The export of the whole REPO mount omits " + HIDDEN);
+        assertNeverOpened("SB-F03 export of P1 and of the whole REPO mount", mount, HIDDEN);
+        assertOpened("SB-F03 export of P1 on REPO", mount, SOURCE);
+        assertNothingWritten("SB-F03 export on REPO", mount, before);
+    }
+
+    // V1: a batch that overwrites a denied file is forbidden, whatever the upload route and the overwriting policy.
+    @Test
+    void repositoryMountUploadOverwritingADeniedFileIsForbidden() throws IOException {
+        var mount = repoMountWithDeniedChild();
+        var root = mount.root();
+        var service = service(mount.acl(), new FileNodeMapperImpl());
+        var hidden = DENIED + "/hidden.txt";
+        var payloads = List.of(
+                new Payload("uploadFiles " + hidden + " with OVERWRITE", () -> service.uploadFiles(root, "",
+                        List.of(file(hidden, marker())), ConflictPolicy.OVERWRITE)),
+                new Payload("uploadArchive entry " + hidden + " with OVERWRITE", () -> service.uploadArchive(root, "",
+                        zip(hidden, marker()), true, ConflictPolicy.OVERWRITE)),
+                new Payload("uploadFiles hidden.txt under " + DENIED + " with OVERWRITE", () -> service.uploadFiles(
+                        root, DENIED, List.of(file("hidden.txt", marker())), ConflictPolicy.OVERWRITE)),
+                new Payload("uploadFiles hidden.txt under " + DENIED + " with REPLACE", () -> service.uploadFiles(
+                        root, DENIED, List.of(file("hidden.txt", marker())), ConflictPolicy.REPLACE)));
+        for (var payload : payloads) {
+            var row = "SB-F03 " + payload.description() + " on REPO";
+            var before = snapshot(mount);
+            clearInvocations(mount.storage().toArray());
+            assertForbidden(row, payload.call());
+            assertNothingWritten(row, mount, before);
+            assertNothingSavedOrDeleted(row, mount);
+        }
+        // V1: positive control: a readable file is still overwritten.
+        var content = marker();
+        service.uploadFiles(root, "", List.of(file(mount.path(SOURCE), content)), ConflictPolicy.OVERWRITE);
+        assertEquals(content, Files.readString(mount.project().resolve(SOURCE)),
+                "The OVERWRITE upload of P1/" + SOURCE + " on REPO replaces its content");
+    }
+
+    // V1: a batch that creates an entry inside a denied folder is forbidden; elsewhere new entries are still created.
+    @Test
+    void repositoryMountUploadCreatingAnEntryInADeniedFolderIsForbidden() throws IOException {
+        var mount = repoMountWithDeniedChild();
+        var root = mount.root();
+        var service = service(mount.acl(), new FileNodeMapperImpl());
+        var payloads = List.of(
+                new Payload("uploadFiles " + DENIED + "/new.txt", () -> service.uploadFiles(root, "",
+                        List.of(file(DENIED + "/new.txt", marker())), ConflictPolicy.FAIL)),
+                new Payload("uploadFiles " + DENIED + "/deeper/new.txt", () -> service.uploadFiles(root, "",
+                        List.of(file(DENIED + "/deeper/new.txt", marker())), ConflictPolicy.OVERWRITE)),
+                new Payload("uploadArchive entry new.txt under " + DENIED, () -> service.uploadArchive(root, DENIED,
+                        zip("new.txt", marker()), true, ConflictPolicy.SKIP)),
+                new Payload("uploadFiles " + DENIED + "/new.txt beside an entry below the denied file", () -> service
+                        .uploadFiles(root, "", List.of(file(DENIED + "/hidden.txt/x.txt", marker()),
+                                file(DENIED + "/new.txt", marker())), ConflictPolicy.OVERWRITE)));
+        for (var payload : payloads) {
+            var row = "SB-F03 " + payload.description() + " on REPO";
+            var before = snapshot(mount);
+            clearInvocations(mount.storage().toArray());
+            assertForbidden(row, payload.call());
+            assertNothingWritten(row, mount, before);
+            assertNothingSavedOrDeleted(row, mount);
+        }
+        // V1: positive control: new entries in a readable folder and at the repository root are still created.
+        var inSub = marker();
+        var top = marker();
+        var other = marker();
+        service.uploadFiles(root, "", List.of(file(mount.path("sub/new.txt"), inSub), file("Top/new.txt", top),
+                file("Other/new.txt", other)), ConflictPolicy.FAIL);
+        assertEquals(inSub, Files.readString(mount.project().resolve("sub/new.txt")), "P1/sub/new.txt is created");
+        assertEquals(top, Files.readString(mount.store().resolve("Top/new.txt")), "Top/new.txt is created");
+        assertEquals(other, Files.readString(mount.store().resolve("Other/new.txt")), "Other/new.txt is created");
+    }
+
+    // V1: an upload below an existing file keeps the 409 of its write, also below a file in a denied folder.
+    // A user who may not create there is refused before the storage is called, so a backend that would store the
+    // entry below the file, as a blob store does, creates nothing. A REPLACE that removes the denied file is a 403.
+    @Test
+    void repositoryMountUploadBelowAFileKeepsItsConflictInADeniedFolder() throws IOException {
+        var mount = repoMountWithDeniedChild();
+        var root = mount.root();
+        var service = service(mount.acl(), new FileNodeMapperImpl());
+        var below = DENIED + "/hidden.txt/x.txt";
+        for (var policy : List.of(ConflictPolicy.FAIL, ConflictPolicy.OVERWRITE, ConflictPolicy.SKIP)) {
+            var payloads = List.of(
+                    new Payload("uploadFiles " + below + " with " + policy,
+                            () -> service.uploadFiles(root, "", List.of(file(below, marker())), policy)),
+                    new Payload("uploadArchive entry x.txt under " + DENIED + "/hidden.txt with " + policy,
+                            () -> service.uploadArchive(root, DENIED + "/hidden.txt", zip("x.txt", marker()), true,
+                                    policy)),
+                    new Payload("uploadFiles " + below + " and y.txt beside it after P1/sub/new.txt with " + policy,
+                            () -> service.uploadFiles(root, "", List.of(file(mount.path("sub/new.txt"), marker()),
+                                    file(below, marker()), file(DENIED + "/hidden.txt/y.txt", marker())), policy)));
+            for (var payload : payloads) {
+                var row = "FV-F01 " + payload.description() + " on REPO";
+                var before = snapshot(mount);
+                clearInvocations(mount.storage().toArray());
+                var conflict = assertThrows(ConflictException.class, payload.call(), row + " is rejected");
+                assertEquals(UPLOAD_FAILED, conflict.getErrorCode(), row + " keeps its 409");
+                assertNothingWritten(row, mount, before);
+                assertNothingSavedOrDeleted(row, mount);
+            }
+        }
+        var replaceRow = "FV-F01 uploadFiles " + below + " with REPLACE, which removes " + HIDDEN + ", on REPO";
+        var before = snapshot(mount);
+        clearInvocations(mount.storage().toArray());
+        assertForbidden(replaceRow, () -> service.uploadFiles(root, "", List.of(file(below, marker())),
+                ConflictPolicy.REPLACE));
+        assertNothingWritten(replaceRow, mount, before);
+        assertNothingSavedOrDeleted(replaceRow, mount);
+        // V1: positive control: below a file the user may create in, the storage write raises the same 409.
+        var grantedRow = "FV-F01 uploadFiles P1/" + SOURCE + "/x.txt below a readable file on REPO";
+        var grantedBefore = snapshot(mount);
+        clearInvocations(mount.storage().toArray());
+        var conflict = assertThrows(ConflictException.class, () -> service.uploadFiles(root, "",
+                List.of(file(mount.path(SOURCE + "/x.txt"), marker())), ConflictPolicy.FAIL), grantedRow);
+        assertEquals(UPLOAD_FAILED, conflict.getErrorCode(), grantedRow + " keeps its 409");
+        assertNothingWritten(grantedRow, mount, grantedBefore);
+        verify(mount.storage().getFirst(), atLeastOnce().description(grantedRow + " reaches the storage write"))
+                .save(any(FileData.class), any(), eq(ChangesetType.DIFF));
+    }
+
+    // V1: a REPLACE needs DELETE on every file it removes, so a base holding a denied child is kept whole.
+    @Test
+    void repositoryMountReplaceRemovingADeniedFileIsForbidden() throws IOException {
+        var mount = repoMountWithDeniedChild();
+        var root = mount.root();
+        var service = service(mount.acl(), new FileNodeMapperImpl());
+        var row = "SB-F03 uploadFiles rules.xml under P1 with REPLACE, which removes " + HIDDEN + ", on REPO";
+        var before = snapshot(mount);
+        clearInvocations(mount.storage().toArray());
+
+        assertForbidden(row, () -> service.uploadFiles(root, "P1", List.of(file("rules.xml", descriptor())),
+                ConflictPolicy.REPLACE));
+
+        assertNothingWritten(row, mount, before);
+        assertNothingSavedOrDeleted(row, mount);
+        // V1: positive control: a base holding no denied entry is still replaced.
+        var content = marker();
+        service.uploadFiles(root, mount.path("sub"), List.of(file("kept.txt", content)), ConflictPolicy.REPLACE);
+        assertEquals(content, Files.readString(mount.project().resolve("sub/kept.txt")), "P1/sub/kept.txt is written");
+        assertFalse(Files.exists(mount.project().resolve(SOURCE)), "The REPLACE of P1/sub removes " + SOURCE);
+    }
+
+    // V1: a REPLACE also needs DELETE on every folder it removes, which is each folder no kept entry stays in.
+    // The storage removes a folder once the replace has emptied it, so the folder itself must be deletable. The rows
+    // reach the denied folder directly below the base and through a subfolder of it.
+    @Test
+    void repositoryMountReplaceRemovingAnUndeletableFolderIsForbidden() throws IOException {
+        var mount = repoMount(mock(ProjectFileLookupService.class));
+        write(mount.project().resolve(HIDDEN), marker());
+        when(mount.acl().hasPermission(argThat((AProjectArtefact artefact) -> artefact != null
+                && DENIED.equals(artefact.getInternalPath())), eq(BasePermission.DELETE))).thenReturn(false);
+        var root = mount.root();
+        var service = service(mount.acl(), new FileNodeMapperImpl());
+        assertForbidden("SB-F03 delete of the undeletable folder " + DENIED + " on REPO",
+                () -> service.deleteResource(root, DENIED));
+        var payloads = List.of(
+                new Payload("uploadFiles rules.xml under P1 with REPLACE", () -> service.uploadFiles(root, "P1",
+                        List.of(file("rules.xml", descriptor())), ConflictPolicy.REPLACE)),
+                new Payload("uploadArchive entry rules.xml under P1 with REPLACE", () -> service.uploadArchive(root,
+                        "P1", zip("rules.xml", descriptor()), true, ConflictPolicy.REPLACE)),
+                new Payload("uploadFiles P1/rules.xml at the repository root with REPLACE", () -> service.uploadFiles(
+                        root, "", List.of(file(mount.path("rules.xml"), descriptor()),
+                                file("P2/rules.xml", marker())), ConflictPolicy.REPLACE)));
+        for (var payload : payloads) {
+            var row = "SB-F03 " + payload.description() + ", which removes the undeletable " + DENIED + ", on REPO";
+            var before = snapshot(mount);
+            clearInvocations(mount.storage().toArray());
+            assertForbidden(row, payload.call());
+            assertNothingWritten(row, mount, before);
+            assertNothingSavedOrDeleted(row, mount);
+        }
+        // V1: positive control: a kept entry inside the folder keeps it, so the same REPLACE is allowed.
+        var hidden = marker();
+        service.uploadFiles(root, "P1", List.of(file("rules.xml", descriptor()), file(HIDDEN, hidden)),
+                ConflictPolicy.REPLACE);
+        assertEquals(hidden, Files.readString(mount.project().resolve(HIDDEN)),
+                "The REPLACE of P1 that keeps " + HIDDEN + " on REPO writes it into " + DENIED);
+        assertFalse(Files.exists(mount.project().resolve("sub")),
+                "The REPLACE of P1 on REPO removes the folder P1/sub");
+        assertEquals(descriptor(), Files.readString(mount.project().resolve("rules.xml")),
+                "The REPLACE of P1 on REPO keeps P1/rules.xml");
+    }
+
+    // V1: the conflict policies keep their outcomes for a denied file: SKIP skips it unchecked, FAIL keeps its 409.
+    @Test
+    void repositoryMountUploadKeepsItsConflictPoliciesForADeniedFile() throws IOException {
+        var mount = repoMountWithDeniedChild();
+        var root = mount.root();
+        var service = service(mount.acl(), new FileNodeMapperImpl());
+        var hidden = DENIED + "/hidden.txt";
+        var before = snapshot(mount);
+        clearInvocations(mount.storage().toArray());
+
+        service.uploadFiles(root, "", List.of(file(hidden, marker())), ConflictPolicy.SKIP);
+        var conflict = assertThrows(ConflictException.class,
+                () -> service.uploadFiles(root, "", List.of(file(hidden, marker())), ConflictPolicy.FAIL),
+                "SB-F03 FAIL upload of the existing " + hidden + " on REPO is rejected");
+
+        assertEquals(ENTRY_EXISTS, conflict.getErrorCode(), "The FAIL upload of " + hidden + " keeps its 409");
+        assertNothingWritten("SB-F03 SKIP and FAIL uploads of " + hidden + " on REPO", mount, before);
+        assertNothingSavedOrDeleted("SB-F03 SKIP and FAIL uploads of " + hidden + " on REPO", mount);
+    }
+
+    // V1: an overwrite that replaces a folder needs DELETE on everything the folder holds.
+    @Test
+    void repositoryMountUploadReplacingAFolderWithUndeletableEntriesIsForbidden() throws IOException {
+        var mount = repoMount(mock(ProjectFileLookupService.class));
+        write(mount.project().resolve(HIDDEN), marker());
+        when(mount.acl().hasPermission(argThat((AProjectArtefact artefact) -> artefact != null
+                && artefact.getInternalPath().startsWith(DENIED + "/")), eq(BasePermission.DELETE))).thenReturn(false);
+        var root = mount.root();
+        var service = service(mount.acl(), new FileNodeMapperImpl());
+        var row = "SB-F03 OVERWRITE upload of a file at the folder " + DENIED + " on REPO";
+        var before = snapshot(mount);
+        clearInvocations(mount.storage().toArray());
+
+        assertForbidden(row, () -> service.uploadFiles(root, "", List.of(file(DENIED, marker())),
+                ConflictPolicy.OVERWRITE));
+
+        assertNothingWritten(row, mount, before);
+        assertNothingSavedOrDeleted(row, mount);
+    }
+
+    // V1: a destination below an existing file keeps its 409, which rejects it before anything is written.
+    @ParameterizedTest
+    @EnumSource(Transfer.class)
+    void repositoryMountTransferBelowAFileKeepsItsConflictInADeniedFolder(Transfer transfer) throws IOException {
+        var mount = repoMountWithDeniedChild();
+        var root = mount.root();
+        var service = service(mount.acl(), new FileNodeMapperImpl());
+        for (var destination : List.of(DENIED + "/hidden.txt/sub", DENIED + "/hidden.txt/sub/deeper")) {
+            var row = "SB-F03 " + transfer + " of P1/sub to " + destination + " on REPO";
+            var before = snapshot(mount);
+
+            var conflict = assertThrows(ConflictException.class,
+                    () -> transfer(transfer, service, root, mount.path("sub"), destination), row + " is rejected");
+
+            assertEquals(transfer == Transfer.COPY ? COPY_CONFLICT : MOVE_CONFLICT, conflict.getErrorCode(),
+                    row + " keeps its path conflict");
+            assertNothingWritten(row, mount, before);
+        }
+    }
+
+    // V1: a content search checks READ before it reads a file, so a denied file is never opened.
+    @Test
+    void repositoryMountContentSearchNeverReadsADeniedFile() throws IOException {
+        var mount = repoMountWithDeniedChild();
+        var needle = marker();
+        write(mount.project().resolve(HIDDEN), needle);
+        write(mount.project().resolve("sub/found.txt"), needle);
+        var service = service(mount.acl(), new FileNodeMapperImpl());
+        clearInvocations(mount.storage().toArray());
+
+        var found = service.search(mount.root(), FileSearchQuery.builder().content(needle).recursive(true).build());
+
+        assertEquals(List.of(mount.path("sub/found.txt")), pathsOf(found),
+                "SB-F03 content search on REPO finds the readable file only");
+        assertNeverOpened("SB-F03 content search on REPO", mount, HIDDEN);
+        assertOpened("SB-F03 content search on REPO", mount, "sub/found.txt");
+        // V1: a search by pattern alone still omits the denied file and reads no content.
+        clearInvocations(mount.storage().toArray());
+        var matched = service.search(mount.root(), FileSearchQuery.builder().pattern("P1/**/*.txt").recursive(true)
+                .build());
+        assertEquals(List.of(mount.path("sub/found.txt"), mount.path(SOURCE)), pathsOf(matched),
+                "SB-F03 pattern search on REPO finds the readable files only");
+        verify(mount.storage().getFirst(), never().description("SB-F03 pattern search on REPO reads no content"))
+                .read(anyString());
+    }
+
+    // V1: the type, extension and pattern criteria run before the containment and READ checks and read no content.
+    @Test
+    void repositoryMountSearchCriteriaRunBeforeTheStorageChecksAndOmitDeniedEntries() throws IOException {
+        var mount = repoMountWithDeniedChild();
+        write(mount.project().resolve("docs/table.CSV"), marker());
+        write(mount.project().resolve("docs/notes.txt"), marker());
+        write(mount.project().resolve("docs/README"), marker());
+        write(mount.project().resolve("secret/hidden.csv"), marker());
+        var root = spy(mount.root());
+        var service = service(mount.acl(), new FileNodeMapperImpl());
+        var storage = mount.storage().getFirst();
+        var table = mount.path("docs/table.CSV");
+        var notes = mount.path("docs/notes.txt");
+        var readme = mount.path("docs/README");
+        var files = List.of(table, notes, readme, mount.path("rules.xml"), mount.path(SOURCE), "P2/rules.xml");
+        var folders = List.of("P1", mount.path("docs"), mount.path("sub"), "P2");
+        record Criteria(String description, FileSearchQuery query, List<String> found, List<String> dropped) {
+        }
+        var criteria = List.of(
+                new Criteria("type FILE", FileSearchQuery.builder().type(FileSearchQuery.FileType.FILE).recursive(true)
+                        .build(), files, folders),
+                new Criteria("type FOLDER", FileSearchQuery.builder().type(FileSearchQuery.FileType.FOLDER)
+                        .recursive(true).build(), folders, files),
+                new Criteria("extension csv", FileSearchQuery.builder().extension("csv").recursive(true).build(),
+                        List.of(table), List.of(notes, readme, mount.path("rules.xml"), mount.path("docs"))),
+                new Criteria("extension CSV", FileSearchQuery.builder().extension("CSV").recursive(true).build(),
+                        List.of(table), List.of(notes, readme, mount.path("rules.xml"), mount.path("docs"))),
+                new Criteria("pattern P1/docs/*", FileSearchQuery.builder().pattern("P1/docs/*").recursive(true)
+                        .build(), List.of(table, notes, readme), List.of(mount.path("rules.xml"), mount.path(SOURCE))));
+
+        for (var criterion : criteria) {
+            var row = "SB-F03 recursive search by " + criterion.description() + " on REPO";
+            clearInvocations(root, storage, mount.acl());
+            var found = pathsOf(service.search(root, criterion.query()));
+            assertEquals(new TreeSet<>(criterion.found()), new TreeSet<>(found),
+                    row + " finds the readable entries its criteria keep, and nothing under " + DENIED);
+            // The READ check sees only the entries the in-memory criteria keep, and so does the containment check,
+            // which resolves each folder the search descends into once, before it does.
+            for (var path : criterion.dropped()) {
+                verify(mount.acl(), never().description(row + " checks no permission on " + path))
+                        .hasPermission(argThat((AProjectArtefact artefact) -> artefact != null
+                                && path.equals(artefact.getInternalPath())), any());
+                var checks = folders.contains(path) ? 1 : 0;
+                verify(root, Mockito.times(checks).description(row + " resolves " + path + " " + checks + " time(s)"))
+                        .contains(path);
+            }
+            verify(storage, never().description(row + " reads no content")).read(anyString());
+        }
+    }
+
+    // V1: a search skips a folder outside the mount unread, and without recursion matches the top level only.
+    @Test
+    void repositoryMountSearchSkipsAnUncontainedFolderAndStaysAtTheTopLevelWithoutRecursion() throws IOException {
+        var mount = repoMount(mock(ProjectFileLookupService.class));
+        var needle = marker();
+        write(mount.project().resolve("docs/hit.txt"), needle);
+        write(mount.project().resolve("sub/hit.txt"), needle);
+        var root = spy(mount.root());
+        var docs = mount.path("docs");
+        // A file repository lists nothing under a directory link, so a folder the mount places outside is stubbed.
+        Mockito.doReturn(false).when(root).contains(docs);
+        var service = service(mount.acl(), new FileNodeMapperImpl());
+        var storage = mount.storage().getFirst();
+        var recursiveRow = "SB-F03 recursive content search on REPO with " + docs + " outside the mount";
+        clearInvocations(storage);
+
+        var found = service.search(root, FileSearchQuery.builder().content(needle).recursive(true).build());
+
+        assertEquals(List.of(mount.path("sub/hit.txt")), pathsOf(found), recursiveRow + " finds the contained file");
+        verify(root, never().description(recursiveRow + " does not descend into " + docs))
+                .contains(mount.path("docs/hit.txt"));
+        assertNeverOpened(recursiveRow, mount, "docs/hit.txt");
+        assertOpened(recursiveRow, mount, "sub/hit.txt");
+
+        var topRow = "SB-F03 search without recursion on REPO";
+        clearInvocations(root, storage);
+        assertEquals(List.of("P1", "P2"), pathsOf(service.search(root, FileSearchQuery.builder().build())),
+                topRow + " finds the top-level folders only");
+        verify(root, Mockito.times(1).description(topRow + " resolves P1 once")).contains("P1");
+        verify(root, Mockito.times(1).description(topRow + " resolves P2 once")).contains("P2");
+        verify(root, never().description(topRow + " descends into no folder"))
+                .contains(argThat(path -> path != null && path.contains("/")));
+        verify(storage, never().description(topRow + " reads no content")).read(anyString());
+        // A top-level folder the mount places outside is omitted as well.
+        Mockito.doReturn(false).when(root).contains("P2");
+        assertEquals(List.of("P1"), pathsOf(service.search(root, FileSearchQuery.builder().build())),
+                topRow + " omits P2 once the mount places it outside");
+    }
+
+    // V1: a content search treats missing, unreadable or over-limit content as no match and keeps searching.
+    @Test
+    void repositoryMountContentSearchTreatsMissingUnreadableAndOverLimitContentAsNoMatch() throws IOException {
+        var mount = repoMount(mock(ProjectFileLookupService.class));
+        var needle = marker();
+        var limit = 1024 * 1024;
+        write(mount.project().resolve("docs/at-limit.txt"), needle + "x".repeat(limit - needle.length()));
+        write(mount.project().resolve("docs/over-limit.txt"), needle + "x".repeat(limit + 1 - needle.length()));
+        for (var name : List.of("no-stream.txt", "read-fails.txt", "stream-fails.txt")) {
+            write(mount.project().resolve("docs/" + name), needle);
+        }
+        var storage = mount.storage().getFirst();
+        // The storage answers each of these files as a backend may: with no stream, a read error or a failing stream.
+        Mockito.doReturn(new FileItem(mount.path("docs/no-stream.txt"), null)).when(storage)
+                .read(endsWith("docs/no-stream.txt"));
+        Mockito.doThrow(new IOException(marker())).when(storage).read(endsWith("docs/read-fails.txt"));
+        Mockito.doReturn(new FileItem(mount.path("docs/stream-fails.txt"), new InputStream() {
+            @Override
+            public int read() throws IOException {
+                throw new IOException(marker());
+            }
+        })).when(storage).read(endsWith("docs/stream-fails.txt"));
+        var service = service(mount.acl(), new FileNodeMapperImpl());
+        var row = "SB-F03 content search on REPO";
+        clearInvocations(storage);
+
+        var found = service.search(mount.root(),
+                FileSearchQuery.builder().content(needle.toUpperCase()).recursive(true).build());
+
+        assertEquals(List.of(mount.path("docs/at-limit.txt")), pathsOf(found),
+                row + " finds, ignoring case, only the file whose content is read whole within the limit");
+        for (var name : List.of("at-limit.txt", "over-limit.txt", "no-stream.txt", "read-fails.txt",
+                "stream-fails.txt")) {
+            assertOpened(row, mount, "docs/" + name);
+        }
+    }
+
+    // V1: an ancestor search composes its lookup path from the anchor and the pattern, and rejects one not normalized.
+    @Test
+    void repositoryMountAncestorSearchComposesItsLookupPathAndRejectsAnUnnormalizedOne() throws IOException {
+        var lookup = mock(ProjectFileLookupService.class);
+        var mount = repoMount(lookup);
+        var root = mount.root();
+        var service = service(mount.acl(), new FileNodeMapperImpl());
+        List<FsNode> nodes = List.of(FileNode.builder().path("AGENTS.md").name("AGENTS.md").content(marker()).build());
+        when(lookup.lookup(any(Repository.class), anyString(), eq(true))).thenReturn(nodes);
+
+        assertEquals(List.of(), service.search(root, FileSearchQuery.builder().scope(FileSearchQuery.Scope.ANCESTORS)
+                .build()), "An ancestor search with neither a pattern nor an anchor on REPO finds nothing");
+        verifyNoInteractions(lookup);
+        var lookups = Map.of(
+                "AGENTS.md", FileSearchQuery.builder().scope(FileSearchQuery.Scope.ANCESTORS).pattern("AGENTS.md"),
+                "P1/sub/", FileSearchQuery.builder().scope(FileSearchQuery.Scope.ANCESTORS).from("P1/sub"),
+                "P1/sub/AGENTS.md", FileSearchQuery.builder().scope(FileSearchQuery.Scope.ANCESTORS)
+                        .pattern("AGENTS.md").from("P1/sub"));
+        for (var lookupPath : lookups.keySet()) {
+            assertEquals(nodes, service.search(root, lookups.get(lookupPath).build()),
+                    "The ancestor search of " + lookupPath + " on REPO returns what the lookup finds");
+            verify(lookup).lookup(any(Repository.class), eq(lookupPath), eq(true));
+        }
+        for (var from : List.of("../P2", "/P1", "P1//sub", "P1/./sub", "P1\\sub")) {
+            assertPathRejected("The ancestor search from " + from + " on REPO", () -> service.search(root,
+                    FileSearchQuery.builder().scope(FileSearchQuery.Scope.ANCESTORS).pattern("AGENTS.md").from(from)
+                            .build()));
+        }
+        verifyNoMoreInteractions(lookup);
+    }
+
+    // V1: a repository mount whose ACL grants the repository root and denies P1/secret with everything it holds.
+    private Mount repoMountWithDeniedChild() throws IOException {
+        var mount = repoMount(mock(ProjectFileLookupService.class));
+        write(mount.project().resolve(HIDDEN), marker());
+        when(mount.acl().hasPermission(argThat((AProjectArtefact artefact) -> inSubtree(artefact, DENIED)), any()))
+                .thenReturn(false);
+        return mount;
+    }
+
+    // V1: whether the artefact is the folder, or sits below it, by its repository path.
+    private static boolean inSubtree(AProjectArtefact artefact, String folder) {
+        if (artefact == null) {
+            return false;
+        }
+        var path = artefact.getInternalPath();
+        return path.equals(folder) || path.startsWith(folder + "/");
+    }
+
+    // V1: a copy or move through the service, on any mount.
+    private static void transfer(Transfer transfer, ProjectFilesServiceImpl service, FileRoot root, String source,
+                                 String destination) {
+        switch (transfer) {
+            case COPY -> service.copyResource(root, source, destination);
+            case MOVE -> service.moveResource(root, source, destination);
+        }
+    }
+
+    // V1: the spied storage of the repository mount saved and deleted nothing.
+    private static void assertNothingSavedOrDeleted(String row, Mount mount) throws IOException {
+        var storage = mount.storage().getFirst();
+        verify(storage, never().description(row + " saves no file")).save(any(FileData.class), any(InputStream.class));
+        verify(storage, never().description(row + " saves no file list")).save(anyList());
+        verify(storage, never().description(row + " saves no changeset"))
+                .save(any(FileData.class), any(), any(ChangesetType.class));
+        verify(storage, never().description(row + " deletes no file")).delete(any(FileData.class));
+        verify(storage, never().description(row + " deletes no file list")).delete(anyList());
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -1751,8 +2366,8 @@ class ProjectFilesServiceTest {
         }
     }
 
-    // V1: a project mount over a grant-all project ACL, which the mount and its service share; storage holds the
-    // spied repositories the project reads its content through.
+    // V1: a project mount over a grant-all project ACL, which the mount and its service share.
+    // Storage holds the spied repositories the project reads its content through.
     private Mount projectMount(RulesProject project, Path store, Path projectFolder, ProjectFileLookupService lookup,
                                List<Repository> storage) {
         var acl = grantAllProjectAcl();
@@ -1780,8 +2395,8 @@ class ProjectFilesServiceTest {
         return assertInstanceOf(ProjectFileRoot.class, mount.root(), "Fixture: a project mount").getProject();
     }
 
-    // V1: the project mount of the kind over a project whose state does not let the user modify it, as for a project
-    // locked by another user or on a protected branch.
+    // V1: the project mount of the kind over a project whose state does not let the user modify it.
+    // Such is the state of a project locked by another user or on a protected branch.
     private Mount unmodifiableMount(MountKind kind) throws IOException {
         var mount = mount(kind);
         var project = projectOf(mount);
@@ -1793,8 +2408,8 @@ class ProjectFilesServiceTest {
                 mount.storage());
     }
 
-    // V1: a versioned design repository that is not file-backed, as Git, JDBC, S3 and Azure Blob are, holding P1 at the
-    // current version; any other call returns the mock's defaults unless a test stubs it.
+    // V1: a versioned design repository that is not file-backed, holding P1 at the current version.
+    // Git, JDBC, S3 and Azure Blob are such backends. Any other call returns the mock's defaults unless stubbed.
     private static Repository versionedBackend(String currentVersion) throws IOException {
         var versioned = mock(Repository.class);
         var features = new FeaturesBuilder(versioned).setVersions(true).setFolders(true).build();
