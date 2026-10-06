@@ -18,8 +18,8 @@ import org.springframework.security.saml2.provider.service.web.Saml2Authenticati
 
 /**
  * V3: stores SAML AuthnRequests by {@code RelayState} instead of in the HTTP session, because the
- * {@code SameSite=Lax} session cookie is not sent on the IdP's cross-site POST; bounded (10,000) and expiring
- * (5 minutes).
+ * {@code SameSite=Lax} session cookie is not sent on the IdP's cross-site POST; bounded (10,000), expiring
+ * (5 minutes) and single-use.
  * <p>
  * The SAML response reaches Studio as a cross-site HTTP-POST from the IdP, and browsers do not attach a
  * {@code SameSite=Lax} cookie to such a request. A session-backed store would therefore lose the saved AuthnRequest
@@ -32,13 +32,20 @@ import org.springframework.security.saml2.provider.service.web.Saml2Authenticati
  * session repository returns when nothing was saved. Unsolicited IdP-initiated responses therefore behave as before.
  * </p>
  * <p>
+ * Each saved AuthnRequest is handed out at most once. At the callback, the authentication filter's token converter
+ * loads the AuthnRequest into the token whose {@code InResponseTo} is validated, and the filter removes it afterwards
+ * without using the result. The load therefore claims the entry: it removes the entry under the same lock as saves
+ * and keeps the AuthnRequest on the request for the filter's subsequent remove. Of concurrent callbacks carrying one
+ * {@code RelayState}, only one obtains the AuthnRequest; the others fail {@code InResponseTo} validation.
+ * </p>
+ * <p>
  * Entries expire {@link #TTL} after they are saved. The store holds at most {@link #MAX_ENTRIES} entries: expired
  * entries are purged on each save, and the entry with the oldest save time is evicted when the store is still full.
  * Any visitor, anonymous ones included, triggers a save by starting a SAML login, so a save never scans the store:
- * an index orders the entries by save time. Saves and removals are serialized on one lock, which keeps the cap and
- * the index exact under concurrency, and each costs O(log n) plus the expired entries it purges. Loads are
- * lock-free, and every single-key update is atomic. Spring's {@code CacheSaml2AuthenticationRequestRepository} is
- * not used because it is unbounded and rejects a request without {@code RelayState}.
+ * an index orders the entries by save time. Saves, claims and removals are serialized on one lock, which keeps the
+ * cap and the index exact under concurrency, and each costs O(log n) plus the expired entries it purges. Every
+ * single-key update is atomic. Spring's {@code CacheSaml2AuthenticationRequestRepository} is not used because it is
+ * unbounded and rejects a request without {@code RelayState}.
  * </p>
  */
 public final class RelayStateSaml2AuthenticationRequestRepository
@@ -53,6 +60,12 @@ public final class RelayStateSaml2AuthenticationRequestRepository
      * The maximum number of AuthnRequests held at once.
      */
     static final int MAX_ENTRIES = 10_000;
+
+    /**
+     * The request attribute that keeps the AuthnRequest a callback has claimed, until the callback removes it.
+     */
+    private static final String CLAIMED_REQUEST_ATTRIBUTE =
+            RelayStateSaml2AuthenticationRequestRepository.class.getName() + ".CLAIMED_REQUEST";
 
     /**
      * Orders entries from the oldest save to the newest. Every entry lives for the same {@link #TTL}, so expiry order
@@ -93,11 +106,14 @@ public final class RelayStateSaml2AuthenticationRequestRepository
     }
 
     /**
-     * Returns the saved AuthnRequest whose {@code RelayState} matches the request's {@code RelayState} parameter. The
-     * entry is kept, because the authentication filter removes it after the response has been converted.
+     * Claims the saved AuthnRequest whose {@code RelayState} matches the request's {@code RelayState} parameter. The
+     * entry leaves the store atomically, so of several callbacks carrying one {@code RelayState} only one obtains the
+     * AuthnRequest; an expired entry leaves the store as well, but is not returned. The claimed AuthnRequest is kept on
+     * the request, where a repeated load returns it and {@link #removeAuthenticationRequest} hands it over.
      *
      * @param request the SAML response callback
-     * @return the live AuthnRequest, or {@code null} when the request has no {@code RelayState} or no live entry
+     * @return the claimed live AuthnRequest, or {@code null} when the request has no {@code RelayState} or no live
+     *         entry, or when another callback has claimed the entry
      */
     @Override
     public @Nullable AbstractSaml2AuthenticationRequest loadAuthenticationRequest(HttpServletRequest request) {
@@ -105,7 +121,15 @@ public final class RelayStateSaml2AuthenticationRequestRepository
         if (relayState == null) {
             return null;
         }
-        return liveRequest(entries.get(relayState));
+        AbstractSaml2AuthenticationRequest claimed = claimedRequest(request);
+        if (claimed != null) {
+            return claimed;
+        }
+        claimed = liveRequest(take(relayState));
+        if (claimed != null) {
+            request.setAttribute(CLAIMED_REQUEST_ATTRIBUTE, claimed);
+        }
+        return claimed;
     }
 
     /**
@@ -146,13 +170,14 @@ public final class RelayStateSaml2AuthenticationRequestRepository
     }
 
     /**
-     * Removes the saved AuthnRequest whose {@code RelayState} matches the request's {@code RelayState} parameter. An
-     * expired entry is removed as well, but is not returned.
+     * Removes the AuthnRequest of the request's {@code RelayState} parameter. The AuthnRequest that a load on this
+     * request has claimed is released from the request and returned. Otherwise the saved entry leaves the store
+     * atomically; an expired entry leaves it as well, but is not returned.
      *
      * @param request the SAML response callback
      * @param response the response of the callback; not used
-     * @return the removed live AuthnRequest, or {@code null} when the request has no {@code RelayState} or no live
-     *         entry
+     * @return the claimed or removed live AuthnRequest, or {@code null} when the request has no {@code RelayState}
+     *         or no live entry, or when another callback has claimed the entry
      */
     @Override
     public @Nullable AbstractSaml2AuthenticationRequest removeAuthenticationRequest(HttpServletRequest request,
@@ -161,14 +186,12 @@ public final class RelayStateSaml2AuthenticationRequestRepository
         if (relayState == null) {
             return null;
         }
-        Entry removed;
-        synchronized (saveLock) {
-            removed = entries.remove(relayState);
-            if (removed != null) {
-                saveOrder.remove(removed);
-            }
+        AbstractSaml2AuthenticationRequest claimed = claimedRequest(request);
+        if (claimed != null) {
+            request.removeAttribute(CLAIMED_REQUEST_ATTRIBUTE);
+            return claimed;
         }
-        return liveRequest(removed);
+        return liveRequest(take(relayState));
     }
 
     /**
@@ -207,8 +230,31 @@ public final class RelayStateSaml2AuthenticationRequestRepository
         entries.remove(entry.relayState(), entry);
     }
 
+    /**
+     * Removes the entry saved under the {@code RelayState} from the store and from the save-order index, under
+     * {@link #saveLock}, so at most one caller obtains it.
+     *
+     * @param relayState the {@code RelayState} of the callback
+     * @return the removed entry, live or expired, or {@code null} when none is held
+     */
+    private @Nullable Entry take(String relayState) {
+        synchronized (saveLock) {
+            Entry taken = entries.remove(relayState);
+            if (taken != null) {
+                saveOrder.remove(taken);
+            }
+            return taken;
+        }
+    }
+
     private @Nullable AbstractSaml2AuthenticationRequest liveRequest(@Nullable Entry entry) {
         return entry != null && entry.isLive(clock.instant()) ? entry.request() : null;
+    }
+
+    private static @Nullable AbstractSaml2AuthenticationRequest claimedRequest(HttpServletRequest request) {
+        return request.getAttribute(CLAIMED_REQUEST_ATTRIBUTE) instanceof AbstractSaml2AuthenticationRequest claimed
+                ? claimed
+                : null;
     }
 
     private static @Nullable String relayState(HttpServletRequest request) {

@@ -51,8 +51,8 @@ import org.openl.studio.security.saml.SamlLogoutSuccessHandler;
 @ComponentScan("org.springframework.security.saml2")
 public class SamlSecurityConfig {
 
-    // V4: every SAML chain below runs the shared securityHeadersFilter right after the security context filter, so
-    // it sends the same default security headers as the HttpSecurity-built chains
+    // V4: every SAML chain sends the default security headers through securityHeadersFilter.
+    // The filter runs right after the security context filter, as on the HttpSecurity-built chains.
 
     // Logout endpoint
     @Bean
@@ -214,8 +214,8 @@ public class SamlSecurityConfig {
         return openLSamlBuilder.relyingPartyRegistrationResolver();
     }
 
-    // V3: keep the AuthnRequest outside the HTTP session, because a SameSite=Lax cookie is not sent on the IdP's
-    // cross-site POST
+    // V3: the SAML filters keep each AuthnRequest in a RelayState-keyed store, not in the HTTP session.
+    // A SameSite=Lax session cookie is not sent on the IdP's cross-site POST to the callback.
     @Bean
     public RelayStateSaml2AuthenticationRequestRepository samlAuthenticationRequestRepository() {
         return new RelayStateSaml2AuthenticationRequestRepository();
@@ -255,8 +255,8 @@ public class SamlSecurityConfig {
         filter.setAuthenticationManager(authenticationManager);
         filter.setAuthenticationSuccessHandler(authenticationSuccessHandler);
         filter.setSessionAuthenticationStrategy(sessionAuthenticationStrategy);
-        // V3: load the AuthnRequest by RelayState; the setter also installs it into the token converter, so
-        // InResponseTo is still validated against the stored request
+        // V3: the callback claims its AuthnRequest by RelayState once, so a replayed response finds none.
+        // The setter also gives the store to the token converter, so InResponseTo is checked against the saved request.
         filter.setAuthenticationRequestRepository(samlAuthenticationRequestRepository);
         return filter;
     }
