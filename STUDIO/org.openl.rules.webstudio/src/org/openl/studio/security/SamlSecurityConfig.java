@@ -214,7 +214,8 @@ public class SamlSecurityConfig {
         return openLSamlBuilder.relyingPartyRegistrationResolver();
     }
 
-    // V3: keep the AuthnRequest outside the HTTP session, because a SameSite=Lax cookie is not sent on the IdP's cross-site POST
+    // V3: keep the AuthnRequest outside the HTTP session, because a SameSite=Lax cookie is not sent on the IdP's
+    // cross-site POST
     @Bean
     public RelayStateSaml2AuthenticationRequestRepository samlAuthenticationRequestRepository() {
         return new RelayStateSaml2AuthenticationRequestRepository();
@@ -222,8 +223,10 @@ public class SamlSecurityConfig {
 
     @Bean
     public Saml2WebSsoAuthenticationRequestFilter samlRequestFilter(
-            @Qualifier("authenticationRequestContextResolver") Saml2AuthenticationRequestResolver authenticationRequestResolver,
-            @Qualifier("samlAuthenticationRequestRepository") RelayStateSaml2AuthenticationRequestRepository samlAuthenticationRequestRepository) {
+            @Qualifier("authenticationRequestContextResolver")
+            Saml2AuthenticationRequestResolver authenticationRequestResolver,
+            @Qualifier("samlAuthenticationRequestRepository")
+            RelayStateSaml2AuthenticationRequestRepository samlAuthenticationRequestRepository) {
         var filter = new Saml2WebSsoAuthenticationRequestFilter(authenticationRequestResolver);
         // V3: save the AuthnRequest by its RelayState, so the cross-site callback finds it without the session cookie
         filter.setAuthenticationRequestRepository(samlAuthenticationRequestRepository);
@@ -245,7 +248,8 @@ public class SamlSecurityConfig {
             AuthenticationManager authenticationManager,
             AuthenticationSuccessHandler authenticationSuccessHandler,
             @Qualifier("sessionAuthenticationStrategy") SessionAuthenticationStrategy sessionAuthenticationStrategy,
-            @Qualifier("samlAuthenticationRequestRepository") RelayStateSaml2AuthenticationRequestRepository samlAuthenticationRequestRepository) {
+            @Qualifier("samlAuthenticationRequestRepository")
+            RelayStateSaml2AuthenticationRequestRepository samlAuthenticationRequestRepository) {
 
         var filter = new Saml2WebSsoAuthenticationFilter(relyingPartyRegistration);
         filter.setAuthenticationManager(authenticationManager);

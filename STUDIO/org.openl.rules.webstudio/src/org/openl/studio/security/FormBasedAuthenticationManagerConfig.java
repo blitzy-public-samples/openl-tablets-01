@@ -7,7 +7,6 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.security.authentication.AuthenticationManager;
 import org.springframework.security.config.annotation.authentication.builders.AuthenticationManagerBuilder;
-import org.springframework.security.config.annotation.authentication.configuration.GlobalAuthenticationConfigurerAdapter;
 import org.springframework.util.function.SingletonSupplier;
 
 /**
@@ -37,12 +36,16 @@ public class FormBasedAuthenticationManagerConfig {
 
     // Static, as Spring Security declares its own global configurers: the bean is needed early, while the security
     // configuration is still being built, and must not create this configuration class that early.
+    // GlobalAuthenticationConfigurerAdapter is written fully qualified: its import alone would exceed the 120-character
+    // line limit, and the import sorter breaks an import wrapped over two lines.
     @Bean
-    public static GlobalAuthenticationConfigurerAdapter formBasedAuthenticationManagerConfigurer(
+    public static org.springframework.security.config.annotation.authentication.configuration
+            .GlobalAuthenticationConfigurerAdapter formBasedAuthenticationManagerConfigurer(
             @Qualifier("authenticationManager") ObjectProvider<AuthenticationManager> authenticationManager) {
-        // V11 (PERF-F03): resolve the authenticationManager bean once, on the first attempt, then reuse it
+        // V11: resolve the authenticationManager bean once, on the first attempt, then reuse it
         SingletonSupplier<AuthenticationManager> manager = SingletonSupplier.of(authenticationManager::getObject);
-        return new GlobalAuthenticationConfigurerAdapter() {
+        return new org.springframework.security.config.annotation.authentication.configuration
+                .GlobalAuthenticationConfigurerAdapter() {
             @Override
             public void init(AuthenticationManagerBuilder auth) {
                 // A parent marks the builder as configured, so Spring Security adds no provider bean of its own.

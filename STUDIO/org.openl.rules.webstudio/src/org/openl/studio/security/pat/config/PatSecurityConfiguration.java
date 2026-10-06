@@ -70,17 +70,21 @@ public class PatSecurityConfiguration {
      * @param crudService the PAT CRUD service
      * @param passwordEncoder the password encoder for hashing secrets
      * @param clock the clock for generating timestamps
-     * @param defaultExpirationDays lifetime in days applied when a token is created without an expiration date ({@code security.pat.default-expiration-days})
-     * @param maxExpirationDays maximum lifetime in days accepted for a token's expiration date ({@code security.pat.max-expiration-days})
+     * @param defaultExpirationDays lifetime in days applied when a token is created without an expiration date
+     *                              ({@code security.pat.default-expiration-days})
+     * @param maxExpirationDays maximum lifetime in days accepted for a token's expiration date
+     *                          ({@code security.pat.max-expiration-days})
      * @return configured PAT generator service
      */
     @Bean
     public PatGeneratorServiceImpl patGeneratorService(PersonalAccessTokenService crudService,
                                                        PasswordEncoder passwordEncoder,
                                                        Clock clock,
-                                                       @Value("${security.pat.default-expiration-days}") int defaultExpirationDays,
-                                                       @Value("${security.pat.max-expiration-days}") int maxExpirationDays) {
-        // V8: tokens without expiresAt get the configured default lifetime; later dates are capped at the maximum
+                                                       @Value("${security.pat.default-expiration-days}")
+                                                       int defaultExpirationDays,
+                                                       @Value("${security.pat.max-expiration-days}")
+                                                       int maxExpirationDays) {
+        // V8: tokens without expiresAt get the configured default lifetime; dates beyond the maximum are rejected
         return new PatGeneratorServiceImpl(crudService, passwordEncoder, clock,
                 Duration.ofDays(defaultExpirationDays), Duration.ofDays(maxExpirationDays));
     }
@@ -126,7 +130,8 @@ public class PatSecurityConfiguration {
                 privilegeMapper instanceof GetUserPrivileges getUserPrivileges
                         ? getUserPrivileges.withoutAdminMatchWarning()
                         : privilegeMapper;
-        return new PatUserInfoUserDetailsServiceImpl(userDao, adminUsersInitializer, patPrivilegeMapper, externalGroupService);
+        return new PatUserInfoUserDetailsServiceImpl(userDao, adminUsersInitializer, patPrivilegeMapper,
+                externalGroupService);
     }
 
     /**

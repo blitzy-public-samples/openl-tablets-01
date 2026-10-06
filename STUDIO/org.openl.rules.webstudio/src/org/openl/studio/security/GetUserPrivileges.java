@@ -82,7 +82,8 @@ public class GetUserPrivileges implements BiFunction<String, Collection<? extend
             var group = groupManagementService.getGroupByName(authorityName);
             // V12: a name match with an ADMIN-holding OpenL group silently grants administrator rights.
             // Only names are logged, never credentials; the warning repeats at every IdP-backed login.
-            if (warn && group != null && group.hasPrivilege(Privileges.ADMIN.name())) {
+            // The ADMIN membership check and the name copies run only when WARN is enabled for this logger.
+            if (warn && log.isWarnEnabled() && group != null && group.hasPrivilege(Privileges.ADMIN.name())) {
                 // V12: the identity provider supplies these names and the log layouts print them as they are,
                 // so only loggable() copies are logged; the mapping keeps using the names unchanged.
                 log.warn(

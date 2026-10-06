@@ -3,7 +3,6 @@ package org.openl.studio.security;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -138,13 +137,17 @@ class FormBasedAuthenticationManagerConfigTest {
         when(authenticationManager.getObject()).thenReturn(keepingManager);
         AuthenticationManager global = buildGlobalManager();
 
-        assertEquals(credentials, keepingManager.authenticate(request).getCredentials(), "the bean keeps them");
+        // Compared without printing, so the generated password never reaches the failure output
+        boolean kept = credentials.equals(keepingManager.authenticate(request).getCredentials());
+        assertTrue(kept, "the bean keeps them");
         Authentication result = global.authenticate(request);
 
         assertNotNull(result);
         assertTrue(result.isAuthenticated());
         assertEquals(USER, result.getName());
-        assertNull(result.getCredentials(), "the global manager erases them");
+        // Not assertNull: it would print the password if the erasure regressed
+        boolean erased = result.getCredentials() == null;
+        assertTrue(erased, "the global manager erases them");
     }
 
     /**

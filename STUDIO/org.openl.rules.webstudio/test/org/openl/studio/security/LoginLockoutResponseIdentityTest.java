@@ -1,7 +1,7 @@
 package org.openl.studio.security;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestBuilders.formLogin;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.httpBasic;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
@@ -10,11 +10,14 @@ import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
+import java.util.Objects;
 import java.util.SortedMap;
 import java.util.TreeMap;
+import java.util.TreeSet;
 import java.util.function.BiFunction;
 import jakarta.servlet.Filter;
 import jakarta.servlet.http.Cookie;
@@ -72,12 +75,15 @@ import org.openl.studio.security.pat.service.PatAuthService;
  * cookies and, for the session, its attribute names and the stored authentication failure. The first wrong-password
  * attempt is the reference. Every further wrong attempt, the correct password while the account is locked, a wrong
  * password while it is locked, and every attempt of an unknown account, before and after that name is locked, must
- * produce a snapshot equal to the reference.
+ * produce a snapshot equal to the reference. Snapshots are compared with {@code equals}, every field included; a
+ * mismatch is reported by the names of the fields, headers and cookie attributes that differ, never by their values,
+ * and the {@code toString} of either record withholds every body, header and cookie value.
  * </p>
  * <p>
- * The credentials are generated per run and never appear in an assertion message. The lockout state lives in the
- * provider, a singleton of the test context, so each test uses its own account names. The DAO provider localizes its
- * failure message with the default locale, so the locale is pinned to keep the reference message deterministic.
+ * The credentials are generated per run and never appear in an assertion message, and neither does a body, header,
+ * cookie, redirect or failure message an attempt produced. The lockout state lives in the provider, a singleton of
+ * the test context, so each test uses its own account names. The DAO provider localizes its failure message with the
+ * default locale, so the locale is pinned to keep the reference message deterministic.
  * </p>
  */
 @SpringJUnitConfig(LoginLockoutResponseIdentityTest.TestConfig.class)
@@ -113,7 +119,7 @@ class LoginLockoutResponseIdentityTest {
     void basicLockedAndUnknownAccountsAnswerLikeAWrongPassword() throws Exception {
         MvcResult success = mockMvc.perform(basic(BASIC_USER, PASSWORD)).andReturn();
         assertEquals(200, success.getResponse().getStatus(), "Basic: correct password before any failure");
-        assertEquals(StubController.BODY, success.getResponse().getContentAsString(),
+        assertEqualsUnprinted(StubController.BODY, success.getResponse().getContentAsString(),
                 "Basic: correct password before any failure");
 
         Snapshot reference = attempt(basic(BASIC_USER, WRONG_PASSWORD));
@@ -126,17 +132,21 @@ class LoginLockoutResponseIdentityTest {
     void formLoginLockedAndUnknownAccountsAnswerLikeAWrongPassword() throws Exception {
         MvcResult success = mockMvc.perform(form(FORM_USER, PASSWORD)).andReturn();
         assertEquals(302, success.getResponse().getStatus(), "Form: correct password before any failure");
-        assertEquals("/", success.getResponse().getRedirectedUrl(), "Form: correct password before any failure");
-        HttpSession successSession = success.getRequest().getSession(false);
-        assertNull(successSession == null ? null : successSession.getAttribute(WebAttributes.AUTHENTICATION_EXCEPTION),
+        assertEqualsUnprinted("/", success.getResponse().getRedirectedUrl(),
                 "Form: correct password before any failure");
+        HttpSession successSession = success.getRequest().getSession(false);
+        // Checked without printing the stored failure, whose message a regression could fill with a credential
+        boolean noFailureStored = successSession == null
+                || successSession.getAttribute(WebAttributes.AUTHENTICATION_EXCEPTION) == null;
+        assertTrue(noFailureStored, "Form: correct password before any failure");
 
         Snapshot reference = attempt(form(FORM_USER, WRONG_PASSWORD));
         assertEquals(302, reference.status(), "Form: wrong password, attempt 1");
-        assertEquals("/login?error", reference.redirectedUrl(), "Form: wrong password, attempt 1");
+        assertEqualsUnprinted("/login?error", reference.redirectedUrl(), "Form: wrong password, attempt 1");
         assertEquals(BadCredentialsException.class.getName(), reference.sessionExceptionClass(),
                 "Form: wrong password, attempt 1");
-        assertEquals("Bad credentials", reference.sessionExceptionMessage(), "Form: wrong password, attempt 1");
+        assertEqualsUnprinted("Bad credentials", reference.sessionExceptionMessage(),
+                "Form: wrong password, attempt 1");
 
         assertLockoutSequence("Form", reference, LoginLockoutResponseIdentityTest::form, FORM_USER, FORM_GHOST);
     }
@@ -158,17 +168,45 @@ class LoginLockoutResponseIdentityTest {
                                        String ghost) throws Exception {
         int maxFailures = LoginLockoutAuthenticationProvider.MAX_FAILURES;
         for (int attempt = 2; attempt <= maxFailures; attempt++) {
-            assertEquals(reference, attempt(login.apply(user, WRONG_PASSWORD)),
+            assertAnswersLikeTheReference(reference, attempt(login.apply(user, WRONG_PASSWORD)),
                     scenario + ": wrong password, attempt " + attempt);
         }
-        assertEquals(reference, attempt(login.apply(user, PASSWORD)),
+        assertAnswersLikeTheReference(reference, attempt(login.apply(user, PASSWORD)),
                 scenario + ": correct password while locked, attempt " + (maxFailures + 1));
-        assertEquals(reference, attempt(login.apply(user, WRONG_PASSWORD)),
+        assertAnswersLikeTheReference(reference, attempt(login.apply(user, WRONG_PASSWORD)),
                 scenario + ": wrong password while locked, attempt " + (maxFailures + 2));
 
         for (int attempt = 1; attempt <= maxFailures + 1; attempt++) {
-            assertEquals(reference, attempt(login.apply(ghost, WRONG_PASSWORD)),
+            assertAnswersLikeTheReference(reference, attempt(login.apply(ghost, WRONG_PASSWORD)),
                     scenario + ": unknown account, attempt " + attempt);
+        }
+    }
+
+    /**
+     * Asserts that an attempt answered exactly like the reference: the snapshots are compared with {@code equals},
+     * every field included. Deliberately not {@code assertEquals}, which would print both snapshots with their bodies,
+     * header values and cookie values; a failure names only the fields, headers and cookie attributes that differ.
+     */
+    private static void assertAnswersLikeTheReference(Snapshot reference, Snapshot actual, String message) {
+        boolean identical = reference.equals(actual);
+        assertTrue(identical, () -> message + ": differs from the reference in " + reference.differencesFrom(actual));
+    }
+
+    /**
+     * Asserts that a value taken from a response or a session equals the expected one. Deliberately not
+     * {@code assertEquals}, which would print the observed value, and a regression could fill it with a credential.
+     */
+    private static void assertEqualsUnprinted(String expected, @Nullable String actual, String message) {
+        boolean equal = expected.equals(actual);
+        assertTrue(equal, message);
+    }
+
+    private static void addIfDifferent(List<String> differences,
+                                       String what,
+                                       @Nullable Object expected,
+                                       @Nullable Object actual) {
+        if (!Objects.equals(expected, actual)) {
+            differences.add(what);
         }
     }
 
@@ -248,6 +286,60 @@ class LoginLockoutResponseIdentityTest {
                     failure == null ? null : failure.getClass().getName(),
                     failure instanceof Throwable throwable ? throwable.getMessage() : null);
         }
+
+        /**
+         * Names what differs from another snapshot, in field order: a field, a header by its name, or a cookie by
+         * its position, name and attribute. No value is named, so the list is safe in an assertion message.
+         *
+         * @param other the snapshot to compare with
+         * @return the differences, empty exactly when the snapshots are equal
+         */
+        List<String> differencesFrom(Snapshot other) {
+            var differences = new ArrayList<String>();
+            addIfDifferent(differences, "status", status, other.status);
+            addIfDifferent(differences, "errorMessage", errorMessage, other.errorMessage);
+            addIfDifferent(differences, "redirectedUrl", redirectedUrl, other.redirectedUrl);
+            addIfDifferent(differences, "forwardedUrl", forwardedUrl, other.forwardedUrl);
+            var headerNames = new TreeSet<>(headers.keySet());
+            headerNames.addAll(other.headers.keySet());
+            for (String name : headerNames) {
+                addIfDifferent(differences, "header " + name, headers.get(name), other.headers.get(name));
+            }
+            addIfDifferent(differences, "body", body, other.body);
+            for (int index = 0; index < Math.max(cookies.size(), other.cookies.size()); index++) {
+                differences.addAll(cookieDifferences(index, other));
+            }
+            addIfDifferent(differences, "sessionExists", sessionExists, other.sessionExists);
+            addIfDifferent(differences, "sessionAttributes", sessionAttributes, other.sessionAttributes);
+            addIfDifferent(differences, "sessionExceptionClass", sessionExceptionClass, other.sessionExceptionClass);
+            addIfDifferent(differences,
+                    "sessionExceptionMessage",
+                    sessionExceptionMessage,
+                    other.sessionExceptionMessage);
+            return differences;
+        }
+
+        private List<String> cookieDifferences(int index, Snapshot other) {
+            String position = "cookie #" + (index + 1) + ' ';
+            if (index >= cookies.size()) {
+                return List.of(position + other.cookies.get(index).name() + " only in the attempt");
+            }
+            CookieView cookie = cookies.get(index);
+            if (index >= other.cookies.size()) {
+                return List.of(position + cookie.name() + " only in the reference");
+            }
+            return cookie.differencesFrom(other.cookies.get(index)).stream()
+                    .map(attribute -> position + cookie.name() + ' ' + attribute)
+                    .toList();
+        }
+
+        /**
+         * Renders no value: the body, the headers and the cookies can carry a credential.
+         */
+        @Override
+        public String toString() {
+            return "Snapshot[values withheld]";
+        }
     }
 
     /**
@@ -269,6 +361,32 @@ class LoginLockoutResponseIdentityTest {
                     cookie.getMaxAge(),
                     cookie.getSecure(),
                     cookie.isHttpOnly());
+        }
+
+        /**
+         * Names the attributes that differ from another cookie, never their values.
+         *
+         * @param other the cookie to compare with
+         * @return the attribute names, empty exactly when the cookies are equal
+         */
+        List<String> differencesFrom(CookieView other) {
+            var differences = new ArrayList<String>();
+            addIfDifferent(differences, "name", name, other.name);
+            addIfDifferent(differences, "value", value, other.value);
+            addIfDifferent(differences, "path", path, other.path);
+            addIfDifferent(differences, "domain", domain, other.domain);
+            addIfDifferent(differences, "maxAge", maxAge, other.maxAge);
+            addIfDifferent(differences, "secure", secure, other.secure);
+            addIfDifferent(differences, "httpOnly", httpOnly, other.httpOnly);
+            return differences;
+        }
+
+        /**
+         * Renders the name only: the value can carry a credential.
+         */
+        @Override
+        public String toString() {
+            return "CookieView[name=" + name + ", attributes withheld]";
         }
     }
 

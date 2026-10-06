@@ -3,10 +3,10 @@ package org.openl.studio.security;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
-import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
@@ -107,7 +107,9 @@ class CommonAuthenticationConfigTest {
         var newSession = request.getSession(false);
         assertNotNull(newSession, "the session must survive the login");
         String newId = newSession.getId();
-        assertNotEquals(oldId, newId, "the session ID must rotate at login");
+        // V5: compared without printing, so the session IDs never reach the failure output
+        boolean rotated = !oldId.equals(newId);
+        assertTrue(rotated, "the session ID must rotate at login");
         var registered = registry.getSessionInformation(newId);
         assertNotNull(registered, "the new session ID must be registered");
         assertEquals("jdoe", registered.getPrincipal());

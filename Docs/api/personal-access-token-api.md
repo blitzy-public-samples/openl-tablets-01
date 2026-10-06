@@ -121,7 +121,7 @@ POST /rest/users/personal-access-tokens
 | `name` | String | Yes | Max 100 chars, not blank | Human-readable token name (must be unique per user) |
 | `expiresAt` | ISO 8601 DateTime | No | Future date, at most `security.pat.max-expiration-days` (default 365) days ahead | Token expiration date; when omitted or `null`, the token expires `security.pat.default-expiration-days` (default 90) days after creation |
 
-<!-- V8: an omitted expiresAt gets the configured default lifetime; later dates are capped at the configured maximum. -->
+<!-- V8: an omitted expiresAt gets the configured default lifetime; dates after the configured maximum are rejected. -->
 
 #### Response
 
@@ -306,7 +306,7 @@ Request model for creating a new token.
 | `name` | String | Yes | 1-100 characters | Unique name for the token (per user) |
 | `expiresAt` | ISO 8601 DateTime | No | Future date, at most `security.pat.max-expiration-days` (default 365) days ahead | Token expiration date; when omitted or `null`, the token expires `security.pat.default-expiration-days` (default 90) days after creation |
 
-<!-- V8: an omitted expiresAt gets the configured default lifetime; later dates are capped at the configured maximum. -->
+<!-- V8: an omitted expiresAt gets the configured default lifetime; dates after the configured maximum are rejected. -->
 
 **Example**:
 ```json

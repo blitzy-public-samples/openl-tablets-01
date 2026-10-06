@@ -1,12 +1,16 @@
 package org.openl.studio.security;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
 
 import java.util.ArrayList;
@@ -16,6 +20,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.function.Supplier;
 import java.util.stream.Stream;
 
 import org.apache.commons.lang3.RandomStringUtils;
@@ -32,6 +37,9 @@ import org.junitpioneer.jupiter.StdErr;
 import org.junitpioneer.jupiter.StdIo;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.slf4j.LoggerFactory;
+import org.slf4j.event.Level;
+import org.slf4j.simple.SimpleLogger;
 import org.springframework.security.core.GrantedAuthority;
 import org.springframework.security.core.authority.SimpleGrantedAuthority;
 
@@ -49,7 +57,8 @@ import org.openl.rules.webstudio.service.UserManagementService;
  * GetUserPrivileges#apply} log one WARN, while {@link GetUserPrivileges#withoutAdminMatchWarning()} maps
  * identically and stays silent. Every case also compares the mapping with {@link #expectedPreChange}, an
  * independent copy of the mapping rule as it stood before V12, because the warning must not change the returned
- * authorities.
+ * authorities. With WARN disabled for the {@link GetUserPrivileges} logger, {@link GetUserPrivileges#apply} maps
+ * identically without asking any matched group whether it holds {@code ADMIN}.
  *
  * <p>The warning names the external group, the user and the matched OpenL group with every ISO control character
  * and the Unicode line and paragraph separators replaced by {@code '_'}, so a name the identity provider supplies
@@ -313,6 +322,38 @@ class GetUserPrivilegesTest {
         assertEquals(expectedPreChange(null, external, null), result);
     }
 
+    @Test
+    @StdIo
+    void disabledWarnLevelSkipsTheAdminMembershipCheck(StdErr err) throws ReflectiveOperationException {
+        // Spies keep the real groups, so only the disabled level can explain a skipped check and a missing warning.
+        var spiedAdminGroup = spy(adminGroup);
+        var spiedNestedAdminGroup = spy(nestedAdminGroup);
+        var spiedBaGroup = spy(baGroup);
+        groups.put(adminGroup.getAuthority(), spiedAdminGroup);
+        groups.put(nestedAdminGroup.getAuthority(), spiedNestedAdminGroup);
+        groups.put(baGroup.getAuthority(), spiedBaGroup);
+        var external = authorities("openl-admin", "openl-nested-admin", "openl-ba", "unmatched");
+        var privileges = new GetUserPrivileges(userManagementService, groupManagementService, NO_DEFAULT_GROUP);
+
+        var silent = withWarnDisabled(() -> List.copyOf(privileges.apply(USER, external)));
+
+        assertNoPasswordLogged(err);
+        assertEquals(0, adminMatchWarnings(err).size(), "A disabled WARN level must not warn");
+        verify(spiedAdminGroup, never()).hasPrivilege(anyString());
+        verify(spiedNestedAdminGroup, never()).hasPrivilege(anyString());
+        verify(spiedBaGroup, never()).hasPrivilege(anyString());
+        assertEquals(expectedPreChange(null, external, dbAuthorities), silent);
+
+        // With the level restored, both ADMIN-holding matches warn again and the mapping is the same.
+        var warned = List.copyOf(privileges.apply(USER, external));
+
+        assertNoPasswordLogged(err);
+        assertEquals(2, adminMatchWarnings(err).size(),
+                "The restored WARN level must warn for both ADMIN-holding matches");
+        verify(spiedAdminGroup, atLeastOnce()).hasPrivilege(Privileges.ADMIN.name());
+        assertEquals(silent, warned);
+    }
+
     // ---------------------------------------------------------------------------------------------------------
     // withoutAdminMatchWarning(): the path that replays stored groups (personal access tokens)
     // ---------------------------------------------------------------------------------------------------------
@@ -410,6 +451,30 @@ class GetUserPrivilegesTest {
 
     private static List<GrantedAuthority> authorities(String... names) {
         return Stream.of(names).<GrantedAuthority>map(SimpleGrantedAuthority::new).toList();
+    }
+
+    /**
+     * Runs {@code action} with WARN disabled for the {@link GetUserPrivileges} logger, then restores its level.
+     * Unit tests bind slf4j to slf4j-simple, whose loggers fix their level when created and have no setter, so
+     * the level of the one cached logger instance, which the class also holds, is set through reflection.
+     *
+     * @param action the work to run while WARN is disabled
+     * @return what {@code action} returned
+     * @throws ReflectiveOperationException when slf4j-simple no longer has the level field
+     */
+    private static <T> T withWarnDisabled(Supplier<T> action) throws ReflectiveOperationException {
+        var logger = assertInstanceOf(SimpleLogger.class, LoggerFactory.getLogger(GetUserPrivileges.class),
+                "Unit tests bind slf4j to slf4j-simple");
+        var level = SimpleLogger.class.getDeclaredField("currentLogLevel");
+        level.setAccessible(true);
+        var previous = level.getInt(logger);
+        level.setInt(logger, Level.ERROR.toInt());
+        try {
+            assertFalse(logger.isWarnEnabled(), "WARN must be disabled for the GetUserPrivileges logger");
+            return action.get();
+        } finally {
+            level.setInt(logger, previous);
+        }
     }
 
     private static List<String> adminMatchWarnings(StdErr err) {
