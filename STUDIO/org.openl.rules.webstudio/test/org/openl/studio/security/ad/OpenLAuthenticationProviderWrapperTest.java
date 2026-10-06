@@ -29,12 +29,7 @@ import org.springframework.security.authentication.UsernamePasswordAuthenticatio
 import org.springframework.security.core.Authentication;
 
 /**
- * Coverage-only unit tests for {@link OpenLAuthenticationProviderWrapper}.
- *
- * <p><b>Evidence class.</b> These are coverage tests of the audit lines the V11 fix adds to the wrapper, written with
- * the fix, and are not baseline reproduction evidence. The baseline-compatible V11 reproduction is
- * {@code ITEST/itest.studio/repos/test/org/openl/itest/SecurityAuditLogITest.java}, which runs the HTTP flows of
- * {@code ITEST/itest.studio/repos/test-resources-audit} against the baseline and the fix alike.
+ * Unit tests for {@link OpenLAuthenticationProviderWrapper}.
  *
  * <p>They cover the V11 security audit lines the wrapper writes for every attempt its delegate handles
  * ({@code event=auth.success} for an authenticated result, {@code event=auth.failure} for a rejected attempt, and no

@@ -149,7 +149,9 @@ public class ProjectCreationService {
      * <p>Like each V1 path surface, this class keeps its own copy of these checks instead of sharing a component
      * with the file, workspace or upload surfaces.
      *
-     * @return the resolved project folder, or {@code null} when the repository writes through no local folder
+     * @return the {@link Destination} of the new project: its folder at its lexical place below the real root, and
+     *         whether that folder lies in a Git working tree; {@code null} when the project name is blank, which is
+     *         left to bean validation, or when the repository writes through no local folder
      */
     private @Nullable Destination requireContainedProjectFolder(Repository repository, String projectName,
                                                                 @Nullable String path) {
@@ -157,8 +159,7 @@ public class ProjectCreationService {
             return null;
         }
         try {
-            // V1: the parent path is taken as the route validates it, blanks dropped and back slashes read as
-            // separators; nothing else, such as a leading slash, is mapped away before the validators see it
+            // V1: the parent path is taken as the route validates it: blanks trimmed, back slashes read as separators.
             var parent = StringUtils.trimToNull(path);
             if (parent != null) {
                 parent = parent.replace('\\', '/');

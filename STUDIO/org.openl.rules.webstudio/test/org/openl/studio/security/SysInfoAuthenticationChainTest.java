@@ -58,11 +58,6 @@ import org.openl.studio.security.pat.service.PatAuthService;
  * Both run the identical checks of {@link ModeChecks}.
  * </p>
  * <p>
- * The tests use only API that exists before the V10 change, so they also compile on the unfixed code. There the
- * anonymous requests to {@code sys.json} and {@code http.json} are served with 200 by the static chain, which is
- * the failure that reproduces the finding.
- * </p>
- * <p>
  * The passwords are generated per run and never appear in an assertion message.
  * </p>
  */
@@ -258,7 +253,8 @@ class SysInfoAuthenticationChainTest {
         }
 
         /**
-         * No request carries a {@code Token} header, so the filter passes every request on.
+         * No request carries an {@code Authorization} header with the {@code Token} scheme, so the filter passes
+         * every request on.
          */
         @Bean
         PatAuthenticationFilter patAuthenticationFilter() {

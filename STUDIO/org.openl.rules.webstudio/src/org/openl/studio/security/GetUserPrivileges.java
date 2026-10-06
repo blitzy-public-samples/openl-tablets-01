@@ -47,7 +47,7 @@ public class GetUserPrivileges implements BiFunction<String, Collection<? extend
         return (u, a) -> map(u, a, false);
     }
 
-    // V12: the former body of apply(), unchanged except that it passes the user and the warning switch on
+    // V12: one mapping for IdP logins (apply warns on an ADMIN name match) and stored-group requests (no warning)
     private Collection<GrantedAuthority> map(String user,
                                              Collection<? extends GrantedAuthority> authorities,
                                              boolean warn) {
@@ -84,8 +84,8 @@ public class GetUserPrivileges implements BiFunction<String, Collection<? extend
             // Only names are logged, never credentials; the warning repeats at every IdP-backed login.
             // The ADMIN membership check and the name copies run only when WARN is enabled for this logger.
             if (warn && log.isWarnEnabled() && group != null && group.hasPrivilege(Privileges.ADMIN.name())) {
-                // V12: the identity provider supplies these names and the log layouts print them as they are,
-                // so only loggable() copies are logged; the mapping keeps using the names unchanged.
+                // V12: only loggable() copies of the names are logged, so no IdP-supplied name can forge a log line.
+                // The group lookup and the mapping use the names exactly as supplied, never the sanitized copies.
                 log.warn(
                         "External group '{}' of user '{}' matches OpenL group '{}', which holds ADMIN; "
                                 + "the user gains administrator rights through this name match.",

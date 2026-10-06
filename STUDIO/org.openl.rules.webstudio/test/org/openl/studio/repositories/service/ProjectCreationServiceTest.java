@@ -1031,7 +1031,7 @@ class ProjectCreationServiceTest {
 
     // V1-C: the design repository a new project is written to, reached the way the REST route receives it
     enum Backend {
-        /** A repository without a local directory, such as Git, JDBC, S3 or Azure Blob: lexical checks only. */
+        /** A mocked repository without a local directory, as JDBC, S3 and Azure Blob are: lexical checks only. */
         MOCK,
         /** A flat file repository in {@code tmp/repo} behind {@code SecureRepository}. */
         FLAT,
@@ -1049,8 +1049,9 @@ class ProjectCreationServiceTest {
         DANGLING
     }
 
-    // V1-C: payloads rejected on every backend (C1-C10, C13); the path is checked as the route checks it, so a back
-    // slash reads as a separator (C5), and a leading slash (C3), given or read from a back slash, is never dropped
+    // V1-C: payloads rejected on every backend (C1-C10, C13).
+    // The path is checked as the route checks it: a back slash reads as a separator (C5), and a leading slash (C3),
+    // given or read from a back slash, is never dropped.
     private static Stream<Arguments> rejectedPayloads() {
         return onEveryRoute(new Backend[]{Backend.MOCK, Backend.FLAT},
                 new String[]{"C1", "NewProject", "../../outside"},
@@ -1080,8 +1081,8 @@ class ProjectCreationServiceTest {
                 new String[]{"C11", "NewProject", "NUL"});
     }
 
-    // V1-C: look-alike separators are ordinary characters (C14), so the write keeps each payload inside the repository:
-    // it is either rejected or written inside
+    // V1-C: look-alike separators are ordinary characters (C14), so the write keeps each payload inside the repository.
+    // A payload is either rejected or written inside it.
     private static Stream<Arguments> containedPayloads() {
         return onEveryRoute(Backend.values(),
                 new String[]{"C14", "..\u2215p", null},
@@ -1107,7 +1108,8 @@ class ProjectCreationServiceTest {
     private static Stream<Arguments> validNewProjects() {
         return Stream.of(Route.TEMPLATE, Route.FILES)
                 .flatMap(route -> Stream.of(Backend.values())
-                        .flatMap(backend -> Stream.of(null, "", "a/b").map(path -> Arguments.of(route, backend, path))));
+                        .flatMap(backend -> Stream.of(null, "", "a/b")
+                                .map(path -> Arguments.of(route, backend, path))));
     }
 
     // V1-C: valid copy targets on both file layouts, with and without a path
@@ -1244,8 +1246,9 @@ class ProjectCreationServiceTest {
         assertNothingOutside("repo", "design");
     }
 
-    // V1-C: a link in the design repository never redirects the new project folder: flat, the project is named after
-    // the link in the rules location; mapped, the link is the parent path of project 'p' (0.6.2.3 C12, C16, dangling)
+    // V1-C: a link in the design repository never redirects the new project folder (C12, C16, dangling).
+    // Flat, the project is named after the link in the rules location.
+    // Mapped, the link is the parent path of project 'p'.
     @ParameterizedTest(name = "{0} {1} on {2}")
     @MethodSource("linkedProjectFolders")
     @DisabledOnOs(OS.WINDOWS)
@@ -1319,8 +1322,8 @@ class ProjectCreationServiceTest {
         assertFalse(Files.exists(tmp.resolve("absent"), LinkOption.NOFOLLOW_LINKS), "The check creates nothing");
     }
 
-    // V1-C: a valid copy target passes the checks on a backend without a local directory, with and without a path,
-    // whose back slashes read as separators
+    // V1-C: a valid copy target passes the checks on a backend without a local directory, with and without a path.
+    // The back slashes of a given path read as separators.
     @ParameterizedTest
     @NullSource
     @ValueSource(strings = {"a/b", "a\\b"})
@@ -1361,8 +1364,9 @@ class ProjectCreationServiceTest {
         assertNothingOutside("repo", "design");
     }
 
-    // V1-C: the route reads the back slashes of a parent path as separators, so the new project is accepted and handed
-    // to the upload with the path as the service passes it on, through the write check when a local folder takes it
+    // V1-C: the route reads the back slashes of a parent path as separators, so the new project is accepted.
+    // It is handed to the upload with the path as the service passes it on, through the write check when a local
+    // folder takes it.
     @ParameterizedTest(name = "{0} on {1} with path {2}")
     @MethodSource("backSlashNewProjects")
     void hands_a_new_project_whose_path_has_back_slashes_to_the_upload(Route route, Backend backend, String path)
@@ -1380,8 +1384,9 @@ class ProjectCreationServiceTest {
         assertNothingOutside("repo");
     }
 
-    // V1-C: a real upload whose parent path has back slashes lands where the route's 'a/b' places it: in folder a/b
-    // of a mapped repository, in the rules location of a flat one; nothing is written outside the repository
+    // V1-C: a real upload whose parent path has back slashes lands where the route's 'a/b' places it.
+    // A mapped repository places it in folder a/b and a flat one in its rules location.
+    // Nothing is written outside the repository.
     @ParameterizedTest(name = "{0} on {1} with path {2}")
     @MethodSource("backSlashUploads")
     void uploads_a_new_project_whose_path_has_back_slashes_where_the_route_places_it(Upload upload, Backend backend,
@@ -1593,8 +1598,8 @@ class ProjectCreationServiceTest {
                 .flatMap(link -> Stream.of(Upload.values()).map(upload -> Arguments.of(link, upload)));
     }
 
-    // V1-C: an overwrite whose folder holds a link to an outside file that it neither writes through nor reads runs
-    // through the real upload, and the outside file stays as it was
+    // V1-C: a real overwrite runs when its folder holds a link to an outside file it neither writes through nor reads.
+    // The outside file stays as it was.
     @ParameterizedTest
     @EnumSource(OverwriteBackend.class)
     @DisabledOnOs(OS.WINDOWS)
@@ -1613,8 +1618,9 @@ class ProjectCreationServiceTest {
         assertWrittenInside(project);
     }
 
-    // V1-C: an overwrite that writes through a link its folder holds is refused when the repository takes the write,
-    // whatever the link leads to; nothing outside the project changes and the uploaded files are released
+    // V1-C: an overwrite that writes through a link its folder holds is refused, whatever the link leads to.
+    // The repository refuses it as it takes the write.
+    // Nothing outside the project changes, and the uploaded files are released.
     @ParameterizedTest(name = "{0} by {1} on {2}")
     @MethodSource("writesThroughLinks")
     @DisabledOnOs(OS.WINDOWS)
@@ -1660,8 +1666,9 @@ class ProjectCreationServiceTest {
         assertNothingOutside("repo");
     }
 
-    // V1-C: a Git save checks out its target branch only when it writes, so a link only that branch holds is found in
-    // the tree the write goes through, while another branch is checked out; no upload writes through it
+    // V1-C: an upload through a link only the target branch holds is refused while another branch is checked out.
+    // A Git save checks out its target branch only when it writes, so the link is found in the tree the write goes
+    // through, and no upload writes through it.
     @ParameterizedTest(name = "{0} by {1}")
     @MethodSource("targetBranchLinks")
     @DisabledOnOs(OS.WINDOWS)
@@ -1685,8 +1692,8 @@ class ProjectCreationServiceTest {
         assertReleased();
     }
 
-    // V1-C: a link only the checked-out branch holds is gone once the save checks out its clean target branch, so the
-    // upload runs and writes the project inside the repository
+    // V1-C: an upload to a clean target branch runs while only the checked-out branch holds a link.
+    // The link is gone once the save checks out the target branch, so the project is written inside the repository.
     @ParameterizedTest
     @EnumSource(Upload.class)
     @DisabledOnOs(OS.WINDOWS)
@@ -1709,8 +1716,9 @@ class ProjectCreationServiceTest {
         assertWrittenInside(root.resolve("DESIGN/rules/Fresh"));
     }
 
-    // V1-C: a full save of a Git repository removes what it does not carry by descending into every folder link, so
-    // an overwrite whose folder holds a folder link out of it is refused, even though nothing is written through it
+    // V1-C: a full Git overwrite is refused when its folder holds a folder link out of the project.
+    // Nothing is written through the link.
+    // The refusal holds because the full save descends into every folder link to remove what it does not carry.
     @Test
     @DisabledOnOs(OS.WINDOWS)
     void refuses_a_full_git_overwrite_whose_cleanup_would_enter_a_folder_link_out_of_the_project() throws Exception {
@@ -1727,8 +1735,8 @@ class ProjectCreationServiceTest {
         assertTrue(Files.isSymbolicLink(project.resolve("vendor")), "The project is left as it was");
     }
 
-    // V1-C: the cleanup of a full Git save only removes a link to a file, a link to nothing and a folder link that
-    // stays inside the project, so an overwrite holding only such links runs
+    // V1-C: a full Git overwrite runs when its folder holds only links its cleanup removes.
+    // That cleanup removes only a link to a file, a link to nothing and a folder link that stays inside the project.
     @Test
     @DisabledOnOs(OS.WINDOWS)
     void runs_a_full_git_overwrite_whose_folder_holds_only_links_its_cleanup_removes() throws Exception {
@@ -1747,8 +1755,8 @@ class ProjectCreationServiceTest {
         assertWrittenInside(project);
     }
 
-    // V1-C: the template route resolves the new project folder once and hands it to the upload, so the rules location
-    // is read once
+    // V1-C: the template route resolves the new project folder once, so the rules location is read once.
+    // The resolved folder is handed to the upload.
     @Test
     void resolves_the_folder_of_a_template_project_once() throws IOException {
         var workspace = creatingUser();
@@ -1762,8 +1770,8 @@ class ProjectCreationServiceTest {
         verify(workspace.getDesignTimeRepository(), times(1)).getRulesLocation();
     }
 
-    // V1-C: the write check passes every call but the changeset save on as it is, unwraps to the repository it
-    // checks, and is equal only to itself
+    // V1-C: the write check passes every call but the changeset save on as it is.
+    // It unwraps to the repository it checks and is equal only to itself.
     @Test
     void the_write_check_passes_other_calls_on_and_unwraps_to_its_repository() throws IOException {
         creatingUser();
@@ -1786,8 +1794,8 @@ class ProjectCreationServiceTest {
                 "A single-file save is passed on as it is");
     }
 
-    // V1-C: a changeset with a change named outside the new project folder, by another folder or by climbing out of
-    // it, is refused before anything is written
+    // V1-C: a changeset naming a change outside the new project folder is refused before anything is written.
+    // The change names another folder or climbs out of the project folder.
     @ParameterizedTest
     @ValueSource(strings = {"DESIGN/rules/Other/rules.xml", "DESIGN/rules/NewProject/../Other/rules.xml"})
     void the_write_check_refuses_a_change_named_outside_the_project_folder(String name) throws IOException {
@@ -1808,8 +1816,8 @@ class ProjectCreationServiceTest {
                 "Nothing is written");
     }
 
-    // V1-C: a changeset that arrives as one pass is checked change by change as a file repository takes it; a
-    // refused change has its stream closed and nothing is written through the link
+    // V1-C: a one-pass changeset is checked change by change as a file repository takes it.
+    // A refused change has its stream closed, and nothing is written through the link.
     @Test
     @DisabledOnOs(OS.WINDOWS)
     void the_write_check_checks_a_one_pass_changeset_as_a_file_repository_takes_it() throws IOException {
@@ -1926,8 +1934,8 @@ class ProjectCreationServiceTest {
         assertNothingOutside("repo");
     }
 
-    // V1-C: a repository that is not wrapped is asked for its working tree directly, and the upload writes through the
-    // write check; the checked-out tree is not inspected before the save checks out the branch it writes
+    // V1-C: an unwrapped repository is asked for its working tree directly; its upload goes through the write check.
+    // The checked-out tree is not inspected before the save checks out the branch it writes.
     @Test
     @DisabledOnOs(OS.WINDOWS)
     void hands_an_upload_into_the_working_tree_of_an_unwrapped_repository_to_the_write_check() throws IOException {
@@ -2031,9 +2039,9 @@ class ProjectCreationServiceTest {
         return repository;
     }
 
-    // V1-C: a user whose real upload runs: a commit identity, the rules location DESIGN/rules/, project locks that are
-    // always granted, a project index that publishes at once, granted ACLs, every file accepted and archives read as
-    // UTF-8
+    // V1-C: a user whose real upload runs, in a workspace whose rules location is DESIGN/rules/.
+    // The upload gets a commit identity, project locks that are always granted, a project index that publishes at
+    // once, granted ACLs, every file accepted and archives read as UTF-8.
     private void realUploads() {
         grantCreate();
         var acl = aclServiceProvider.getDesignRepoAclService();
@@ -2052,8 +2060,8 @@ class ProjectCreationServiceTest {
                 path -> true, charsets, "", workspace);
     }
 
-    // V1-C: uploads project 'name' the given way through the real upload, as the REST route does; files and archives
-    // carry generated content, and their streams are recorded so their release can be checked
+    // V1-C: uploads project 'name' the given way through the real upload, as the REST route does.
+    // Files and archives carry generated content, and their streams are recorded so their release can be checked.
     private FileData upload(Upload upload, Repository target, String name, String path) throws IOException {
         return switch (upload) {
             case TEMPLATE -> createFromTemplate(target, name, path);
@@ -2080,8 +2088,8 @@ class ProjectCreationServiceTest {
         return bytes.toByteArray();
     }
 
-    // V1-C: project 'Existing' as a first real upload of the template leaves it on the backend, so a Git repository
-    // tracks it; returns its folder in tmp/repo
+    // V1-C: creates project 'Existing' by a first real upload of the template and returns its folder in tmp/repo.
+    // Created that way, the project is on the backend and a Git repository tracks it.
     private Path uploadedProject(Repository target, OverwriteBackend backend) throws IOException {
         assertNotNull(upload(Upload.TEMPLATE, target, "Existing", overwritePath(backend)),
                 "Fixture: the project is created");
@@ -2098,8 +2106,8 @@ class ProjectCreationServiceTest {
         return outside;
     }
 
-    // V1-C: a link in place of whatever tmp/repo holds there; a Git repository has it committed on the branch its
-    // working tree holds, as a push from elsewhere brings it
+    // V1-C: a link in place of whatever tmp/repo holds there.
+    // A Git repository has it committed on the branch its working tree holds, as a push from elsewhere brings it.
     private void placeLink(OverwriteBackend backend, Path link, Path target) throws Exception {
         if (backend == OverwriteBackend.GIT) {
             var root = tmp.resolve("repo");
@@ -2120,8 +2128,8 @@ class ProjectCreationServiceTest {
         Files.createSymbolicLink(link, target);
     }
 
-    // V1-C: a link committed on the given branch in place of what that branch holds there; the branch checked out
-    // before is checked out again, so the working tree holds the link only when it holds the given branch
+    // V1-C: a link committed on the given branch in place of what that branch holds there.
+    // The previous branch is checked out again, so the working tree holds the link only while it holds that branch.
     private static void commitLink(Path workingTree, String branch, String linkPath, Path target) throws Exception {
         try (var git = Git.open(workingTree.toFile())) {
             var checkedOut = git.getRepository().getBranch();
@@ -2153,8 +2161,8 @@ class ProjectCreationServiceTest {
         assertEquals(branch, checkedOutBranch(workingTree), "The branch the working tree holds");
     }
 
-    // V1-C: a configured, secured Git repository in the folder whose base branch holds one seed commit and is checked
-    // out, with the target branch created from it
+    // V1-C: a configured, secured Git repository in the folder, with the target branch created from its base branch.
+    // The base branch holds one seed commit and is checked out.
     private BranchRepository gitWithTargetBranch(Path root) throws IOException {
         var repository = (BranchRepository) secured(configuredRepository("repo-git", root));
         assertNotNull(repository.save(folderData("seed.txt"),
@@ -2164,14 +2172,14 @@ class ProjectCreationServiceTest {
         return repository;
     }
 
-    // V1-C: a configured, secured Git repository in tmp/repo that reports no unique file ids, so each upload saves it a
-    // full changeset
+    // V1-C: a configured, secured Git repository in tmp/repo that reports no unique file ids.
+    // Each upload therefore saves it a full changeset.
     private Repository fullChangesetGit() {
         return secured(withoutUniqueFileIds(configuredRepository("repo-git", tmp.resolve("repo"))));
     }
 
-    // V1-C: the repository as it reports itself without unique file ids, unwrapping to it as the application's
-    // wrappers do
+    // V1-C: the repository as it reports itself without unique file ids.
+    // The proxy unwraps to the repository, as the application's wrappers do.
     private static Repository withoutUniqueFileIds(Repository repository) {
         return (Repository) Proxy.newProxyInstance(ProjectCreationServiceTest.class.getClassLoader(),
                 new Class<?>[]{BranchRepository.class, RepositoryDelegate.class},
@@ -2268,7 +2276,7 @@ class ProjectCreationServiceTest {
         when(aclServiceProvider.getDesignRepoAclService()).thenReturn(acl);
     }
 
-    // V1-C: a workspace whose design repository keeps projects in the given rules location, ready for a copy to be written
+    // V1-C: a copy-ready workspace whose design repository keeps projects in the given rules location.
     private static UserWorkspace workspaceWithRulesLocation(String rulesLocation) {
         var designTimeRepository = mock(DesignTimeRepository.class);
         when(designTimeRepository.getRulesLocation()).thenReturn(rulesLocation);
@@ -2347,8 +2355,8 @@ class ProjectCreationServiceTest {
         return uploaders(new FileData());
     }
 
-    // V1-C: stands in for every ProjectUploader the service constructs: records its constructor arguments, releases
-    // the files handed to it as the real upload does, and returns a project carrying the given file data
+    // V1-C: stands in for every ProjectUploader the service constructs, recording its constructor arguments.
+    // It releases the files handed to it as the real upload does and returns a project carrying the given file data.
     private MockedConstruction<ProjectUploader> uploaders(FileData created) {
         var project = mock(RulesProject.class);
         when(project.getFileData()).thenReturn(created);
@@ -2361,8 +2369,8 @@ class ProjectCreationServiceTest {
         });
     }
 
-    // V1-C: exactly one upload ran, for the target, the name as given and the path as the service passes it on; a
-    // target written through a local folder is handed over behind the write check, which unwraps to the target
+    // V1-C: exactly one upload ran, for the target, the name as given and the path as the service passes it on.
+    // A target written through a local folder is handed over behind the write check, which unwraps to the target.
     private void assertUploaded(Repository target, String name, String path) {
         var uploaded = uploadedRepository();
         if (uploaded != target) {

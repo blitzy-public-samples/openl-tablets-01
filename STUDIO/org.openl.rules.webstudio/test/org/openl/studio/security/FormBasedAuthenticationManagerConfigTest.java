@@ -32,7 +32,6 @@ import org.springframework.security.authentication.ProviderManager;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.config.ObjectPostProcessor;
 import org.springframework.security.config.annotation.authentication.builders.AuthenticationManagerBuilder;
-import org.springframework.security.config.annotation.authentication.configuration.GlobalAuthenticationConfigurerAdapter;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.core.authority.AuthorityUtils;
 
@@ -162,7 +161,10 @@ class FormBasedAuthenticationManagerConfigTest {
 
         try (var context = context(mode)) {
             var builder = new AuthenticationManagerBuilder(ObjectPostProcessor.identity());
-            context.getBean(GlobalAuthenticationConfigurerAdapter.class).init(builder);
+            // The type is written fully qualified, as in FormBasedAuthenticationManagerConfig: its import would exceed
+            // the 120-character line limit, and the import sorter breaks an import wrapped over two lines.
+            context.getBean(org.springframework.security.config.annotation.authentication.configuration
+                    .GlobalAuthenticationConfigurerAdapter.class).init(builder);
             AuthenticationManager global = builder.build();
 
             assertSame(result, global.authenticate(request), "user.mode=" + mode);
@@ -176,7 +178,9 @@ class FormBasedAuthenticationManagerConfigTest {
         try (var context = context(mode)) {
             assertTrue(context.getBeansOfType(FormBasedAuthenticationManagerConfig.class).isEmpty(),
                     "user.mode=" + mode + ": configuration");
-            assertTrue(context.getBeansOfType(GlobalAuthenticationConfigurerAdapter.class).isEmpty(),
+            assertTrue(
+                    context.getBeansOfType(org.springframework.security.config.annotation.authentication.configuration
+                            .GlobalAuthenticationConfigurerAdapter.class).isEmpty(),
                     "user.mode=" + mode + ": configurer");
         }
         verifyNoInteractions(bean);

@@ -56,7 +56,7 @@ import org.openl.rules.webstudio.service.UserManagementService;
  * <p>V12: an external (IdP) group whose name matches an OpenL group holding {@code ADMIN} makes {@link
  * GetUserPrivileges#apply} log one WARN, while {@link GetUserPrivileges#withoutAdminMatchWarning()} maps
  * identically and stays silent. Every case also compares the mapping with {@link #expectedPreChange}, an
- * independent copy of the mapping rule as it stood before V12, because the warning must not change the returned
+ * independent statement of the expected authority order, because the warning must not change the returned
  * authorities. With WARN disabled for the {@link GetUserPrivileges} logger, {@link GetUserPrivileges#apply} maps
  * identically without asking any matched group whether it holds {@code ADMIN}.
  *
@@ -424,14 +424,14 @@ class GetUserPrivilegesTest {
     // ---------------------------------------------------------------------------------------------------------
 
     /**
-     * The mapping rule as it stood before V12, written independently of {@link GetUserPrivileges}: the default
-     * group (when there is one), then each external authority replaced by the OpenL group of the same name or
-     * kept as it is, then the user's authorities from the database (when the user has a record).
+     * The expected mapping, written independently of {@link GetUserPrivileges}: the default group (when there is
+     * one), then each external authority replaced by the OpenL group of the same name or kept as it is, then the
+     * user's authorities from the database (when the user has a record).
      *
      * @param defaultGroup  the resolved default group, or {@code null} when none applies
      * @param external      the authorities the identity provider supplied
      * @param dbAuthorities the user's database authorities, or {@code null} when the user has no record
-     * @return the authorities the pre-V12 code returned, in order
+     * @return the expected authorities, in order
      */
     private List<GrantedAuthority> expectedPreChange(@Nullable Group defaultGroup,
             Collection<? extends GrantedAuthority> external,
