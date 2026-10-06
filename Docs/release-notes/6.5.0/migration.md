@@ -184,10 +184,18 @@ browser.
 * **Five failed logins lock a login name for 15 minutes in the `multi` and `ad` modes.** Five consecutive failed form
   or HTTP Basic logins within 15 minutes lock that name, compared case-insensitively, for 15 minutes. During the lock
   even the correct password gets the ordinary failed-login response, and a successful login resets the count.
-  Unknown names are counted and locked exactly like existing ones. The counters live in the memory of each OpenL
-  Studio instance and are cleared on restart. SSO, Bearer and personal access token logins are not counted. Anyone
-  who knows an account name can lock it on purpose, and Active Directory name variants such as `user`,
-  `DOMAIN\user` and `user@domain` are counted separately.
+  Unknown names are counted and locked exactly like existing ones. In the `multi` mode, a login succeeds only through
+  the account's stored name or a case variant of it. When the user store's database comparison matches another typed
+  name to an account, for example a name with trailing spaces on SQL Server or an accented variant under MySQL's
+  accent-insensitive default collation `utf8mb4_0900_ai_ci`, the login fails with the ordinary failed-login response
+  even with the correct password, and counts as a failed login of the typed name. Active Directory logins are not
+  affected by this check. The counters live in the memory of each OpenL Studio instance and are cleared on restart.
+  SSO, Bearer and personal access token logins are not counted. At most five logins of one name are checked at once.
+  Further logins of that name wait for one of them to finish, in arrival order, for at most 10 seconds; a login still
+  waiting then fails with the ordinary failed-login response and is not counted. Anyone who knows an account name can
+  lock it on purpose, and Active Directory name variants such as `user`, `DOMAIN\user` and `user@domain` are counted
+  separately. A flood of logins of one name can also delay or refuse that name's logins, and API clients that send
+  many concurrent HTTP Basic requests as one user see them queue.
   <!-- V9: failed-login lockout -->
 
 * **Stored secrets are encrypted with AES-256-GCM.** When the settings are saved, each setting whose name ends in

@@ -15,12 +15,15 @@ import java.util.Locale;
 import java.util.Objects;
 import java.util.PriorityQueue;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Semaphore;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
 import org.jspecify.annotations.Nullable;
 import org.springframework.security.authentication.AuthenticationProvider;
 import org.springframework.security.authentication.BadCredentialsException;
+import org.springframework.security.authentication.dao.DaoAuthenticationProvider;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.core.AuthenticationException;
 import org.springframework.security.core.userdetails.UsernameNotFoundException;
@@ -46,6 +49,12 @@ import org.openl.studio.security.audit.SecurityAuditLog;
  * <li>Only {@link BadCredentialsException} and {@link UsernameNotFoundException} count as failures. Any other
  * {@link AuthenticationException}, for example an {@code InternalAuthenticationServiceException} while the directory
  * is unreachable, propagates without being counted.</li>
+ * <li>A {@link DaoAuthenticationProvider} result whose name differs from the attempt's other than in case
+ * ({@link Locale#ROOT}) is a failed login of the attempt's name: the user store matched the name to an account stored
+ * under another one, as a database collation that ignores accents or trailing spaces does. It is counted like a wrong
+ * password, leaves the counter and the lock of every name in place, and fails like one, so an account authenticates
+ * only through its own name, whose counter limits the guesses at its password. The results of other delegates, such
+ * as the Active Directory provider, are taken as they are.</li>
  * </ul>
  * <p>
  * A locked attempt fails with {@code new BadCredentialsException("Bad credentials")}, the exception the DAO and AD
@@ -61,17 +70,25 @@ import org.openl.studio.security.audit.SecurityAuditLog;
  * </p>
  * <p>
  * Every read-modify-write of one key runs inside {@link ConcurrentHashMap#compute} or
- * {@link ConcurrentHashMap#computeIfPresent}, and the delegate is always called outside them. Only a lock in force
- * holds an attempt back: until a lock engages, every attempt of a name reaches the delegate, however many attempts of
- * it are in flight. Each failure is counted when it completes, so the {@value #MAX_FAILURES}th completed failure
- * always engages the lock. Before the delegate is called, an attempt is counted in flight in the entry of its name,
- * and it leaves that count exactly once when it ends. The in-flight count never rejects an attempt: it keeps an entry
- * from being purged as stale while an attempt of the name is in flight, and it tells whether an attempt that ends
- * leaves an entry that can be removed. A success clears the counter and the lock, and removes the entry unless
- * another attempt of the name is still in flight. Every in-flight count belongs to the generation of the entry that
- * took it: a name evicted and tracked again while attempts were in flight starts a new generation, and an attempt of
- * an older generation that ends afterwards leaves the in-flight count of the new one unchanged, although its failure
- * still counts and its success still clears the counter and the lock. The class is thread-safe.
+ * {@link ConcurrentHashMap#computeIfPresent}, and the delegate is always called outside them. Before its lock is
+ * checked, an attempt takes one of the {@value #MAX_ATTEMPTS_IN_FLIGHT} permits of its name and holds it until it
+ * ends, so at most that many attempts of one name are in flight at once. The permits are fair: an attempt that finds
+ * none free waits for one in arrival order, at most {@link #PERMIT_WAIT}, and if none comes free in that time it fails
+ * like a wrong password without reaching the delegate and without being counted. Each failure is counted when it
+ * completes, so the {@value #MAX_FAILURES}th completed failure always engages the lock, with at most
+ * {@value #MAX_ATTEMPTS_IN_FLIGHT} - 1 other attempts of the name still in flight: at most {@value #MAX_FAILURES} +
+ * {@value #MAX_ATTEMPTS_IN_FLIGHT} - 1 wrong passwords of a name reach the delegate per lock, however many arrive at
+ * once, while concurrent correct logins of the name wait for a permit and succeed. The permits of a name exist only
+ * while an attempt of it waits or is in flight: the first such attempt creates them and the last one to end removes
+ * them, so they cost memory per attempt in progress, not per tracked name. Before the delegate is called, an attempt
+ * is counted in flight in the entry of its name, and it leaves that count exactly once when it ends. The in-flight
+ * count never rejects an attempt: it keeps an entry from being purged as stale while an attempt of the name is in
+ * flight, and it tells whether an attempt that ends leaves an entry that can be removed. A success clears the counter
+ * and the lock, and removes the entry unless another attempt of the name is still in flight. Every in-flight count
+ * belongs to the generation of the entry that took it: a name evicted and tracked again while attempts were in flight
+ * starts a new generation, and an attempt of an older generation that ends afterwards leaves the in-flight count of
+ * the new one unchanged, although its failure still counts and its success still clears the counter and the lock.
+ * The class is thread-safe.
  * </p>
  * <p>
  * The state holds at most {@value #MAX_ENTRIES} names once the attempts in flight have ended. When an attempt takes
@@ -102,12 +119,35 @@ public final class LoginLockoutAuthenticationProvider implements AuthenticationP
     static final Duration LOCK_DURATION = Duration.ofMinutes(15);
 
     /**
-     * The maximum number of names whose failures, lock or attempts in flight are tracked at once.
+     * How many attempts of one name may be in flight at once: as many as the failures that engage a lock. The wrong
+     * passwords of a name that reach the delegate per lock then stay below twice {@value #MAX_FAILURES}, at most
+     * {@value #MAX_FAILURES} + {@value #MAX_ATTEMPTS_IN_FLIGHT} - 1, while the concurrent logins of one client, such
+     * as its HTTP Basic requests, still run several at a time instead of one by one.
+     */
+    static final int MAX_ATTEMPTS_IN_FLIGHT = MAX_FAILURES;
+
+    /**
+     * How long an attempt waits for a permit of its name before it fails, uncounted, like a wrong password. Long
+     * enough for a queue of legitimate logins of one name, such as the concurrent HTTP Basic requests of one API
+     * client, to drain at the delegate's speed: a bcrypt check of the default cost takes about a tenth of a second,
+     * so {@value #MAX_ATTEMPTS_IN_FLIGHT} permits pass about fifty attempts a second, and this wait lets a queue of
+     * several hundred through. Short enough that a flood of attempts of one name holds a server thread no longer than
+     * a client commonly waits for an answer.
+     */
+    static final Duration PERMIT_WAIT = Duration.ofSeconds(10);
+
+    /**
+     * The number of tracked names, each with its failures, lock or attempts in flight, that the guarded cleanup brings
+     * the state back to whenever an attempt takes it above this size. It is not a cap at every instant: an attempt
+     * adds its name before it cleans, and one that finds another thread cleaning leaves the work to it, so the state
+     * can hold more names for a while, and holds at most this many once the attempts in flight have ended. The permit
+     * gates of the names are not entries and are not counted.
      */
     static final int MAX_ENTRIES = 10_000;
 
     /**
-     * The message of a locked attempt, which is the default message of the DAO and AD providers for a wrong password.
+     * The message of an attempt the decorator rejects itself, locked, without a permit or matched to another name,
+     * which is the default message of the DAO and AD providers for a wrong password.
      */
     private static final String BAD_CREDENTIALS = "Bad credentials";
 
@@ -147,6 +187,25 @@ public final class LoginLockoutAuthenticationProvider implements AuthenticationP
 
     private final AuthenticationProvider delegate;
     private final Clock clock;
+
+    /**
+     * Whether the delegate is the DAO provider, whose user store can match a name to an account stored under another
+     * one, so a result of another name is a failed login of the attempt's name.
+     */
+    private final boolean checksResultName;
+
+    /**
+     * How long, in nanoseconds, an attempt waits for a permit of its name.
+     */
+    private final long permitWaitNanos;
+
+    /**
+     * The permit gates of the names that have an attempt waiting for a permit or in flight, by counter key. They are
+     * not entries: the first attempt of a name creates its gate and the last one to end removes it, so their number
+     * is bounded by the attempts in progress, independently of {@link #MAX_ENTRIES}.
+     */
+    private final ConcurrentHashMap<String, Gate> gates = new ConcurrentHashMap<>();
+
     private final ConcurrentHashMap<String, Entry> entries = new ConcurrentHashMap<>();
     private final AtomicBoolean cleaning = new AtomicBoolean();
 
@@ -174,19 +233,37 @@ public final class LoginLockoutAuthenticationProvider implements AuthenticationP
      * @param clock    the clock that stamps failures and measures windows and locks
      */
     public LoginLockoutAuthenticationProvider(AuthenticationProvider delegate, Clock clock) {
-        this.delegate = Objects.requireNonNull(delegate, "delegate");
-        this.clock = Objects.requireNonNull(clock, "clock");
+        this(delegate, clock, PERMIT_WAIT);
     }
 
     /**
-     * Rejects the attempt while its name is locked; otherwise delegates it, clears the counter and the lock on success
-     * and counts a rejected credential.
+     * Creates a lockout decorator whose attempts wait for a permit of their name at most the given time instead of
+     * {@link #PERMIT_WAIT}.
+     *
+     * @param delegate   the provider that verifies the credentials
+     * @param clock      the clock that stamps failures and measures windows and locks
+     * @param permitWait how long an attempt waits for a permit; with zero or less it fails at once when none is free
+     */
+    LoginLockoutAuthenticationProvider(AuthenticationProvider delegate, Clock clock, Duration permitWait) {
+        this.delegate = Objects.requireNonNull(delegate, "delegate");
+        this.clock = Objects.requireNonNull(clock, "clock");
+        this.checksResultName = delegate instanceof DaoAuthenticationProvider;
+        this.permitWaitNanos = Objects.requireNonNull(permitWait, "permitWait").toNanos();
+    }
+
+    /**
+     * Waits for a permit of the attempt's name, then rejects the attempt while its name is locked; otherwise delegates
+     * it, clears the counter and the lock on success and counts a rejected credential.
      *
      * @param authentication the authentication attempt
      * @return the authenticated result of the delegate, or {@code null} when the delegate does not handle the attempt
-     * @throws BadCredentialsException   while the name is locked, without calling the delegate and without being
-     *                                   counted; or when the delegate rejects the credentials, counted and rethrown
-     *                                   unchanged
+     * @throws BadCredentialsException   without calling the delegate and without being counted: when no permit of
+     *                                   the name comes free within the wait, when the waiting thread is interrupted,
+     *                                   whose interrupt status is restored, or while the name is locked. Counted:
+     *                                   when the delegate rejects the credentials, rethrown unchanged, or when the
+     *                                   DAO delegate authenticates an account whose name differs from the attempt's
+     *                                   other than in case, thrown as
+     *                                   {@code new BadCredentialsException("Bad credentials")}
      * @throws UsernameNotFoundException when the delegate does not know the name, counted like a wrong password and
      *                                   rethrown unchanged
      * @throws AuthenticationException   any other failure of the delegate, unchanged and not counted
@@ -194,6 +271,24 @@ public final class LoginLockoutAuthenticationProvider implements AuthenticationP
     @Override
     public @Nullable Authentication authenticate(Authentication authentication) throws AuthenticationException {
         String key = keyOf(authentication);
+        Semaphore permits = enterGate(key);
+        try {
+            acquire(permits);
+            try {
+                return authenticateWithPermit(authentication, key);
+            } finally {
+                permits.release();
+            }
+        } finally {
+            leaveGate(key);
+        }
+    }
+
+    /**
+     * Authenticates an attempt that holds a permit of its name: rejects it while the name is locked, otherwise
+     * delegates it and records its outcome.
+     */
+    private @Nullable Authentication authenticateWithPermit(Authentication authentication, String key) {
         Instant now = clock.instant();
         long generation = reserve(key, now);
         if (generation == NOT_RESERVED) {
@@ -207,6 +302,10 @@ public final class LoginLockoutAuthenticationProvider implements AuthenticationP
             Authentication result;
             try {
                 result = delegate.authenticate(authentication);
+                if (result != null && checksResultName && !key.equals(keyOf(result))) {
+                    // The store matched another name to the account: counted and thrown like a wrong password.
+                    throw new BadCredentialsException(BAD_CREDENTIALS);
+                }
             } catch (BadCredentialsException | UsernameNotFoundException e) {
                 Instant failedAt = clock.instant();
                 boolean engaged = recordFailure(key, failedAt, generation);
@@ -246,6 +345,57 @@ public final class LoginLockoutAuthenticationProvider implements AuthenticationP
     }
 
     /**
+     * Returns the number of attempts of the name with the given counter key that wait for a permit or hold one.
+     *
+     * @param key the counter key of the name
+     * @return the attempts at the gate of the name, {@code 0} when it has no gate
+     */
+    int attemptsAtGate(String key) {
+        Gate gate = gates.get(key);
+        return gate == null ? 0 : gate.attempts();
+    }
+
+    /**
+     * Counts an attempt at the gate of its name, atomically, and returns the permits of that gate. The first attempt
+     * of a name creates its gate; every later one shares it until the last of them leaves.
+     */
+    private Semaphore enterGate(String key) {
+        Gate gate = gates.compute(key, (k, current) -> current == null
+                ? new Gate(new Semaphore(MAX_ATTEMPTS_IN_FLIGHT, true), 1)
+                : new Gate(current.permits(), current.attempts() + 1));
+        return Objects.requireNonNull(gate).permits();
+    }
+
+    /**
+     * Takes an attempt that has ended out of the gate of its name, atomically, and removes the gate when it was the
+     * last attempt there.
+     */
+    private void leaveGate(String key) {
+        gates.computeIfPresent(key, (k, gate) -> gate.attempts() == 1
+                ? null
+                : new Gate(gate.permits(), gate.attempts() - 1));
+    }
+
+    /**
+     * Takes a permit, waiting for one in arrival order for at most the permit wait.
+     *
+     * @throws BadCredentialsException when no permit comes free in time, or the thread is interrupted while it waits,
+     *                                 which restores its interrupt status; the attempt is not counted
+     */
+    private void acquire(Semaphore permits) {
+        boolean acquired;
+        try {
+            acquired = permits.tryAcquire(permitWaitNanos, TimeUnit.NANOSECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new BadCredentialsException(BAD_CREDENTIALS);
+        }
+        if (!acquired) {
+            throw new BadCredentialsException(BAD_CREDENTIALS);
+        }
+    }
+
+    /**
      * The counter key of an attempt: the SHA-256 digest of its name in lower case, in hexadecimal. Case variants
      * share one counter, and every key has the same 64 characters however long the name is, so the state retains
      * no attempt's name.
@@ -269,9 +419,10 @@ public final class LoginLockoutAuthenticationProvider implements AuthenticationP
      * while the name is locked; a refused attempt leaves the entry unchanged, so it neither extends the lock nor counts
      * as a failure. A lock that has elapsed is cleared together with the counter, so the attempt proceeds from zero.
      * An unlocked name holds fewer than {@link #MAX_FAILURES} failures, because the failure that completes that many
-     * engages the lock, so its attempt always proceeds, however many of its attempts are in flight. The attempt keeps
-     * the last update of an entry whose counter it keeps; a new entry, or one whose elapsed lock it clears, is stamped
-     * with the attempt's instant. A new entry gets a new generation, and an existing one keeps its own.
+     * engages the lock, so its attempt always proceeds; the permits of the name, taken before, bound how many of its
+     * attempts are in flight. The attempt keeps the last update of an entry whose counter it keeps; a new entry, or
+     * one whose elapsed lock it clears, is stamped with the attempt's instant. A new entry gets a new generation, and
+     * an existing one keeps its own.
      *
      * @return the generation of the entry that counts the attempt in flight, or {@link #NOT_RESERVED} if the attempt
      *         is refused and must not reach the delegate
@@ -536,6 +687,16 @@ public final class LoginLockoutAuthenticationProvider implements AuthenticationP
             }
             return new Entry(failures, lockedUntil, lastUpdate, Math.max(inFlight - 1, 0), generation);
         }
+    }
+
+    /**
+     * The permit gate of one name.
+     *
+     * @param permits  the fair semaphore of {@link #MAX_ATTEMPTS_IN_FLIGHT} permits that the attempts of the name take
+     *                 before they are checked against the lock, and give back when they end
+     * @param attempts the attempts of the name that wait for a permit or hold one, at least one
+     */
+    private record Gate(Semaphore permits, int attempts) {
     }
 
     /**

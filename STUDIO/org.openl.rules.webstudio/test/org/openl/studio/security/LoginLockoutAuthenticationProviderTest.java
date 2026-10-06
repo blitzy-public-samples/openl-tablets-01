@@ -52,13 +52,7 @@ import org.springframework.security.core.AuthenticationException;
 import org.springframework.security.core.userdetails.UsernameNotFoundException;
 
 /**
- * Coverage-only unit tests for {@link LoginLockoutAuthenticationProvider}.
- *
- * <p><b>Evidence class.</b> These are coverage tests of the code the V9 fix adds. The provider does not exist on the
- * reproduction baseline {@code 7015c25d68}, so this class does not compile there and is not baseline reproduction
- * evidence. The baseline-compatible V9 reproduction is the {@code repos} ITEST suite: its {@code WebStudioTest} runs
- * the HTTP flows {@code 020-basic}, {@code 030-ghost}, {@code 040-reset} and {@code 050-form} of
- * {@code ITEST/itest.studio/repos/test-resources/security-V9-lockout} against the baseline and the fix alike.
+ * Unit tests for {@link LoginLockoutAuthenticationProvider}.
  *
  * <p>V9: an account locks for fifteen minutes once five consecutive failed logins fall within fifteen minutes; a
  * successful login resets the counter; and a locked account, known or not, answers exactly like a wrong password. The
@@ -82,25 +76,19 @@ class LoginLockoutAuthenticationProviderTest {
     /** The message of a rejected login, for a wrong password and for a locked account alike. */
     private static final String BAD_CREDENTIALS = "Bad credentials";
 
-    /** The specified number of consecutive failed logins within the window that locks an account: five. */
     private static final int FAILURES_TO_LOCK = 5;
 
-    /** The specified sliding window of the failures that lock an account, both ends inclusive: fifteen minutes. */
     private static final Duration WINDOW_LENGTH = Duration.ofMinutes(15);
 
-    /** The specified length of a lock, from the failure that engaged it: fifteen minutes. */
     private static final Duration LOCK_LENGTH = Duration.ofMinutes(15);
 
-    /** The specified bound of the names tracked at once: ten thousand. */
     private static final int ENTRY_BOUND = 10_000;
 
-    /** How many threads fail one account at once in the concurrent-failure case: five, as specified. */
     private static final int CONCURRENT_FAILURES = 5;
 
     /** How many times the concurrent-failure case runs, each time with a fresh provider and a fresh delegate. */
     private static final int CONCURRENT_ROUNDS = 100;
 
-    /** The number of distinct names in the memory-bound burst: twenty thousand, as specified. */
     private static final int BURST_NAMES = 20_000;
 
     /** How long a concurrent attempt may take before the test fails instead of hanging. */
