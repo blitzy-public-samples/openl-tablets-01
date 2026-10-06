@@ -54,7 +54,7 @@ class SingleSecurityConfigTest {
     void instantiationDoesNotThrowAndKeepsInternalUsersDisabled(StdErr err) {
         SingleSecurityConfig config = assertDoesNotThrow(SingleSecurityConfig::new);
 
-        assertEquals(Boolean.FALSE, config.canCreateInternalUsers(),
+        assertEquals(false, config.canCreateInternalUsers(),
                 "single mode must still refuse to create internal users");
         assertSingleUsernameNotLogged(err.capturedLines());
     }

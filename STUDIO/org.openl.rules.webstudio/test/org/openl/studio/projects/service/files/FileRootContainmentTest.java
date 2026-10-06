@@ -1235,7 +1235,7 @@ class FileRootContainmentTest {
     private static SimpleRepositoryAclService grantAllRepoAcl() {
         return mock(SimpleRepositoryAclService.class,
                 invocation -> invocation.getMethod().getReturnType() == boolean.class
-                        ? Boolean.TRUE
+                        ? true
                         : Mockito.RETURNS_DEFAULTS.answer(invocation));
     }
 

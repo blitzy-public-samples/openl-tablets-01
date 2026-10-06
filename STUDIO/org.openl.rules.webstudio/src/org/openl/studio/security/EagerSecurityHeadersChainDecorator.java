@@ -10,10 +10,6 @@ import jakarta.servlet.http.HttpServletResponse;
 
 import org.springframework.security.web.FilterChainProxy;
 import org.springframework.security.web.header.HeaderWriterFilter;
-import org.springframework.security.web.header.writers.HstsHeaderWriter;
-import org.springframework.security.web.header.writers.XContentTypeOptionsHeaderWriter;
-import org.springframework.security.web.header.writers.XXssProtectionHeaderWriter;
-import org.springframework.security.web.header.writers.frameoptions.XFrameOptionsHeaderWriter;
 import org.springframework.util.CollectionUtils;
 
 /**
@@ -66,11 +62,7 @@ public final class EagerSecurityHeadersChainDecorator implements FilterChainProx
 
     /** Creates the decorator with the four response-independent writers of the default header set. */
     public EagerSecurityHeadersChainDecorator() {
-        this(new HeaderWriterFilter(List.of(
-                new XContentTypeOptionsHeaderWriter(),
-                new XXssProtectionHeaderWriter(),
-                new HstsHeaderWriter(),
-                new XFrameOptionsHeaderWriter(XFrameOptionsHeaderWriter.XFrameOptionsMode.DENY))));
+        this(new HeaderWriterFilter(SecurityHeaderWriters.responseIndependent()));
     }
 
     /**

@@ -14,6 +14,7 @@ import static org.mockito.Mockito.when;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.util.List;
+import jakarta.servlet.Filter;
 import jakarta.servlet.ServletOutputStream;
 import jakarta.servlet.WriteListener;
 import jakarta.servlet.http.HttpServletResponse;
@@ -23,14 +24,9 @@ import org.junit.jupiter.api.Test;
 import org.springframework.mock.web.MockHttpServletRequest;
 import org.springframework.mock.web.MockHttpServletResponse;
 import org.springframework.mock.web.MockServletContext;
-import org.springframework.security.web.header.HeaderWriterFilter;
-import org.springframework.security.web.header.writers.CacheControlHeadersWriter;
-import org.springframework.security.web.header.writers.HstsHeaderWriter;
-import org.springframework.security.web.header.writers.XContentTypeOptionsHeaderWriter;
-import org.springframework.security.web.header.writers.XXssProtectionHeaderWriter;
-import org.springframework.security.web.header.writers.frameoptions.XFrameOptionsHeaderWriter;
 
 import org.openl.spring.env.DefaultPropertySource;
+import org.openl.studio.security.EagerSecurityHeadersChainDecorator;
 
 class AppPropertiesServletTest {
 
@@ -45,8 +41,9 @@ class AppPropertiesServletTest {
 
         assertEquals(200, response.getStatus());
         assertTrue(response.getContentType().startsWith("text/plain"), response.getContentType());
+        // V4: a fixed failure message, so a failure never prints the response body
         assertTrue(response.getContentAsString().contains("This file was generated"),
-                response.getContentAsString());
+                "the body lacks the generated-file marker");
     }
 
     @Test
@@ -60,39 +57,22 @@ class AppPropertiesServletTest {
         verify(response).setStatus(HttpServletResponse.SC_INTERNAL_SERVER_ERROR);
     }
 
-    // V4: the body goes out in one write with its length declared, and is the unchanged default properties output
-    @Test
-    void declaresTheLengthOfTheUnchangedBody() throws Exception {
-        var expected = new ByteArrayOutputStream();
-        DefaultPropertySource.transferAllOpenLDefaultProperties(expected);
-        var response = new MockHttpServletResponse();
-
-        servlet.service(request(), response);
-
-        assertArrayEquals(expected.toByteArray(), response.getContentAsByteArray(), "body");
-        assertEquals(expected.size(), response.getContentLength(), "Content-Length");
-        assertEquals(String.valueOf(expected.size()), response.getHeader("Content-Length"), "Content-Length header");
-        assertEquals("text/plain;charset=UTF-8", response.getContentType(), "Content-Type");
-    }
-
     /**
-     * V4: behind a lazy {@link HeaderWriterFilter}, the security and cache headers reach a response that commits the
-     * way Jetty does. Streamed in 16 KiB writes without a length, the body committed the response before the filter
-     * wrote any header.
+     * V4: streamed through the security filter chain decorator that every Studio request passes, the unchanged default
+     * properties commit the response the way Jetty does, and the default security and cache headers are on it once
+     * each before they do. The pass-through filter stands for a matched chain that holds no header writer of its own.
      */
     @Test
-    void securityHeadersReachAResponseThatCommitsEarly() throws Exception {
-        var headers = new HeaderWriterFilter(List.of(
-                new XContentTypeOptionsHeaderWriter(),
-                new XXssProtectionHeaderWriter(),
-                new CacheControlHeadersWriter(),
-                new HstsHeaderWriter(),
-                new XFrameOptionsHeaderWriter(XFrameOptionsHeaderWriter.XFrameOptionsMode.DENY)));
+    void securityHeadersReachTheStreamedBodyBeforeItCommits() throws Exception {
+        var expected = new ByteArrayOutputStream();
+        DefaultPropertySource.transferAllOpenLDefaultProperties(expected);
+        Filter passThrough = (req, res, chain) -> chain.doFilter(req, res);
+        var chain = new EagerSecurityHeadersChainDecorator().decorate(servlet::service, List.of(passThrough));
         var response = new EarlyCommitResponse();
 
-        headers.doFilter(request(), response, servlet::service);
+        chain.doFilter(request(), response);
 
-        assertTrue(response.isCommitted(), "the body write commits the response");
+        assertTrue(response.isCommitted(), "the streamed body commits the response");
         assertEquals(List.of("nosniff"), response.getHeaders("X-Content-Type-Options"), "X-Content-Type-Options");
         assertEquals(List.of("0"), response.getHeaders("X-XSS-Protection"), "X-XSS-Protection");
         assertEquals(List.of("DENY"), response.getHeaders("X-Frame-Options"), "X-Frame-Options");
@@ -101,6 +81,13 @@ class AppPropertiesServletTest {
                 "Cache-Control");
         assertEquals(List.of("no-cache"), response.getHeaders("Pragma"), "Pragma");
         assertEquals(List.of("0"), response.getHeaders("Expires"), "Expires");
+        assertEquals(List.of(),
+                response.getHeaders("Strict-Transport-Security"),
+                "Strict-Transport-Security on a plain request");
+        assertArrayEquals(expected.toByteArray(),
+                response.getContentAsByteArray(),
+                "the body differs from the default properties output");
+        assertEquals("text/plain;charset=UTF-8", response.getContentType(), "Content-Type");
     }
 
     // V4: a write that fails once the response has gone out leaves the response as it is

@@ -17,6 +17,7 @@ import java.util.function.Supplier;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.jspecify.annotations.Nullable;
 import org.springframework.security.acls.domain.BasePermission;
 import org.springframework.stereotype.Service;
 import org.springframework.util.function.SingletonSupplier;
@@ -148,12 +149,13 @@ public class ProjectFileLookupServiceImpl implements ProjectFileLookupService {
     }
 
     // V1: boundary supplies the local project folder, resolved only for a candidate that passes every other check.
+    // V1: the return is declared nullable, as the JavaDoc states; the link check adds a third null return.
     /**
      * Builds a candidate for a project file that matches by name, lies on the anchor's upward line and
      * is readable by the current user; {@code null} when any of these does not hold.
      */
-    private Candidate candidateFromArtefact(AProjectArtefact artefact, String base, String anchorDir,
-                                            String fileName, Supplier<Optional<Path>> boundary) {
+    private @Nullable Candidate candidateFromArtefact(AProjectArtefact artefact, String base, String anchorDir,
+                                                      String fileName, Supplier<Optional<Path>> boundary) {
         if (!fileName.equals(artefact.getName()) || exceedsSizeLimit(artefact.getFileData())) {
             return null;
         }

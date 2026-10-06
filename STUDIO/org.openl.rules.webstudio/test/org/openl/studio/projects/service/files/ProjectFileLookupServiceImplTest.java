@@ -574,7 +574,7 @@ class ProjectFileLookupServiceImplTest {
     private static SimpleRepositoryAclService grantAllSimpleAcl() {
         return mock(SimpleRepositoryAclService.class,
                 invocation -> invocation.getMethod().getReturnType() == boolean.class
-                        ? Boolean.TRUE
+                        ? true
                         : Mockito.RETURNS_DEFAULTS.answer(invocation));
     }
 

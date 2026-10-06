@@ -888,10 +888,10 @@ class ZipFileProjectCreatorTest {
     }
 
     // How one upload ended: staged (builder), refused (rejection), or with a runtime exception that escaped.
-    private record Outcome(@Nullable ZipFileProjectCreator creator,
-                           @Nullable RulesProjectBuilder builder,
-                           @Nullable Exception rejection,
-                           @Nullable RuntimeException escaped) {
+    record Outcome(@Nullable ZipFileProjectCreator creator,
+                   @Nullable RulesProjectBuilder builder,
+                   @Nullable Exception rejection,
+                   @Nullable RuntimeException escaped) {
     }
 
     // An upload run against a stubbed archive, with the archives the creator opened.
@@ -900,7 +900,7 @@ class ZipFileProjectCreatorTest {
 
     // One crafted entry: a regular file, a folder, a Unix symlink whose content is its target, or a regular file whose
     // name keeps its backslashes.
-    private record Entry(String name, String content, boolean directory, boolean symlink, boolean raw) {
+    record Entry(String name, String content, boolean directory, boolean symlink, boolean raw) {
 
         static Entry file(String name) {
             return file(name, "");
@@ -925,12 +925,12 @@ class ZipFileProjectCreatorTest {
 
     // The payload entries of a row, built from the row token and the canary directory of the invocation.
     @FunctionalInterface
-    private interface Payload {
+    interface Payload {
         List<Entry> entries(String token, Path canary);
     }
 
     // The tier-2 contract of a row.
-    private enum Expectation {
+    enum Expectation {
         INCORRECT_NAMES("an incorrect-names ProjectException or a constructor IOException"),
         ANY_REJECTION("a ProjectException or a constructor IOException"),
         CONTAINED_ONLY("the archive staged or refused");

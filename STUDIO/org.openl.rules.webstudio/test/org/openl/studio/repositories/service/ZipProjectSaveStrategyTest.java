@@ -1210,7 +1210,7 @@ class ZipProjectSaveStrategyTest {
     private static Repository secured(Repository repository) {
         var acl = mock(SimpleRepositoryAclService.class,
                 invocation -> invocation.getMethod().getReturnType() == boolean.class
-                        ? Boolean.TRUE
+                        ? true
                         : Mockito.RETURNS_DEFAULTS.answer(invocation));
         return SecuredRepositoryFactory.wrapToSecureRepo(repository, acl);
     }

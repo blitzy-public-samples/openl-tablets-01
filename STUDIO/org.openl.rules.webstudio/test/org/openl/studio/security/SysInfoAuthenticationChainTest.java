@@ -113,7 +113,7 @@ class SysInfoAuthenticationChainTest {
      * The checks shared by both modes. Each subclass runs them in its own Spring context, cached per
      * {@code user.mode} value.
      */
-    abstract class ModeChecks {
+    abstract static class ModeChecks {
 
         private final String mode;
 

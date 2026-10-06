@@ -27,11 +27,6 @@ import org.springframework.security.web.authentication.session.RegisterSessionAu
 import org.springframework.security.web.authentication.session.SessionAuthenticationStrategy;
 import org.springframework.security.web.context.SecurityContextPersistenceFilter;
 import org.springframework.security.web.header.HeaderWriterFilter;
-import org.springframework.security.web.header.writers.CacheControlHeadersWriter;
-import org.springframework.security.web.header.writers.HstsHeaderWriter;
-import org.springframework.security.web.header.writers.XContentTypeOptionsHeaderWriter;
-import org.springframework.security.web.header.writers.XXssProtectionHeaderWriter;
-import org.springframework.security.web.header.writers.frameoptions.XFrameOptionsHeaderWriter;
 import org.springframework.security.web.savedrequest.HttpSessionRequestCache;
 
 import org.openl.studio.security.ad.OpenLAuthenticationProviderWrapper;
@@ -48,16 +43,12 @@ public class CommonAuthenticationConfig {
     // V4: default Spring Security response headers for the hand-built SAML and OIDC chains
     @Bean(initMethod = "afterPropertiesSet")
     public HeaderWriterFilter securityHeadersFilter() {
-        return new HeaderWriterFilter(List.of(
-                new XContentTypeOptionsHeaderWriter(),
-                new XXssProtectionHeaderWriter(),
-                new CacheControlHeadersWriter(),
-                new HstsHeaderWriter(),
-                new XFrameOptionsHeaderWriter(XFrameOptionsHeaderWriter.XFrameOptionsMode.DENY)));
+        return new HeaderWriterFilter(SecurityHeaderWriters.defaults());
     }
 
     @Bean
-    public AuthenticationManager authenticationManager(List<AuthenticationProvider> authenticationProviders, Clock clock) {
+    public AuthenticationManager authenticationManager(List<AuthenticationProvider> authenticationProviders,
+            Clock clock) {
         if (authenticationProviders.isEmpty()) {
             throw new IllegalStateException("No AuthenticationProvider is configured");
         }

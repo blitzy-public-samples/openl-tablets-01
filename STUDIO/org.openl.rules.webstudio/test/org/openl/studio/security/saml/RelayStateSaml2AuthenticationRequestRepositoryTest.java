@@ -23,6 +23,7 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
+import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.mock.web.MockHttpServletRequest;
@@ -423,11 +424,11 @@ class RelayStateSaml2AuthenticationRequestRepositoryTest {
         repository.saveAuthenticationRequest(authnRequest, new MockHttpServletRequest(), new MockHttpServletResponse());
     }
 
-    private AbstractSaml2AuthenticationRequest load(String relayState) {
+    private @Nullable AbstractSaml2AuthenticationRequest load(String relayState) {
         return repository.loadAuthenticationRequest(requestWith(relayState));
     }
 
-    private AbstractSaml2AuthenticationRequest remove(String relayState) {
+    private @Nullable AbstractSaml2AuthenticationRequest remove(String relayState) {
         return repository.removeAuthenticationRequest(requestWith(relayState), new MockHttpServletResponse());
     }
 

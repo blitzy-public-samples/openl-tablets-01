@@ -164,7 +164,7 @@ class ProjectFilesServiceTest {
     /**
      * The real files service over the opened project {@code P1}, served from the spied working copy.
      */
-    private record OpenedProject(ProjectFilesServiceImpl service, ProjectFileRoot root, LocalRepository workingCopy) {
+    record OpenedProject(ProjectFilesServiceImpl service, ProjectFileRoot root, LocalRepository workingCopy) {
     }
 
     private final String userName = RandomStringUtils.secure().nextAlphanumeric(24);
@@ -398,7 +398,7 @@ class ProjectFilesServiceTest {
     private static AclProjectsHelper grantAllProjectAcl() {
         return mock(AclProjectsHelper.class,
                 invocation -> invocation.getMethod().getReturnType() == boolean.class
-                        ? Boolean.TRUE
+                        ? true
                         : Mockito.RETURNS_DEFAULTS.answer(invocation));
     }
 
@@ -408,7 +408,7 @@ class ProjectFilesServiceTest {
     private static SimpleRepositoryAclService grantAllRepoAcl() {
         return mock(SimpleRepositoryAclService.class,
                 invocation -> invocation.getMethod().getReturnType() == boolean.class
-                        ? Boolean.TRUE
+                        ? true
                         : Mockito.RETURNS_DEFAULTS.answer(invocation));
     }
 
@@ -520,8 +520,8 @@ class ProjectFilesServiceTest {
      *                first, so a test can prove which files were never read
      */
     // V1: storage makes the content-opening boundary of each mount observable.
-    private record Mount(FileRoot root, Path project, Path sibling, Path store, String prefix, AclProjectsHelper acl,
-                         List<Repository> storage) {
+    record Mount(FileRoot root, Path project, Path sibling, Path store, String prefix, AclProjectsHelper acl,
+                 List<Repository> storage) {
 
         String path(String projectRelative) {
             return prefix + projectRelative;
@@ -1781,7 +1781,7 @@ class ProjectFilesServiceTest {
     private static RepositoryAclServiceProvider grantAllRepositoryAclProvider() {
         var aclService = mock(RepositoryAclService.class,
                 invocation -> invocation.getMethod().getReturnType() == boolean.class
-                        ? Boolean.TRUE
+                        ? true
                         : Mockito.RETURNS_DEFAULTS.answer(invocation));
         var provider = mock(RepositoryAclServiceProvider.class);
         when(provider.getDesignRepoAclService()).thenReturn(aclService);

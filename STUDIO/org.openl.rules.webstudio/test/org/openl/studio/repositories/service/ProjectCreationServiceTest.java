@@ -52,6 +52,7 @@ import java.util.zip.ZipOutputStream;
 import org.apache.commons.lang3.RandomStringUtils;
 import org.eclipse.jgit.api.Git;
 import org.eclipse.jgit.lib.FileMode;
+import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -120,7 +121,7 @@ class ProjectCreationServiceTest {
     /**
      * V1: where the source project of a copy lives on disk, each reached the way the copy route receives it.
      */
-    private enum SourceLayout {
+    enum SourceLayout {
         /** A flat file design repository behind {@code SecureRepository}; the project is {@code DESIGN/rules/Src}. */
         FLAT,
         /** A mapped file design repository behind {@code SecureMappedRepository}; the project is in {@code catalog}. */
@@ -987,7 +988,7 @@ class ProjectCreationServiceTest {
     private static SimpleRepositoryAclService grantAllRepoAcl() {
         return mock(SimpleRepositoryAclService.class,
                 invocation -> invocation.getMethod().getReturnType() == boolean.class
-                        ? Boolean.TRUE
+                        ? true
                         : Mockito.RETURNS_DEFAULTS.answer(invocation));
     }
 
@@ -1022,14 +1023,14 @@ class ProjectCreationServiceTest {
     }
 
     // V1-C: the entry points through which the folder of a new project is chosen (0.6.2.3)
-    private enum Route {
+    enum Route {
         TEMPLATE,
         FILES,
         COPY
     }
 
     // V1-C: the design repository a new project is written to, reached the way the REST route receives it
-    private enum Backend {
+    enum Backend {
         /** A repository without a local directory, such as Git, JDBC, S3 or Azure Blob: lexical checks only. */
         MOCK,
         /** A flat file repository in {@code tmp/repo} behind {@code SecureRepository}. */
@@ -1039,7 +1040,7 @@ class ProjectCreationServiceTest {
     }
 
     // V1-C: where a link inside the design repository points the folder of a new project (0.6.2.3 C12, C16)
-    private enum LinkTarget {
+    enum LinkTarget {
         /** A directory outside the repository root (C12). */
         OUTSIDE,
         /** The folder of another project in the same repository (C16). */
@@ -2409,7 +2410,7 @@ class ProjectCreationServiceTest {
     }
 
     // V1-C: the exception a call ends with, or null when it completes
-    private static Throwable outcomeOf(Executable call) {
+    private static @Nullable Throwable outcomeOf(Executable call) {
         try {
             call.execute();
             return null;

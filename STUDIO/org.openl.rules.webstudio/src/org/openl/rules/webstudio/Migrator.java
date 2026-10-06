@@ -149,8 +149,9 @@ public class Migrator {
                 || LEGACY_SINGLE_USERNAME.equals(username)) {
             return;
         }
-        // V1: validate the user name before it is resolved as a path segment.
-        if (!isValidWorkspaceFolderName(username)) {
+        // V1: validate the user name before it is resolved as a path segment. The blank check above already
+        // returned for null; the null check states it, so the name is non-null for the checks below.
+        if (username == null || !isValidWorkspaceFolderName(username)) {
             // V1: the rejected name is logged in its printable form.
             log.warn("The single-user name '{}' is not a valid workspace folder name; the move is skipped.",
                     printable(username));

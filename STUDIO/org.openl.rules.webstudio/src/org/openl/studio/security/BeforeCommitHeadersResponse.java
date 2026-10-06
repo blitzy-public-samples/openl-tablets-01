@@ -10,15 +10,8 @@ import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import jakarta.servlet.http.HttpServletResponseWrapper;
 
-import com.google.errorprone.annotations.FormatMethod;
-import com.google.errorprone.annotations.FormatString;
 import org.jspecify.annotations.Nullable;
 import org.springframework.security.web.header.HeaderWriter;
-import org.springframework.security.web.header.writers.CacheControlHeadersWriter;
-import org.springframework.security.web.header.writers.HstsHeaderWriter;
-import org.springframework.security.web.header.writers.XContentTypeOptionsHeaderWriter;
-import org.springframework.security.web.header.writers.XXssProtectionHeaderWriter;
-import org.springframework.security.web.header.writers.frameoptions.XFrameOptionsHeaderWriter;
 
 /**
  * V4: a response that writes the default security headers just before its first output reaches the servlet
@@ -53,12 +46,7 @@ import org.springframework.security.web.header.writers.frameoptions.XFrameOption
 final class BeforeCommitHeadersResponse extends HttpServletResponseWrapper {
 
     /** The default header writers of {@code HttpSecurity}, in the order the chains' header filter runs them. */
-    private static final List<HeaderWriter> DEFAULT_HEADER_WRITERS = List.of(
-            new XContentTypeOptionsHeaderWriter(),
-            new XXssProtectionHeaderWriter(),
-            new CacheControlHeadersWriter(),
-            new HstsHeaderWriter(),
-            new XFrameOptionsHeaderWriter(XFrameOptionsHeaderWriter.XFrameOptionsMode.DENY));
+    private static final List<HeaderWriter> DEFAULT_HEADER_WRITERS = SecurityHeaderWriters.defaults();
 
     private final HttpServletRequest request;
     private boolean headersWritten;
@@ -407,32 +395,28 @@ final class BeforeCommitHeadersResponse extends HttpServletResponseWrapper {
         }
 
         @Override
-        @FormatMethod
-        public PrintWriter printf(@FormatString String format, @Nullable Object... args) {
+        public PrintWriter printf(String format, @Nullable Object... args) {
             writeHeaders();
             delegate.printf(format, args);
             return this;
         }
 
         @Override
-        @FormatMethod
-        public PrintWriter printf(@Nullable Locale l, @FormatString String format, @Nullable Object... args) {
+        public PrintWriter printf(@Nullable Locale l, String format, @Nullable Object... args) {
             writeHeaders();
             delegate.printf(l, format, args);
             return this;
         }
 
         @Override
-        @FormatMethod
-        public PrintWriter format(@FormatString String format, @Nullable Object... args) {
+        public PrintWriter format(String format, @Nullable Object... args) {
             writeHeaders();
             delegate.format(format, args);
             return this;
         }
 
         @Override
-        @FormatMethod
-        public PrintWriter format(@Nullable Locale l, @FormatString String format, @Nullable Object... args) {
+        public PrintWriter format(@Nullable Locale l, String format, @Nullable Object... args) {
             writeHeaders();
             delegate.format(l, format, args);
             return this;
