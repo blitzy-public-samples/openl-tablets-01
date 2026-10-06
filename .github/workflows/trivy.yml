@@ -131,7 +131,7 @@ jobs:
         env:
           IMAGE_REF: ${{ env.REGISTRY }}/${{ env.NAME }}:${{ env.VERSION }}${{ env.SUFFIX }}
         run: >-
-          trivy image $IMAGE_REF
+          trivy image "$IMAGE_REF"
           --exit-code 1
           --severity CRITICAL,HIGH
           --ignore-unfixed

@@ -63,11 +63,13 @@ browser.
 * **The OWASP and Trivy scans now fail on high-severity findings.** `mvn -Powasp` fails for any dependency finding
   with a CVSS score of 7.0 or higher (`failBuildOnCVSS` 7.0 in the `owasp` profile). The nightly or manually started
   Trivy workflow fails on fixable `HIGH` or `CRITICAL` findings in the scanned image, and still produces its JSON and
-  HTML reports. Neither gate runs on merge or publish. The root `pom.xml` adds `tomcat.version` (10.1.59), which
+  HTML reports. Neither gate runs on merge or publish. The root `pom.xml` adds `tomcat.version` (10.1.60), which
   overrides the `tomcat-embed-core`, `tomcat-embed-el` and `tomcat-embed-websocket` 10.1.55 that Spring Boot 3.5.16
   manages, for CVE-2026-53404, CVE-2026-53434, CVE-2026-55276, CVE-2026-59083, CVE-2026-59084, CVE-2026-65182,
-  CVE-2026-65183, CVE-2026-65637, CVE-2026-65905, CVE-2026-65927, CVE-2026-66422, CVE-2026-68525, CVE-2026-68569
-  and CVE-2026-68763. Remove the override once Spring Boot manages a fixed Tomcat version.
+  CVE-2026-65183, CVE-2026-65637, CVE-2026-65905, CVE-2026-65927, CVE-2026-66422, CVE-2026-68525, CVE-2026-68569,
+  CVE-2026-68763, CVE-2026-75973, CVE-2026-76183, CVE-2026-77762, CVE-2026-77791, CVE-2026-78383, CVE-2026-78437,
+  CVE-2026-79677, CVE-2026-86248, CVE-2026-86350 and CVE-2026-87022. Remove the override once Spring Boot manages a
+  fixed Tomcat version.
   <!-- V13: OWASP and Trivy scanning gates -->
 
 ## Administrators
@@ -107,47 +109,50 @@ browser.
 * **Workspace folders, project files, new projects and uploaded archives are kept inside their own folders.** A
   user's workspace folder under `user.workspace.home` must be a real folder of its own: one that is a symbolic link
   into another user's folder or out of the workspace home, or a dangling link, is refused, and so is the folder of a
-  user whose login name is a reserved name such as `CON`, `NUL` or `COM1` in upper case. OpenL Studio does not open
-  the workspace of such a user. In user workspaces and in a `repo-file` design repository, the project files API no
-  longer follows a symbolic link that leads out of the project folder, outside the repository or into another
-  project: listings and searches leave the entry out, and reading, updating, copying, moving, exporting or writing
-  through it answers `400` with `openl.error.400.file.path.invalid.message`. In a `repo-file` design repository,
-  creating or copying a project answers the same `400` when the new project folder would be reached through such a
-  link. Creating a project from uploaded files and copying a project also answer that `400` for a project name or
-  path holding a control character, which was previously removed silently. A project archive with an entry name
-  that is not a valid relative path, such as one with a `..` segment or a leading `/`, is refused before anything
-  is written. Git and the other non-file repositories get the name checks only. Before upgrading, replace such links
-  with regular folders or copies of their content.
+  user whose login name holds a character that OpenL Studio does not allow in file names, such as `'`, `:` or `%`,
+  starts with a space, ends with a dot or a space, or is a reserved name such as `CON`, `NUL` or `COM1` in upper
+  case. OpenL Studio does not open the workspace of such a user. In user workspaces and in a `repo-file` design
+  repository, the project files API no longer follows a symbolic link that leads out of the project folder, outside
+  the repository or into another project: listings and searches leave the entry out, and reading, updating, copying,
+  moving, exporting or writing through it answers `400` with `openl.error.400.file.path.invalid.message`. In a
+  `repo-file` design repository, creating or copying a project answers the same `400` when the new project folder
+  would be reached through such a link. Creating a project from uploaded files and copying a project also answer that
+  `400` for a project name or path holding a control character, which was previously removed silently. A project
+  archive with an entry name that is not a valid relative path, such as one with a `..` segment or a leading `/`, is
+  refused before anything is written. Copying a project answers that `400` as well when a file of the project being
+  copied leads out of its folder through a link, in a `repo-file` design repository or, for an opened project, in the
+  user's workspace.
+
+  In a `repo-file` design repository, a file that a symbolic link places outside the project folder — outside the
+  repository, or into another project — is left out of the user's workspace when the project is opened, and its
+  content is not read. The opened project does not list it, find it in a search or serve it (`404`), as the closed
+  project already did not. Links that stay inside the project folder keep working and are copied as their content. A
+  project folder that is itself a link, or that sits under a link below the repository root, opens empty. Links in
+  the configured repository root's own path are trusted. On each such open, the server logs a WARN that names the
+  project and the number of files left out: "… file(s) of the project '…' are not copied to the workspace, because
+  links place them outside the project folder." Saving the project afterwards writes the working copy back, so the
+  link entries that were left out are removed from the project in the design repository; the files they pointed to
+  are not touched.
+
+  In a `repo-file` design repository, and in the working tree of a `repo-git` design repository, uploading files or a
+  template over an existing project answers that `400` when any entry of the existing project folder is a symbolic
+  link that resolves outside that folder — outside the repository, into another project, or to nothing. Nothing is
+  written, no commit is made, and the uploaded files are discarded. There, an archive uploaded over an existing
+  project answers that `400` when one of its entries would be written through such a link. Links that stay inside the
+  project folder do not stop an upload. A `repo-git` design repository writes uploads through that working tree, so
+  uploading files, a template or an archive to it also answers that `400` when the project folder would be reached
+  through a link there. The files API on its closed projects and on the repository itself, and a project copied into
+  it, get the name checks only; opening its projects, and reading the source when one of its closed projects is
+  copied, are unchanged. JDBC, S3 and Azure Blob repositories keep no local folder, so no link check applies to them:
+  they get the name checks only. Before upgrading, replace such links with regular folders or with copies of their
+  content inside the project, or remove them.
   <!-- V1: path containment on the workspace, file, project and upload surfaces (A, B, C, D) -->
-
-  <!-- V1: opening a file-repository project leaves out the files that links place outside the project folder -->
-* **Opening a project from a file design repository no longer copies files that links place outside the project
-  folder.** In a `repo-file` design repository, a file that a symbolic link places outside the project folder —
-  outside the repository, or into another project — is left out of the user's workspace when the project is opened,
-  and its content is not read. The opened project does not list it, find it in a search or serve it (`404`), as the
-  closed project already did not. Links that stay inside the project folder keep working and are copied as their
-  content. A project folder that is itself a link, or that sits under a link below the repository root, opens
-  empty. Links in the configured repository root's own path are trusted. Git and the other non-file repositories
-  are unaffected. On each such open, the server logs a WARN that names the project and the number of files left
-  out: "… file(s) of the project '…' are not copied to the workspace, because links place them outside the project
-  folder." Saving the project afterwards writes the working copy back, so the link entries that were left out are
-  removed from the project in the design repository; the files they pointed to are not touched. Before upgrading,
-  replace a link that a project needs for shared content with a regular copy of the file inside the project.
-
-  <!-- V1: an upload that overwrites a project whose folder holds a link out of it is refused -->
-* **An upload that overwrites a project is refused when the project folder holds a link that leads out of it.** In
-  a `repo-file` design repository, and in the working tree of a `repo-git` design repository, uploading files or a
-  template over an existing project answers `400` with `openl.error.400.file.path.invalid.message` when any entry
-  of the existing project folder is a symbolic link that resolves outside that folder — outside the repository,
-  into another project, or to nothing. Nothing is written, no commit is made, and the uploaded files are discarded.
-  Links that stay inside the project folder do not stop the upload. Before upgrading, replace such a link with a
-  regular copy of its content inside the project, or remove it, so the project can be overwritten.
 
 * **The OpenL Studio session cookie is now `SameSite=Lax`.** SAML login keeps working, but the identity provider's
   response must reach OpenL Studio within 5 minutes of the login request, and after a cross-site SAML callback the
-  user lands on `/` instead of the page first requested. An IdP-initiated SAML logout sent by HTTP-POST can no
-  longer end the Studio session, so configure the HTTP-Redirect binding for front-channel logout. CSRF tokens stay
-  disabled.
+  user lands on `/` instead of the page first requested. An IdP-initiated SAML logout that the browser delivers as a
+  cross-site HTTP-POST arrives without the Studio session cookie, which `SameSite=Lax` withholds, so it can no longer
+  end the Studio session. Configure the HTTP-Redirect binding for front-channel logout. CSRF tokens stay disabled.
   <!-- V3: SameSite=Lax session cookie -->
 
 * **SAML, OIDC and static-resource responses now carry the default security headers.** They send what the `multi`,
@@ -168,8 +173,10 @@ browser.
 * **New personal access tokens always expire.** A token created without `expiresAt`, including through the "No
   expiration" option of the token dialog, expires after `security.pat.default-expiration-days` (default `90`). An
   expiration date more than `security.pat.max-expiration-days` (default `365`) ahead answers `400` with
-  `openl.error.400.pat.expires-at.max.message`. A value that is not positive, or a default above the maximum, stops
-  OpenL Studio at startup. Tokens created before the upgrade without an expiry keep working and never expire.
+  `openl.error.400.pat.expires-at.max.message`. Both properties take a whole number of days written as an integer,
+  such as `90`, not a decimal or a duration such as `P90D`. Each must be positive, and the default must not exceed
+  the maximum. A value that breaks these rules stops OpenL Studio at startup. Tokens created before the upgrade
+  without an expiry keep working and never expire.
   <!-- V8: PAT default and maximum expiration -->
 
 * **Five failed logins lock a login name for 15 minutes in the `multi` and `ad` modes.** Five consecutive failed form
