@@ -23468,7 +23468,7 @@ Content-Type: application/json
           "token": {
             "type": "string",
             "description": "***",
-            "example": "openl_pat_a1b2c3d4e5f6.7g8h9i0j1k2l3m4n5o6p7q8r9s0t1u2v3w4x5y6z"
+            "example": "***"
           }
         }
       },
@@ -23485,7 +23485,7 @@ Content-Type: application/json
           "password": {
             "type": "string",
             "description": "***",
-            "example": "password"
+            "example": "***"
           },
           "url": {
             "type": "string",
@@ -25371,7 +25371,7 @@ Content-Type: application/json
           "password": {
             "type": "string",
             "description": "***",
-            "example": "qwerty"
+            "example": "***"
           },
           "url": {
             "type": "string",
@@ -25391,7 +25391,7 @@ Content-Type: application/json
           "password": {
             "type": "string",
             "description": "***",
-            "example": "qwerty"
+            "example": "***"
           },
           "url": {
             "type": "string",
@@ -31088,7 +31088,7 @@ Content-Type: application/json
           "password": {
             "type": "string",
             "description": "***",
-            "example": "qwerty"
+            "example": "***"
           },
           "username": {
             "type": "string",
@@ -31147,7 +31147,7 @@ Content-Type: application/json
           "password": {
             "type": "string",
             "description": "***",
-            "example": "qwerty"
+            "example": "***"
           }
         },
         "required": [
@@ -31305,7 +31305,7 @@ Content-Type: application/json
           "password": {
             "type": "string",
             "description": "***",
-            "example": "qwerty"
+            "example": "***"
           },
           "superUser": {
             "type": "boolean",

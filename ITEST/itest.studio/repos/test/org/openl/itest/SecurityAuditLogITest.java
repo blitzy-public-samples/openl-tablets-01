@@ -198,8 +198,8 @@ class SecurityAuditLogITest {
         int bulkMinChanges = bulkMinChanges();
 
         // The secret set: every generated credential, searched for in the captured output and in saved responses.
-        // V11: the derived ADMIN_AUTH_TOCKEN is part of it, searched for by its Base64 part only. ADMIN_PASSWORD is
-        // not, because it equals the administrator name, which the audit lines must carry.
+        // V11: the derived ADMIN_AUTH_TOCKEN is in the secret set, searched for by its Base64 part only
+        // ADMIN_PASSWORD is not in the set: it equals the administrator name, which the audit lines must carry.
         Map<String, String> generated = GENERATED; // V11: the @AfterAll scan reads it after the test
         // Generated names that look like credentials; they are not secrets, but no log line may name them.
         Map<String, String> lookalikes = new LinkedHashMap<>();
@@ -219,8 +219,8 @@ class SecurityAuditLogITest {
                 putLookalikeNames(client.localEnv, lookalikes);
 
                 // The token is created in Java only, and its response is never compared or printed.
-                // V11: the token name looks like a token, because a name can be a credential. It joins the secret set
-                // before the request, so the captured-output scan and the @AfterAll saved-response scan cover it.
+                // V11: the token-like name joins the secret set before the request, so both leak scans cover it
+                // A name can be a credential, so the name looks like a token.
                 String patName = PAT_PREFIX + WebStudioTest.randomPassword(16) + "." + WebStudioTest.randomPassword(32);
                 generated.put("PAT_NAME", patName);
                 marks.add(mark(out, err));
@@ -259,8 +259,8 @@ class SecurityAuditLogITest {
             throw t;
         } finally {
             // A scan error is suppressed onto the test failure instead of replacing it.
-            // V11: the captured-output leak check runs here, whatever failed before: extraction, fixtures, polling,
-            // shutdown or verify. The saved responses are scanned by the @AfterAll method.
+            // V11: the captured-output leak check runs here, whatever failed before
+            // Extraction, fixtures, polling, shutdown or verify may have failed; @AfterAll scans the saved responses.
             try {
                 assertNoLeakInOutput(out.capturedString(), err.capturedString(), generated, lookalikes);
             } catch (AssertionError | RuntimeException scan) {
@@ -413,8 +413,8 @@ class SecurityAuditLogITest {
                                    StdErr err,
                                    Mark from,
                                    Predicate<List<AuditLine>> minimum) throws InterruptedException {
-        // V11: polls by hand because Awaitility is not on this suite's test classpath and the suite's POM gains no
-        // dependency.
+        // V11: manual polling keeps this suite's dependencies unchanged
+        // Awaitility is not on this suite's test classpath.
         long deadline = System.nanoTime() + POLL_TIMEOUT_NANOS;
         while (!minimum.test(parse(slice(out.capturedString(), err.capturedString(), from, null)))) {
             if (System.nanoTime() - deadline >= 0) {
@@ -425,7 +425,8 @@ class SecurityAuditLogITest {
     }
 
     /** Checks the fixed slices and every audit line of the finished run; the leak checks are made by the caller. */
-    private static void verify(Run run, String outText, String errText) { // V11: the leak inventories moved out
+    private static void verify(Run run, String outText, String errText) {
+        // V11: the caller checks leaks separately from event verification
         List<String> allLines = new ArrayList<>(auditLines(outText));
         allLines.addAll(auditLines(errText));
         var parsed = parse(allLines); // V11: parsed once, for the line checks and the whole-run counts
@@ -452,8 +453,8 @@ class SecurityAuditLogITest {
         }
         assertEquals(SEGMENTS.size() + 1, slices.size(), "Slices of the run");
 
-        // V11: exact authentication totals per slice. The administrator's setup logins drive the fixtures and vary in
-        // number, so they are separated; its token successes carry method=pat, so they are counted.
+        // V11: exact authentication totals per slice, without the administrator's setup logins
+        // Setup logins vary in number with the fixtures; the administrator's method=pat successes are counted.
         var counted = authEvent().and(setupLogin(run.adminName()).negate());
         for (int i = 0; i < slices.size(); i++) {
             String step = i == 0 ? "PAT creation" : SEGMENTS.get(i - 1);

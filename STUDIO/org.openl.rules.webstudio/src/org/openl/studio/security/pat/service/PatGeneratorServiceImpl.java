@@ -123,7 +123,7 @@ public class PatGeneratorServiceImpl implements PatGeneratorService {
         token.setLoginName(loginName);
         token.setName(name);
         token.setCreatedAt(now);
-        token.setExpiresAt(effectiveExpiresAt); // V8
+        token.setExpiresAt(effectiveExpiresAt); // V8: persist the effective expiry
 
         crudService.save(token);
 
@@ -135,7 +135,7 @@ public class PatGeneratorServiceImpl implements PatGeneratorService {
                 .loginName(loginName)
                 .token(pat.asTokenValue())
                 .createdAt(now)
-                .expiresAt(effectiveExpiresAt) // V8
+                .expiresAt(effectiveExpiresAt) // V8: return the effective expiry
                 .build();
     }
 }

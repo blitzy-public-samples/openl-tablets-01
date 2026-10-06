@@ -21,7 +21,7 @@ public class InternalPasswordConstraintValidator implements ConstraintValidator<
     public boolean isValid(InternalPasswordModel value, ConstraintValidatorContext context) {
         context.disableDefaultConstraintViolation();
         if (StringUtils.isNotBlank(value.getPassword())) {
-            // V7: the local password policy (12 code points to 72 UTF-8 bytes) replaces the 25-character maximum.
+            // V7: a nonblank password needs at least 12 code points and at most 72 UTF-8 bytes.
             if (!LocalPasswordPolicy.check(value.getPassword(), context)) {
                 return false;
             }

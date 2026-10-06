@@ -11,7 +11,7 @@ import org.openl.rules.rest.validation.LocalPasswordConstraint;
 public class UserEditModel extends UserInfoModel {
 
     @Getter
-    // V7: local password policy replaces the 25-character maximum.
+    // V7: a nonblank local password needs 12 code points to 72 UTF-8 bytes; a blank one leaves the password unchanged.
     @LocalPasswordConstraint
     @Parameter(description = "Password", example = "qwerty")
     private String password;

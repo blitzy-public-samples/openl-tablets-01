@@ -9,7 +9,7 @@ import org.hibernate.validator.constraintvalidation.HibernateConstraintValidator
  * V7: the local password policy for internal (local) users.
  * <p>
  * It applies on create, admin edit and profile change. The minimum is counted in Unicode code points and the maximum
- * in UTF-8 bytes, because bcrypt ignores input beyond 72 bytes. Existing password hashes are not re-validated.
+ * in UTF-8 bytes, which enforces bcrypt's 72-byte input limit. Existing password hashes are not re-validated.
  */
 public final class LocalPasswordPolicy {
 

@@ -55,7 +55,7 @@ class UsersValidatorTest extends AbstractConstraintValidatorTest {
     @Autowired
     private PasswordEncoder passwordEncoder;
 
-    // V7: credentials generated per test instance (AAP 0.8.3); no literal password in this class
+    // V7: credentials are generated per test instance, so no literal password appears in this class
     private final String currentPassword = RandomStringUtils.secure().nextAlphanumeric(16);
     private final String currentPasswordHash = RandomStringUtils.secure().nextAlphanumeric(16);
     private final String newPassword = RandomStringUtils.secure().nextAlphanumeric(16);
@@ -149,7 +149,7 @@ class UsersValidatorTest extends AbstractConstraintValidatorTest {
         assertValid(userEditModel);
     }
 
-    // V7: admin edit route, boundary cases of LocalPasswordPolicy; the 25-character maximum no longer applies
+    // V7: admin edit route, boundary cases of LocalPasswordPolicy
     @ParameterizedTest(name = "[{index}] {0}")
     @MethodSource("passwordPolicyCases")
     void testEditUser_password_policy(String label, String candidate, String expectedMessage) {
@@ -175,7 +175,7 @@ class UsersValidatorTest extends AbstractConstraintValidatorTest {
 
         assertValid(getValidUserCreateModel());
 
-        // V7: a generated policy-compliant password instead of a literal
+        // V7: a generated policy-compliant password
         userCreateModel.setInternalPassword(new InternalPasswordModel().setPassword(otherPassword));
         assertValid(userCreateModel);
 
@@ -220,7 +220,6 @@ class UsersValidatorTest extends AbstractConstraintValidatorTest {
                 CANNOT_BE_EMPTY,
                 wrongInternalPassword,
                 bindingResult.getFieldError("internalPassword"));
-        // V7: the 25-character maximum is replaced by the policy cases of testCreateUser_password_policy
     }
 
     // V7: create route, boundary cases of LocalPasswordPolicy
@@ -233,7 +232,7 @@ class UsersValidatorTest extends AbstractConstraintValidatorTest {
         assertPasswordPolicy(label, model, "internalPassword", expectedMessage, internalPassword);
     }
 
-    // V7: coverage of the disabled-internal-users branch (AAP 0.9.4)
+    // V7: a blank password is valid when internal users cannot be created
     @Test
     void testCreateUser_blankPasswordAllowedWhenInternalUsersDisabled() {
         // The Spring test context fixes canCreateInternalUsers to true, so the validator is exercised directly here.
@@ -302,7 +301,7 @@ class UsersValidatorTest extends AbstractConstraintValidatorTest {
     void testEditUserProfile_valid() {
         var userProfileEditModel = getValidUserProfileEditModel();
         when(currentUserInfo.getUserName()).thenReturn("jsmith");
-        // V7: generated current password and hash instead of literals
+        // V7: generated current password and hash
         when(passwordEncoder.matches(currentPassword, currentPasswordHash)).thenReturn(true);
         var existedUser = new SimpleUser();
         existedUser.setPassword(currentPasswordHash);
@@ -316,7 +315,7 @@ class UsersValidatorTest extends AbstractConstraintValidatorTest {
 
     @Test
     void testEditUserProfile_password_notValid() {
-        // V7: generated credentials instead of literals; the three steps and their messages are unchanged
+        // V7: generated credentials; empty current, mismatch and wrong current password are reported in that order
         when(passwordEncoder.matches(currentPassword, currentPasswordHash)).thenReturn(true);
         when(currentUserInfo.getUserName()).thenReturn("jsmith");
         var existedUser = new SimpleUser();
@@ -407,7 +406,7 @@ class UsersValidatorTest extends AbstractConstraintValidatorTest {
                 .setFirstName("John")
                 .setEmail("jsmith@email")
                 .setLastName("Smith")
-                // V7: a generated policy-compliant password instead of a literal
+                // V7: a generated policy-compliant password
                 .setInternalPassword(new InternalPasswordModel().setPassword(newPassword))
                 .setGroups(groups)
                 .setUsername("jsmith");
@@ -420,7 +419,7 @@ class UsersValidatorTest extends AbstractConstraintValidatorTest {
                 .setFirstName("John")
                 .setEmail("jsmith@email")
                 .setLastName("Smith")
-                // V7: a generated password instead of a literal
+                // V7: a generated policy-compliant password
                 .setPassword(newPassword)
                 .setGroups(groups);
     }
@@ -440,9 +439,11 @@ class UsersValidatorTest extends AbstractConstraintValidatorTest {
     }
 
     private UserProfileEditModel getValidUserProfileEditModel() {
-        // V7: generated policy-compliant passwords instead of literals
+        // V7: generated policy-compliant passwords
         return new UserProfileEditModel().setChangePassword(
-                        new ChangePasswordModel().setConfirmPassword(newPassword).setNewPassword(newPassword).setCurrentPassword(currentPassword))
+                        new ChangePasswordModel().setConfirmPassword(newPassword)
+                                .setNewPassword(newPassword)
+                                .setCurrentPassword(currentPassword))
                 .setShowComplexResult(true)
                 .setShowFormulas(true)
                 .setShowRealNumbers(true)

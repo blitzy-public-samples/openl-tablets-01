@@ -35,7 +35,7 @@ import org.openl.itest.core.JettyServer;
  */
 abstract class AbstractKeycloakTest {
 
-    // V3: credentials generated once per JVM, replacing the realm's literal user passwords and client secret
+    // V3: realm user passwords, the client secret and the S3 mock keys are generated once per JVM
     private static final SecureRandom RANDOM = new SecureRandom();
     private static final String ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
     private static final List<String> REALM_USERS = List.of("admin",
@@ -60,8 +60,11 @@ abstract class AbstractKeycloakTest {
     private static final String CLIENT_SECRET = randomValue();
     private static final String S3_ACCESS_KEY = randomValue();
     private static final String S3_SECRET_KEY = randomValue();
-    // V3: every generated credential and every one issued to the test class, by kind; each test's output is scanned
-    // for them after the test, passed or failed, and the saved responses after the class
+    // V3: the leak guard holds every generated credential and every one issued to the test class, by kind
+    /**
+     * Scans the output each test captures for every credential it holds once the test finishes, whether it passed
+     * or failed, and, after the class, the responses saved under {@code server.responses}.
+     */
     @RegisterExtension
     static final SecretLeakGuard SECRET_GUARD = new SecretLeakGuard()
             .retain("realm credential", PASSWORDS.values())
@@ -83,7 +86,7 @@ abstract class AbstractKeycloakTest {
         return container;
     }
 
-    // V3: generated S3 mock keys instead of literals
+    // V3: Studio's production-s3 deployment repository connects to the S3 mock with the keys generated once per JVM
     protected static JettyServer studio(S3MockContainer s3) {
         return JettyServer.get()
                 .withInitParam("repository.production-s3.service-endpoint", s3.getHttpEndpoint())
@@ -173,9 +176,9 @@ abstract class AbstractKeycloakTest {
     protected void assertProtected(SsoBrowser browser, String loginEntry) throws Exception {
         var landing = browser.get("/");
         assertEquals(HttpStatus.SC_MOVED_TEMPORARILY, landing.statusCode());
+        // V3: the failure names the expected login entry only; the Location can carry an authorization code or state
         assertTrue(landing.headers().firstValue("Location").orElseThrow().endsWith(loginEntry),
-                "Expected a redirect to the login entry " + loginEntry + " but was: "
-                        + landing.headers().firstValue("Location"));
+                "Expected a redirect to the login entry " + loginEntry);
         assertRestUnauthorized(browser);
     }
 
@@ -306,7 +309,7 @@ abstract class AbstractKeycloakTest {
         return browser.get(path, Map.of("X-Forwarded-Proto", "https"));
     }
 
-    // V4: the headers that Studio writes before any chain filter runs, so no response can drop or replace them
+    // V4: asserts the response-independent default headers, with Strict-Transport-Security on secure requests only
     private static void assertResponseIndependentHeaders(HttpResponse<?> response, String label, boolean secure) {
         var headers = response.headers();
         assertEquals("nosniff", headers.firstValue("X-Content-Type-Options").orElse(null),

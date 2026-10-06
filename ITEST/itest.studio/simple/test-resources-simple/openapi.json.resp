@@ -22755,7 +22755,7 @@ Content-Type: application/json
           "password": {
             "type": "string",
             "description": "***",
-            "example": "password"
+            "example": "***"
           },
           "url": {
             "type": "string",
@@ -24641,7 +24641,7 @@ Content-Type: application/json
           "password": {
             "type": "string",
             "description": "***",
-            "example": "qwerty"
+            "example": "***"
           },
           "url": {
             "type": "string",
@@ -24661,7 +24661,7 @@ Content-Type: application/json
           "password": {
             "type": "string",
             "description": "***",
-            "example": "qwerty"
+            "example": "***"
           },
           "url": {
             "type": "string",
@@ -30328,7 +30328,7 @@ Content-Type: application/json
           "password": {
             "type": "string",
             "description": "***",
-            "example": "qwerty"
+            "example": "***"
           },
           "username": {
             "type": "string",
@@ -30387,7 +30387,7 @@ Content-Type: application/json
           "password": {
             "type": "string",
             "description": "***",
-            "example": "qwerty"
+            "example": "***"
           }
         },
         "required": [
@@ -30545,7 +30545,7 @@ Content-Type: application/json
           "password": {
             "type": "string",
             "description": "***",
-            "example": "qwerty"
+            "example": "***"
           },
           "superUser": {
             "type": "boolean",

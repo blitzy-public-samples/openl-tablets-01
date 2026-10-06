@@ -160,6 +160,36 @@ class SsoDiagnosticsTest {
     }
 
     @Test
+    void unexpectedLoginRedirectIsNotPrinted() throws Exception {
+        var code = generated();
+        var state = generated();
+        try (var site = new LoopbackSite()) {
+            var callback = site.url("/idp/callback") + "?code=" + code + "&state=" + state;
+            site.page("/", 302, Map.of("Location", callback), "");
+
+            var failure = failureOf(() -> new AbstractKeycloakTest() {
+            }.assertProtected(new SsoBrowser(site.base()), "/oauth2/authorization/webstudio"));
+
+            assertDiagnostic(failure,
+                    AssertionError.class,
+                    List.of("Expected a redirect to the login entry /oauth2/authorization/webstudio"),
+                    List.of(code, state, "/idp/callback"));
+        }
+    }
+
+    @Test
+    void expectedLoginRedirectPassesTheProtectionCheck() throws Exception {
+        try (var site = new LoopbackSite()) {
+            site.page("/", 302, Map.of("Location", site.url("/oauth2/authorization/webstudio")), "");
+            site.page("/rest/users/profile", 401, Map.of(), "");
+
+            // A redirect to the login entry and a 401 from the REST API do not fail.
+            new AbstractKeycloakTest() {
+            }.assertProtected(new SsoBrowser(site.base()), "/oauth2/authorization/webstudio");
+        }
+    }
+
+    @Test
     void tokenEndpointFailureNeverPrintsTheResponse() throws Exception {
         var accessToken = generatedJwt();
         var idToken = generatedJwt();

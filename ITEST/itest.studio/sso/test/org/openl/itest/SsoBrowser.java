@@ -268,7 +268,7 @@ class SsoBrowser {
                 .contains("kc-form-login");
     }
 
-    // V3: finishes a SAML login from the AuthnRequest auto-submit form; used only by the new login overloads
+    // V3: finishes a SAML login from the AuthnRequest auto-submit form; used by the cross-site and session-ID overloads
     private void finishSamlLogin(HttpResponse<String> authnRequestForm,
                                  String username,
                                  String password,
@@ -377,12 +377,12 @@ class SsoBrowser {
                 super.put(uri, responseHeaders);
                 for (HttpCookie cookie : getCookieStore().getCookies()) {
                     cookie.setSecure(false);
-                    // V3: the Studio session ID and each Keycloak cookie long enough to hold session state are kept
-                    // for the leak scans of the test class; Keycloak's short flag cookies are not
+                    // V3: keeps the Studio session ID and each Keycloak session-state cookie for the leak scans
                     var value = cookie.getValue();
                     if (SESSION_COOKIE.equals(cookie.getName())) {
                         AbstractKeycloakTest.registerSecret("Studio session ID", value);
                     } else if (value != null && value.length() >= 16) {
+                        // the length bound skips Keycloak's short flag cookies, which hold no session state
                         AbstractKeycloakTest.registerSecret("Keycloak session cookie", value);
                     }
                 }

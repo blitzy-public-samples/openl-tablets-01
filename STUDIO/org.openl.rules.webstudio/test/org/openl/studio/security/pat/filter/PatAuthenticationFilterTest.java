@@ -7,12 +7,15 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockingDetails;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.io.IOException;
+import java.io.PrintWriter;
+import java.io.StringWriter;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.stream.Stream;
@@ -134,7 +137,7 @@ class PatAuthenticationFilterTest {
         filter.doFilterInternal(request, response, filterChain);
 
         // Assert
-        verify(patAuthService, never()).resolveAuthentication(any(PatToken.class));
+        assertNoResolverCall(); // V11: a value-free zero-call check, so a failure never prints a token argument
         verify(securityContextHolderStrategy, never()).createEmptyContext();
         verify(filterChain, times(1)).doFilter(request, response);
 
@@ -150,7 +153,7 @@ class PatAuthenticationFilterTest {
         filter.doFilterInternal(request, response, filterChain);
 
         // Assert
-        verify(patAuthService, never()).resolveAuthentication(any(PatToken.class));
+        assertNoResolverCall(); // V11: a value-free zero-call check, so a failure never prints a token argument
         verify(securityContextHolderStrategy, never()).createEmptyContext();
         verify(filterChain, times(1)).doFilter(request, response);
 
@@ -166,7 +169,7 @@ class PatAuthenticationFilterTest {
         filter.doFilterInternal(request, response, filterChain);
 
         // Assert
-        verify(patAuthService, never()).resolveAuthentication(any(PatToken.class));
+        assertNoResolverCall(); // V11: a value-free zero-call check, so a failure never prints a token argument
         verify(securityContextHolderStrategy, never()).createEmptyContext();
         verify(filterChain, never()).doFilter(request, response);
 
@@ -703,8 +706,48 @@ class PatAuthenticationFilterTest {
 
         // Assert
         assertTrue(auditLines(err).isEmpty(), "no audit line is expected for a request without a PAT");
-        verify(patAuthService, never()).resolveAuthentication(any(PatToken.class));
+        assertNoResolverCall(); // V11: a value-free zero-call check, so a failure never prints a token argument
         verify(filterChain, times(1)).doFilter(request, response);
+    }
+
+    // V11: an unexpected resolver call fails the zero-call check with its count, never with the token it received
+    @Test
+    void testAssertNoResolverCall_UnexpectedCall_FailsWithoutTokenValues() {
+        // Arrange - an unexpected call with a token generated for this test alone
+        var publicId = RandomStringUtils.secure().nextAlphanumeric(PatToken.PUBLIC_ID_LENGTH);
+        var secret = RandomStringUtils.secure().nextAlphanumeric(PatToken.SECRET_LENGTH);
+        var token = new PatToken(publicId, secret);
+        var tokenValue = token.asTokenValue();
+        patAuthService.resolveAuthentication(token);
+
+        // Act
+        var error = assertThrows(AssertionError.class, this::assertNoResolverCall);
+
+        // Assert - neither the message nor the printed failure carries a token part; no message quotes a value
+        var message = String.valueOf(error.getMessage());
+        var trace = new StringWriter();
+        error.printStackTrace(new PrintWriter(trace, true));
+        var printed = trace.toString();
+        assertFalse(message.contains(secret), "the failure message must not contain the secret");
+        assertFalse(message.contains(publicId), "the failure message must not contain the public ID");
+        assertFalse(message.contains(tokenValue), "the failure message must not contain the token");
+        assertFalse(printed.contains(secret), "the printed failure must not contain the secret");
+        assertFalse(printed.contains(publicId), "the printed failure must not contain the public ID");
+        assertFalse(printed.contains(tokenValue), "the printed failure must not contain the token");
+        assertNull(error.getCause(), "the failure must not carry a cause");
+        assertTrue(error.getSuppressed().length == 0, "the failure must not carry a suppressed error");
+
+        // Assert - the failure still names the check and reports the one unexpected call
+        assertTrue(message.contains("resolveAuthentication must not be called"), "the failure must name the check");
+        assertTrue(message.contains("but was: <1>"), "the failure must report one unexpected call");
+    }
+
+    // V11: counts resolver calls from invocation metadata, so a failure never formats a token argument
+    private void assertNoResolverCall() {
+        var calls = mockingDetails(patAuthService).getInvocations().stream()
+                .filter(invocation -> "resolveAuthentication".equals(invocation.getMethod().getName()))
+                .count();
+        assertEquals(0, calls, "resolveAuthentication must not be called");
     }
 
     /**
@@ -728,8 +771,11 @@ class PatAuthenticationFilterTest {
         return Stream.of(err.capturedLines()).filter(l -> l.contains("event=")).toList();
     }
 
-    // V11: the whole capture may contain neither the PAT, its secret, the anonymous key, a password generated by
-    // createUserDetails in this test, nor a value the test presented; the messages name the fields, never the values
+    /**
+     * Fails when the whole capture contains the PAT, its secret, the anonymous key, a password generated by
+     * {@link #createUserDetails} or a value the test presented. The messages name the field, never the value.
+     */
+    // V11: assert that no generated or presented credential reaches captured output, without quoting its value
     private void assertNoSecretCaptured(StdErr err, String... presentedValues) {
         var output = err.capturedString();
         assertFalse(output.contains(TEST_TOKEN_VALUE), "captured output must not contain the PAT");
@@ -741,8 +787,11 @@ class PatAuthenticationFilterTest {
                 "captured output must not contain a value the test presented");
     }
 
-    // V11: a presented value that can never parse as a PAT, generated per run: an alphanumeric value has no
-    // underscore, so it can never carry the openl_pat_ prefix that PatToken.parse requires
+    /**
+     * A presented value, generated per run, that can never parse as a PAT: an alphanumeric value has no underscore,
+     * so it cannot carry the {@link PatToken#PREFIX} that {@link PatToken#parse} requires.
+     */
+    // V11: an alphanumeric value cannot contain the required PAT prefix
     private static String unparsableTokenValue() {
         return RandomStringUtils.secure().nextAlphanumeric(24);
     }
