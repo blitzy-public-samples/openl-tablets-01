@@ -1,0 +1,3 @@
+GET /rest/public/info/http.json HTTP/1.1
+Cookie: ${V10_SESSION_COOKIE}
+

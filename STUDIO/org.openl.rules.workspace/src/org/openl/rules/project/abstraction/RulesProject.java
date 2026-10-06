@@ -1,14 +1,10 @@
 package org.openl.rules.project.abstraction;
 
 import java.io.IOException;
-import java.nio.file.Files;
-import java.nio.file.LinkOption;
-import java.nio.file.Path;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.regex.Pattern;
 
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
@@ -22,14 +18,12 @@ import org.openl.rules.common.impl.ArtefactPathImpl;
 import org.openl.rules.lock.LockInfo;
 import org.openl.rules.project.impl.local.LocalRepository;
 import org.openl.rules.project.impl.local.ProjectMetainfo;
-import org.openl.rules.repository.PathCheckedRepository;
 import org.openl.rules.repository.api.AdditionalData;
 import org.openl.rules.repository.api.BranchRepository;
 import org.openl.rules.repository.api.ConflictResolveData;
 import org.openl.rules.repository.api.FileData;
 import org.openl.rules.repository.api.Repository;
 import org.openl.rules.repository.api.RepositoryDelegate;
-import org.openl.rules.repository.file.FileSystemRepository;
 import org.openl.rules.workspace.WorkspaceUser;
 import org.openl.rules.workspace.dtr.FolderMapper;
 import org.openl.rules.workspace.dtr.impl.FileMappingData;
@@ -336,8 +330,7 @@ public class RulesProject extends UserWorkspaceProject {
 
     @Override
     public void openVersion(String version) throws ProjectException {
-        // V1: the working copy gets no file that a link places outside the project folder of a file repository
-        var designProject = new ContainedDesignProject(designRepository, designFolderName, version);
+        var designProject = new AProject(designRepository, designFolderName, version);
 
         if (localFolderName == null) {
             localFolderName = designProject.getBusinessName();
@@ -624,132 +617,5 @@ public class RulesProject extends UserWorkspaceProject {
 
     public Map<String, String> getDesignTags() {
         return designTags.getTags();
-    }
-
-    // V1: the design side of opening a project; a link in a file repository cannot bring outside files into the copy.
-    /**
-     * The design project a working copy is populated from, listing only the files that lie inside the project folder.
-     *
-     * <p>A file repository lists a link to a regular file as a file of the folder, and reading it follows the link. A
-     * link in the project folder would thus copy the content of a file outside the project, such as a file of a
-     * sibling project, into the working copy, where it is then served as a regular file of the project. So, when the
-     * design repository keeps its content in a local directory, every listed file whose real location is not inside
-     * the project folder is left out of the copy before its content is read. Links that stay inside the project folder
-     * are kept and copied as their content.
-     *
-     * <p>The root directory of the repository is the anchor: an administrator configured it, so links in its own path
-     * are trusted. The project folder is the boundary, taken lexically under the real root, so a project folder that is
-     * itself a link, or that sits under a link below the root, keeps none of its files.
-     *
-     * <p>The repository is unwrapped only to learn its root directory: through every {@link RepositoryDelegate}, such
-     * as a secured wrapper, then through one {@link FolderMapper}, down to a {@link PathCheckedRepository} or a
-     * {@link FileSystemRepository}. Every listing and read still goes through the repository the project holds. Other
-     * backends, such as Git, JDBC, S3 or Azure Blob, do not read their content through filesystem links, so their
-     * listing is kept as it is, without any filesystem call. A project stored as an archive is copied by unpacking the
-     * archive, not through this listing, so its entries are kept as they are too.
-     */
-    private static final class ContainedDesignProject extends AProject {
-
-        private static final Pattern EDGE_SLASHES = Pattern.compile("^/+|/+$");
-
-        ContainedDesignProject(Repository repository, String folderPath, String historyVersion) {
-            super(repository, folderPath, historyVersion);
-        }
-
-        @Override
-        protected Map<String, AProjectArtefact> createInternalArtefacts() {
-            var artefacts = super.createInternalArtefacts();
-            if (!isFolder()) {
-                return artefacts;
-            }
-            var anchor = localRoot(getRepository());
-            if (anchor.isEmpty()) {
-                return artefacts;
-            }
-            var projectFolder = EDGE_SLASHES.matcher(getRealPath()).replaceAll("");
-            var boundary = anchor.get().resolve(projectFolder).normalize();
-            var listed = artefacts.size();
-            // The keys are the paths of the files relative to the project folder.
-            artefacts.keySet().removeIf(relative -> !resolvesInside(boundary, relative));
-            var skipped = listed - artefacts.size();
-            if (skipped > 0) {
-                log.warn("{} file(s) of the project '{}' are not copied to the workspace, "
-                        + "because links place them outside the project folder.", skipped, getFolderPath());
-            }
-            return artefacts;
-        }
-
-        /**
-         * Real root directory of a file-backed repository, or empty for any other backend.
-         *
-         * @param repository the repository as the project holds it, possibly wrapped
-         */
-        private static Optional<Path> localRoot(Repository repository) {
-            var current = repository;
-            while (current instanceof RepositoryDelegate delegate) {
-                current = delegate.getOriginal();
-            }
-            if (current instanceof FolderMapper mapper) {
-                current = mapper.getDelegate();
-            }
-            if (current instanceof PathCheckedRepository pathChecked) {
-                return Optional.ofNullable(pathChecked.getLocalRoot()).map(ContainedDesignProject::realLocation);
-            }
-            if (current instanceof FileSystemRepository fileSystem) {
-                return Optional.ofNullable(fileSystem.getRoot()).map(ContainedDesignProject::realLocation);
-            }
-            return Optional.empty();
-        }
-
-        /**
-         * Real location of the path, resolved before it is normalized, so a parent segment after a link is taken from
-         * the link's target, as the file system takes it. When it cannot be resolved, the absolute normalized path is
-         * returned, and the checks against it then fail closed.
-         */
-        private static Path realLocation(Path path) {
-            var absolute = path.toAbsolutePath();
-            try {
-                return resolveThroughDeepestExisting(absolute).normalize();
-            } catch (IOException | SecurityException e) {
-                log.debug("The real location of a repository root is not resolved: {}", e.getClass().getName());
-                return absolute.normalize();
-            }
-        }
-
-        /**
-         * Tells whether the path, resolved under the boundary, stays inside the boundary on disk. A path that leaves
-         * the boundary lexically, a link that leads out of it, a dangling link, a link loop and an unparsable path are
-         * rejected.
-         *
-         * @param boundary absolute, normalized directory the path may not leave
-         * @param relative path relative to the boundary
-         */
-        private static boolean resolvesInside(Path boundary, String relative) {
-            try {
-                var target = boundary.resolve(relative).normalize();
-                return target.startsWith(boundary) && resolveThroughDeepestExisting(target).startsWith(boundary);
-            } catch (IOException | IllegalArgumentException | SecurityException e) {
-                log.debug("A project file is rejected by the containment check: {}", e.getClass().getName());
-                return false;
-            }
-        }
-
-        /**
-         * Resolves an absolute path through its deepest existing entry: the real location of that entry with the rest
-         * of the path appended. An entry exists when it is present itself, so a dangling link is found and then fails
-         * to resolve. The walk stops at the file system root at the latest. The rest contains no links, because only
-         * existing entries can be links.
-         *
-         * @throws IOException when the deepest existing entry cannot be resolved, such as a dangling link
-         */
-        private static Path resolveThroughDeepestExisting(Path path) throws IOException {
-            var existing = path;
-            var parent = path.getParent();
-            while (parent != null && !Files.exists(existing, LinkOption.NOFOLLOW_LINKS)) {
-                existing = parent;
-                parent = existing.getParent();
-            }
-            return existing.toRealPath().resolve(existing.relativize(path));
-        }
     }
 }

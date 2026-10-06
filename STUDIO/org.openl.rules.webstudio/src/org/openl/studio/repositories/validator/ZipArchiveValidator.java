@@ -84,17 +84,12 @@ public class ZipArchiveValidator implements Validator {
                 stream.forEach(path -> validateEntryPath(path, rejectedPaths, errors));
             }
         } catch (IOException e) {
-            // V1: a crafted name that breaks the zipfs view (e.g. a '..' segment) is a path rejection, not a 500
+            // V1: a crafted name that breaks the zipfs view (e.g. a '..' segment) is a path rejection, not a 500.
+            // Unchecked failures are left to propagate: the InvalidPathException of a NUL byte keeps its existing 400
             if (rejectRawEntryNames(rawViolations, errors)) {
                 return;
             }
             throw RuntimeExceptionWrapper.wrap(e);
-        } catch (RuntimeException e) {
-            // V1: the same for unchecked failures of the walk (e.g. InvalidPathException on a NUL byte)
-            if (rejectRawEntryNames(rawViolations, errors)) {
-                return;
-            }
-            throw e;
         }
         // V1: reported only when the zipfs checks found nothing, so their errors take precedence
         if (errors.getErrorCount() == errorsBefore) {

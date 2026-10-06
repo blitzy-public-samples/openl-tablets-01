@@ -26,6 +26,7 @@ import java.util.stream.Stream;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Test;
 import org.junitpioneer.jupiter.StdErr;
 import org.junitpioneer.jupiter.StdIo;
@@ -51,8 +52,9 @@ import org.openl.itest.core.JettyServer;
  * After each step the test polls the open slice until the minimal lines of that step appear, and fails fast when
  * they do not, as on a build without V11. Once the server has stopped, exact counts are checked on the fixed slices,
  * and every audit line must carry {@code user=}, {@code ip=} and an {@code outcome=} its event is written with.
- * Whatever failed before, the whole captured output and the saved responses are then checked for leaks: no line
- * holds a generated secret, and no line names the credential-looking project or group.
+ * Whatever failed before, the whole captured output is then checked for leaks: no line holds a generated secret, the
+ * token name among them, and no line names the credential-looking project or group. After the test,
+ * {@code @AfterAll} scans the responses saved under {@code server.responses} for the generated secrets.
  *
  * <p><b>Streams.</b> The webapp's slf4j loggers, the audit logger included, print through the test JVM's
  * slf4j-simple to standard error, and its log4j-API loggers print through {@code log4j2-test.properties} to standard
@@ -70,8 +72,9 @@ import org.openl.itest.core.JettyServer;
  * </ul>
  *
  * <p><b>Secrets.</b> Every credential is generated at runtime and reaches the fixtures only through
- * {@code localEnv}; the token is created through {@code postForObject}, which compares no body. Failure messages name
- * the step, the event or the variable, never a value, a line or a response body.
+ * {@code localEnv}; the token is created through {@code postForObject}, which compares no body. The token's name is
+ * generated in the shape of a token and searched for as a secret, because a name can itself be a credential. Failure
+ * messages name the step, the event or the variable, never a value, a line or a response body.
  */
 class SecurityAuditLogITest {
 
@@ -173,6 +176,21 @@ class SecurityAuditLogITest {
     private static final long POLL_TIMEOUT_NANOS = TimeUnit.SECONDS.toNanos(20);
     private static final long POLL_INTERVAL_MILLIS = 100;
 
+    /**
+     * V11: the secret set: every generated credential, searched for in the captured output by the test and in the
+     * saved responses by {@link #assertNoSecretsSaved()} once the test has finished.
+     */
+    private static final Map<String, String> GENERATED = new HashMap<>();
+
+    /**
+     * V11: scans the files under {@code server.responses} for every generated secret once the test has finished,
+     * whatever its outcome, because only this class knows those values. A failure names only the keys.
+     */
+    @AfterAll
+    static void assertNoSecretsSaved() {
+        WebStudioTest.assertNoSecretsSaved(GENERATED);
+    }
+
     @Test
     @StdIo
     void audit(StdOut out, StdErr err) throws Exception {
@@ -182,7 +200,7 @@ class SecurityAuditLogITest {
         // The secret set: every generated credential, searched for in the captured output and in saved responses.
         // V11: the derived ADMIN_AUTH_TOCKEN is part of it, searched for by its Base64 part only. ADMIN_PASSWORD is
         // not, because it equals the administrator name, which the audit lines must carry.
-        Map<String, String> generated = new HashMap<>();
+        Map<String, String> generated = GENERATED; // V11: the @AfterAll scan reads it after the test
         // Generated names that look like credentials; they are not secrets, but no log line may name them.
         Map<String, String> lookalikes = new LinkedHashMap<>();
         List<Mark> marks = new ArrayList<>();
@@ -201,9 +219,13 @@ class SecurityAuditLogITest {
                 putLookalikeNames(client.localEnv, lookalikes);
 
                 // The token is created in Java only, and its response is never compared or printed.
+                // V11: the token name looks like a token, because a name can be a credential. It joins the secret set
+                // before the request, so the captured-output scan and the @AfterAll saved-response scan cover it.
+                String patName = PAT_PREFIX + WebStudioTest.randomPassword(16) + "." + WebStudioTest.randomPassword(32);
+                generated.put("PAT_NAME", patName);
                 marks.add(mark(out, err));
                 JsonNode created = client.postForObject("/rest/users/personal-access-tokens",
-                        Map.of("name", "audit-pat"),
+                        Map.of("name", patName),
                         JsonNode.class,
                         201,
                         "Authorization",
@@ -237,9 +259,10 @@ class SecurityAuditLogITest {
             throw t;
         } finally {
             // A scan error is suppressed onto the test failure instead of replacing it.
-            // V11: both leak checks run here, whatever failed before: extraction, fixtures, polling, shutdown or verify
+            // V11: the captured-output leak check runs here, whatever failed before: extraction, fixtures, polling,
+            // shutdown or verify. The saved responses are scanned by the @AfterAll method.
             try {
-                assertNoLeaks(out.capturedString(), err.capturedString(), generated, lookalikes);
+                assertNoLeakInOutput(out.capturedString(), err.capturedString(), generated, lookalikes);
             } catch (AssertionError | RuntimeException scan) {
                 if (failure != null) {
                     failure.addSuppressed(scan);
@@ -390,6 +413,8 @@ class SecurityAuditLogITest {
                                    StdErr err,
                                    Mark from,
                                    Predicate<List<AuditLine>> minimum) throws InterruptedException {
+        // V11: polls by hand because Awaitility is not on this suite's test classpath and the suite's POM gains no
+        // dependency.
         long deadline = System.nanoTime() + POLL_TIMEOUT_NANOS;
         while (!minimum.test(parse(slice(out.capturedString(), err.capturedString(), from, null)))) {
             if (System.nanoTime() - deadline >= 0) {
@@ -499,27 +524,6 @@ class SecurityAuditLogITest {
         assertEquals(1,
                 count(bulk, committedAclChange(run.bulkMinChanges())),
                 "090-bulk-acl: acl.change outcome=success with changes >= " + run.bulkMinChanges());
-    }
-
-    /**
-     * V11: runs the captured-output check, then the saved-response scan whatever the first one did. A scan failure is
-     * attached to a captured-output failure, which is thrown.
-     */
-    private static void assertNoLeaks(String outText,
-                                      String errText,
-                                      Map<String, String> generated,
-                                      Map<String, String> lookalikes) {
-        try {
-            assertNoLeakInOutput(outText, errText, generated, lookalikes);
-        } catch (AssertionError | RuntimeException leak) {
-            try {
-                WebStudioTest.assertNoSecretsSaved(generated);
-            } catch (AssertionError | RuntimeException scan) {
-                leak.addSuppressed(scan);
-            }
-            throw leak;
-        }
-        WebStudioTest.assertNoSecretsSaved(generated);
     }
 
     /**

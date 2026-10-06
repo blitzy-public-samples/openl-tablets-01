@@ -145,12 +145,12 @@ public class JdbcMutableAclService extends org.springframework.security.acls.jdb
 
     @Override
     public void deleteSid(Sid sid) {
-        var sidId = createOrRetrieveSidPrimaryKey(sid, false);
-        if (sidId == null) {
-            return;
-        }
-        // V11: report the SID removal, and a failed one as a failure; the exception is rethrown unchanged
+        // V11: report the SID removal; a failed SID lookup or removal is reported as a failure and rethrown unchanged
         try {
+            var sidId = createOrRetrieveSidPrimaryKey(sid, false);
+            if (sidId == null) {
+                return;
+            }
             jdbcOperations.update(DELETE_ENTRIES_BY_SID_QUERY, sidId);
 
             var newOwnerSid = createOrRetrieveSidPrimaryKey(relevantSystemWideSid, true);

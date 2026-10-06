@@ -1,16 +1,13 @@
 package org.openl.studio.projects.service.files;
 
 import java.io.IOException;
-import java.nio.file.FileSystemException;
 import java.nio.file.Files;
-import java.nio.file.InvalidPathException;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Optional;
 
 import org.jspecify.annotations.Nullable;
-import org.slf4j.LoggerFactory;
 
 import org.openl.rules.project.abstraction.AProject;
 import org.openl.rules.project.abstraction.AProjectFolder;
@@ -225,7 +222,6 @@ public interface FileRoot {
             return resolveThroughDeepestExisting(target).map(real -> real.startsWith(boundary)).orElse(false);
         } catch (IOException | IllegalArgumentException | SecurityException e) {
             // V1: an unparsable input, an unresolvable entry or a denied lookup fails closed; others propagate.
-            debugFailure("Path rejected by the containment check", e);
             return false;
         }
     }
@@ -252,7 +248,6 @@ public interface FileRoot {
             target = root.resolve(FilePaths.trimSlashes(relative)).normalize();
         } catch (IllegalArgumentException e) {
             // V1: an unparsable path, such as one holding a NUL byte, fails closed.
-            debugFailure("Path rejected as unparsable", e);
             return false;
         }
         return target.startsWith(root) && resolvesInside(target, "");
@@ -272,7 +267,6 @@ public interface FileRoot {
             return resolveThroughDeepestExisting(absolute).orElse(absolute).normalize();
         } catch (IOException | SecurityException e) {
             // V1: an unresolvable link or a denied lookup keeps the lexical location; others propagate.
-            debugFailure("Real location not resolved, the lexical location is kept", e);
             return absolute.normalize();
         }
     }
@@ -300,23 +294,5 @@ public interface FileRoot {
     // V1: a slash-separated relative path resolved lexically under an anchor.
     private static Path under(Path anchor, String relative) {
         return anchor.resolve(FilePaths.trimSlashes(relative)).normalize();
-    }
-
-    // V1: the trace of a containment step that failed closed.
-    /**
-     * Logs at DEBUG that a containment step failed closed, naming the exception class and, for a path
-     * or filesystem failure, its reason. The message, the stack trace and the path are left out,
-     * because they repeat the raw input.
-     */
-    private static void debugFailure(String event, Exception e) {
-        var log = LoggerFactory.getLogger(FileRoot.class);
-        if (log.isDebugEnabled()) {
-            String reason = switch (e) {
-                case InvalidPathException invalid -> invalid.getReason();
-                case FileSystemException fileSystem -> fileSystem.getReason();
-                default -> null;
-            };
-            log.debug("{}: {}{}", event, e.getClass().getName(), reason == null ? "" : " (" + reason + ")");
-        }
     }
 }

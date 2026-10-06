@@ -34,8 +34,8 @@ public class AuthenticationDisabledWarning {
     public AuthenticationDisabledWarning(Environment env) {
         if (isDisabled(env.getProperty("ruleservice.authentication.enabled"))) {
             // The message is fixed text: it never includes property values or credentials.
-            log.warn(
-                    "ruleservice.authentication.enabled=false: every Rule Services endpoint, including /admin/deploy when the deployer is enabled, is reachable without authentication.");
+            log.warn("ruleservice.authentication.enabled=false: every Rule Services endpoint,"
+                    + " including /admin/deploy when the deployer is enabled, is reachable without authentication.");
         }
     }
 

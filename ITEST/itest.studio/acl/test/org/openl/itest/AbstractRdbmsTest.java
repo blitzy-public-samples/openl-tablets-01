@@ -60,6 +60,8 @@ abstract class AbstractRdbmsTest {
             // V7: start the server directly so the generated credentials of WebStudioTest reach localEnv
             var env = new HashMap<String, String>();
             Throwable failure = null;
+            // V7: copy both console streams while the current version runs, as WebStudioTest does
+            var capture = WebStudioTest.ConsoleCapture.start();
             try (var client = JettyServer.get()
                     .withInitParam("db.url", db.getJdbcUrl())
                     .withInitParam("db.user", db.getUsername())
@@ -72,7 +74,8 @@ abstract class AbstractRdbmsTest {
                 failure = e;
                 throw e;
             } finally {
-                WebStudioTest.assertNoSecretSaved(env, failure);
+                // V7: the server has stopped here, so the capture is complete when it is restored and searched
+                WebStudioTest.assertNoSecretLeaked(env, capture, failure);
             }
         }
     }

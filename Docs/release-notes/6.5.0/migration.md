@@ -106,33 +106,23 @@ browser.
   the default.
   <!-- V2: Rule Services /admin/ paths require a JWT -->
 
-* **Workspace folders, project files, new projects and uploaded archives are kept inside their own folders.** A
-  user's workspace folder under `user.workspace.home` must be a real folder of its own: one that is a symbolic link
-  into another user's folder or out of the workspace home, or a dangling link, is refused, and so is the folder of a
-  user whose login name holds a character that OpenL Studio does not allow in file names, such as `'`, `:` or `%`,
-  starts with a space, ends with a dot or a space, or is a reserved name such as `CON`, `NUL` or `COM1` in upper
-  case. OpenL Studio does not open the workspace of such a user. In user workspaces and in a `repo-file` design
-  repository, the project files API no longer follows a symbolic link that leads out of the project folder, outside
-  the repository or into another project: listings and searches leave the entry out, and reading, updating, copying,
-  moving, exporting or writing through it answers `400` with `openl.error.400.file.path.invalid.message`. In a
-  `repo-file` design repository, creating or copying a project answers the same `400` when the new project folder
-  would be reached through such a link. Creating a project from uploaded files and copying a project also answer that
-  `400` for a project name or path holding a control character, which was previously removed silently. A project
-  archive with an entry name that is not a valid relative path, such as one with a `..` segment or a leading `/`, is
-  refused before anything is written. Copying a project answers that `400` as well when a file of the project being
-  copied leads out of its folder through a link, in a `repo-file` design repository or, for an opened project, in the
-  user's workspace.
-
-  In a `repo-file` design repository, a file that a symbolic link places outside the project folder — outside the
-  repository, or into another project — is left out of the user's workspace when the project is opened, and its
-  content is not read. The opened project does not list it, find it in a search or serve it (`404`), as the closed
-  project already did not. Links that stay inside the project folder keep working and are copied as their content. A
-  project folder that is itself a link, or that sits under a link below the repository root, opens empty. Links in
-  the configured repository root's own path are trusted. On each such open, the server logs a WARN that names the
-  project and the number of files left out: "… file(s) of the project '…' are not copied to the workspace, because
-  links place them outside the project folder." Saving the project afterwards writes the working copy back, so the
-  link entries that were left out are removed from the project in the design repository; the files they pointed to
-  are not touched.
+* **Workspace folders, project files, new projects and uploaded archives are kept inside their own folders.** A user's
+  workspace folder under `user.workspace.home` must be a real folder of its own: one that is a symbolic link into
+  another user's folder or out of the workspace home, or a dangling link, is refused, and so is the folder of a user
+  whose login name holds a character that OpenL Studio does not allow in file names, such as `'`, `:` or `%` (on every
+  operating system, so a name with a Windows drive prefix such as `C:x` too), starts with a space, ends with a dot or a
+  space, or is a reserved name such as `CON`, `NUL` or `COM1` in upper case. OpenL Studio does not open the workspace of
+  such a user. The startup conversion of legacy `.studioProps` project metadata also leaves such folders out and logs a
+  WARN for each of them except a dangling link, which is not a folder. In user workspaces and in a `repo-file` design
+  repository, the project files API no longer follows a symbolic link that leads out of the project folder, outside the
+  repository or into another project: listings and searches leave the entry out, and reading, updating, copying, moving,
+  exporting or writing through it answers `400` with `openl.error.400.file.path.invalid.message`. In a `repo-file`
+  design repository, creating or copying a project answers the same `400` when the new project folder would be reached
+  through such a link. Creating a project from uploaded files and copying a project also answer that `400` for a project
+  name or path holding a control character, which was previously removed silently. A project archive with an entry name
+  that is not a valid relative path, such as one with a `..` segment or a leading `/`, is refused before anything is
+  written. Copying a project answers that `400` as well when a file of the project being copied leads out of its folder
+  through a link, in a `repo-file` design repository or, for an opened project, in the user's workspace.
 
   In a `repo-file` design repository, and in the working tree of a `repo-git` design repository, uploading files or a
   template over an existing project answers that `400` when any entry of the existing project folder is a symbolic
@@ -165,8 +155,9 @@ browser.
 
 * **Local passwords must have at least 12 characters and at most 72 bytes in UTF-8.** The rule replaces the
   25-character maximum and applies when a local user is created, when an administrator changes a user's password and
-  when users change their own password in their profile. A violation answers `400` with
-  `openl.constraints.password.min-length.message` or `openl.constraints.password.max-bytes.message`. Existing
+  when users change their own password in their profile. A violation answers `400` with a field error whose `code`
+  is `openl.constraints.password.min-length.message` or `openl.constraints.password.max-bytes.message` and whose
+  `message` is that key's text. Existing
   passwords and their hashes are untouched, so a shorter password keeps working until it is next changed.
   <!-- V7: local password length policy -->
 
@@ -237,5 +228,3 @@ After upgrading, verify in a non-production environment:
 2. A service published from such a project answers as it did before.
 3. Heap headroom, if the maximum heap is set close to the previous usage.
 4. A client that calls the OpenL Studio API answers on `/rest`, and its WebSocket connects to `/rest/ws`.
-   <!-- V1: a file-repository project that holds links opens with only the files of its own folder -->
-5. A project of a file design repository that holds symbolic links opens with the files of its own folder.

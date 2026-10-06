@@ -2,11 +2,17 @@ package org.openl.studio.repositories.service;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.lang.reflect.InvocationHandler;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.lang.reflect.Proxy;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.HashMap;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ExecutionException;
@@ -32,7 +38,9 @@ import org.openl.rules.project.abstraction.RulesProject;
 import org.openl.rules.repository.LocalWorkingTree;
 import org.openl.rules.repository.PathCheckedRepository;
 import org.openl.rules.repository.api.BranchRepository;
+import org.openl.rules.repository.api.ChangesetType;
 import org.openl.rules.repository.api.FileData;
+import org.openl.rules.repository.api.FileItem;
 import org.openl.rules.repository.api.Repository;
 import org.openl.rules.repository.api.RepositoryDelegate;
 import org.openl.rules.repository.file.FileSystemRepository;
@@ -59,6 +67,7 @@ import org.openl.studio.common.exception.ForbiddenException;
 import org.openl.studio.common.exception.NotFoundException;
 import org.openl.studio.repositories.model.ProjectTemplateGroup;
 import org.openl.studio.tags.service.TagAssignmentValidator;
+import org.openl.util.IOUtils;
 import org.openl.util.StringUtils;
 
 /**
@@ -113,54 +122,81 @@ public class ProjectCreationService {
         }
     }
 
+    // V1: resolves the new project folder once and returns it, so the write checks reuse it instead of resolving again
     /**
      * V1: keeps the folder of a new project inside the design repository it is written to.
      *
-     * <p>The name and the optional parent path are joined the way the write joins them
-     * ({@link FileMappingData#internalPath}, which trims and normalizes separators), so a value the write
-     * accepts today is not newly rejected for its spacing. The joined path then passes
-     * {@link Repository#validatePath} and {@link NameChecker#validatePath}.
+     * <p>The name, or the optional parent path joined to it with {@code /}, passes {@link Repository#validatePath}
+     * and {@link NameChecker#validatePath} before anything maps it to storage. The parent path is taken as the route
+     * that validates it takes it: the blanks around it are dropped and its back slashes are read as separators.
+     * Nothing else is mapped away, so a leading or trailing slash stays and is rejected, and a {@code ..} segment
+     * is rejected whichever separator delimits it. The physical folder is derived afterwards, the way the write
+     * derives it.
      *
-     * <p>When the repository keeps its content in a local directory, the physical project folder must also
-     * sit at its own lexical place under the real repository root: a link inside the repository may not
-     * redirect it to another project or outside the root. The folder and the rules location need not exist
-     * yet. Other backends (Git, JDBC, S3, Azure Blob) get the lexical checks only here. A Git repository writes
-     * an upload through its local working tree, which {@link #requireContainedOverwrite} checks. The unwrapped
-     * repository is only asked for its root; the write still goes through the secured wrapper, so no ACL check
-     * is bypassed.
+     * <p>When the repository writes the project through a local directory, a file repository's root or a Git
+     * working tree, the physical project folder is resolved once against the real root and may not climb out of
+     * it. The folder and the rules location need not exist yet. A file repository's folder must also sit at its
+     * own lexical place under the root before anything is written: a link inside the repository may not redirect
+     * it to another project or outside the root. A Git repository checks out the branch it saves to only when it
+     * writes, so its folder is checked in that branch's tree as the write takes each change
+     * ({@link #containedWrites}). JDBC, S3 and Azure Blob repositories keep no local folder and get the lexical
+     * checks only. The unwrapped repository is only asked for its root; the write still goes through the secured
+     * wrapper, so no ACL check is bypassed.
      *
      * <p>A blank name is left to the bean validation that owns it. Every rejection is a 400
      * {@code file.path.invalid.message}, raised before any conflict mapping of the caller.
      *
-     * <p>The checks are private to this class: each V1 surface guards its own inputs, and no component is
-     * shared with the file, workspace or upload surfaces. This departs from the Minimal Change Rule's
-     * clause to isolate new code in dedicated files, which the V1 instruction overrides.
+     * <p>Like each V1 path surface, this class keeps its own copy of these checks instead of sharing a component
+     * with the file, workspace or upload surfaces.
+     *
+     * @return the resolved project folder, or {@code null} when the repository writes through no local folder
      */
-    private void requireContainedProjectFolder(Repository repository, String projectName, String path) {
+    private @Nullable Destination requireContainedProjectFolder(Repository repository, String projectName,
+                                                                @Nullable String path) {
         if (StringUtils.isBlank(projectName)) {
-            return;
+            return null;
         }
         try {
-            var relative = FileMappingData.internalPath(path, projectName);
-            Repository.validatePath(relative);
-            NameChecker.validatePath(relative);
-            var root = localRoot(repository);
+            // V1: the parent path is taken as the route validates it, blanks dropped and back slashes read as
+            // separators; nothing else, such as a leading slash, is mapped away before the validators see it
+            var parent = StringUtils.trimToNull(path);
+            if (parent != null) {
+                parent = parent.replace('\\', '/');
+            }
+            var effective = parent == null ? projectName : parent + "/" + projectName;
+            Repository.validatePath(effective);
+            NameChecker.validatePath(effective);
+            var root = localWriteRoot(repository);
             if (root == null) {
-                return;
+                return null;
             }
             // The rules location is read only for a local directory, so other backends never need a workspace.
             var physicalFolder = repository.supports().mappedFolders()
-                    ? relative
+                    ? FileMappingData.internalPath(path, projectName)
                     : getUserWorkspace().getDesignTimeRepository().getRulesLocation() + projectName;
-            if (!isContained(root, physicalFolder)) {
-                log.debug("A new project folder resolves outside its place in the design repository.");
+            // V1: resolved before it is normalized, so a '<link>/..' in the root leads where the write leads
+            var anchorReal = realPathOf(root.toAbsolutePath()).normalize();
+            var boundary = anchorReal.resolve(physicalFolder).normalize();
+            // V1: a Git working tree holds the target branch only once the save checks it out, so it is checked then
+            var workingTree = localRoot(repository) == null;
+            if (!boundary.startsWith(anchorReal) || !workingTree && !realPathOf(boundary).startsWith(boundary)) {
                 throw new BadRequestException("file.path.invalid.message");
             }
+            return new Destination(boundary, workingTree);
         } catch (IOException | IllegalArgumentException e) {
             // IllegalArgumentException covers InvalidPathException, for example a NUL character in the path.
-            log.debug("A new project folder is rejected: {}", e.getClass().getSimpleName());
             throw new BadRequestException("file.path.invalid.message");
         }
+    }
+
+    /**
+     * V1: the physical folder of a new project, resolved once below the real root of the repository it is written to.
+     *
+     * @param boundary    the folder, at its lexical place below the real root
+     * @param workingTree whether the folder lies in a Git working tree, which holds the branch saved to only once the
+     *                    save checks that branch out
+     */
+    private record Destination(Path boundary, boolean workingTree) {
     }
 
     // V1: the root of a file-backed repository behind its secured and mapped wrappers, or null for other backends
@@ -180,23 +216,6 @@ public class ProjectCreationService {
         return current instanceof FileSystemRepository fileSystem ? fileSystem.getRoot() : null;
     }
 
-    /**
-     * V1: whether the physical folder sits at its own lexical place under the real root.
-     *
-     * <p>Links in the root's own path are configured by an administrator and followed. Below the root, the
-     * folder is compared with its real location, so a folder that is itself a link, or sits under one, is
-     * refused. A dangling link fails to resolve and is refused by the caller.
-     */
-    private static boolean isContained(Path root, String physicalFolder) throws IOException {
-        // V1: resolved before it is normalized, so a '<link>/..' in the root is followed as the repository follows it
-        var anchorReal = realPathOf(root.toAbsolutePath()).normalize();
-        var boundary = anchorReal.resolve(physicalFolder).normalize();
-        if (!boundary.startsWith(anchorReal)) {
-            return false;
-        }
-        return realPathOf(boundary).startsWith(boundary);
-    }
-
     // V1: the real location of a path that may not exist yet: its deepest existing entry resolved, the rest appended
     private static Path realPathOf(Path target) throws IOException {
         for (var existing = target; existing != null; existing = existing.getParent()) {
@@ -209,65 +228,159 @@ public class ProjectCreationService {
     }
 
     /**
-     * V1: keeps an upload that overwrites an existing project inside that project's folder.
+     * V1: the repository an upload writes through, with every change it saves checked against the new project
+     * folder.
      *
-     * <p>The upload writes its entries, and the descriptor it may generate, through the existing project folder,
-     * which may already hold links. The entry names are known only once the upload stages them, so every entry
-     * the folder already holds is checked instead: each must resolve inside the folder. A link to a sibling
-     * project, to a place outside the repository, or to nothing is refused; a link that stays inside the project
-     * folder is accepted. The folder itself, computed as {@link #requireContainedProjectFolder} computes it, must
-     * sit at its own lexical place under the real root. A new project's folder does not exist yet and holds no
-     * links, so it passes.
+     * <p>The upload writes the project content, the descriptor it may generate included, with one changeset save,
+     * so only that call is checked. Every other call is passed on as it is, and
+     * {@link RepositoryDelegate#getOriginal()} answers the repository itself, so a caller that unwraps it reaches
+     * what it reached before. The branch and folder-mapping views of the repository are kept.
      *
-     * <p>The check covers a file design repository and the local working tree of a Git repository, both of which
-     * the upload writes through. JDBC, S3 and Azure Blob repositories keep no local folder and get the lexical
-     * checks only. The unwrapped repository is only asked for its folder; the write still goes through the
-     * secured wrapper, so no ACL check is bypassed.
-     *
-     * <p>A blank name is left to the bean validation that owns it. Every rejection is a 400
-     * {@code file.path.invalid.message}, raised before the upload runs, so it is never mapped to a conflict.
-     *
-     * <p>The check, and {@link #localWriteRoot} with it, is private to this class: each V1 surface guards its own
-     * inputs, so it shares nothing with the archive save, which keeps its own copy. This departs from the Minimal
-     * Change Rule's clause to isolate new code in dedicated files, which the V1 instruction overrides.
+     * <p>A file repository writes the changes as it is handed them and cannot undo a partial save, so a changeset at
+     * hand is checked as a whole before any of it is passed on. The same changeset is then passed on, which keeps
+     * the whole-changeset permission check of the secured wrapper. A Git repository checks out the branch it saves
+     * to only once it writes, and that branch may hold links the tree checked out before did not, so its changes are
+     * checked as it takes them, in the tree it writes them through. Each change must name a place in the project
+     * folder that resolves inside it; a removal deletes the entry itself, never what a link there leads to, so only
+     * the folder it is removed from must resolve inside. A refusal ends the save with a {@link WriteRefused}.
      */
-    private void requireContainedOverwrite(Repository repository, String projectName, String path) {
-        if (StringUtils.isBlank(projectName)) {
-            return;
+    private static Repository containedWrites(Repository repository, Destination destination) {
+        var views = new ArrayList<Class<?>>(List.of(Repository.class, RepositoryDelegate.class));
+        if (repository instanceof BranchRepository) {
+            views.add(BranchRepository.class);
         }
-        var root = localWriteRoot(repository);
-        if (root == null) {
-            return;
+        if (repository instanceof FolderMapper) {
+            views.add(FolderMapper.class);
         }
-        try {
-            // The rules location is read only for a local folder, so other backends never need a workspace.
-            var physicalFolder = repository.supports().mappedFolders()
-                    ? FileMappingData.internalPath(path, projectName)
-                    : getUserWorkspace().getDesignTimeRepository().getRulesLocation() + projectName;
-            // V1: resolved once, before it is normalized, so a '<link>/..' in the root leads where the write leads
-            var anchorReal = realPathOf(root.toAbsolutePath()).normalize();
-            var boundary = anchorReal.resolve(physicalFolder).normalize();
-            if (!boundary.startsWith(anchorReal) || !realPathOf(boundary).startsWith(boundary)) {
-                log.debug("An overwritten project folder resolves outside its place in the design repository.");
-                throw new BadRequestException("file.path.invalid.message");
+        return (Repository) Proxy.newProxyInstance(ProjectCreationService.class.getClassLoader(),
+                views.toArray(Class<?>[]::new),
+                new ContainedWrites(repository, destination));
+    }
+
+    // V1: checks each change an upload saves against the new project folder, and passes every other call on
+    @RequiredArgsConstructor
+    private static final class ContainedWrites implements InvocationHandler {
+        private final Repository repository;
+        private final Destination destination;
+
+        @Override
+        public @Nullable Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
+            if (method.getDeclaringClass() == Object.class) {
+                return switch (method.getName()) {
+                    case "equals" -> proxy == args[0];
+                    case "hashCode" -> System.identityHashCode(proxy);
+                    default -> repository.toString();
+                };
             }
-            if (!Files.isDirectory(boundary, LinkOption.NOFOLLOW_LINKS)) {
-                return;
+            if (method.getDeclaringClass() == RepositoryDelegate.class) {
+                return repository;
             }
-            var realBoundary = boundary.toRealPath();
-            // V1: the walk never follows a link, so each link is visited once as an entry and resolved here
-            try (var entries = Files.walk(boundary)) {
-                for (var iterator = entries.iterator(); iterator.hasNext(); ) {
-                    if (!iterator.next().toRealPath().startsWith(realBoundary)) {
-                        log.debug("An entry of an overwritten project folder resolves outside the project folder.");
-                        throw new BadRequestException("file.path.invalid.message");
+            var passed = args;
+            // The one save of a changeset, the only call that writes the content of a project folder.
+            if ("save".equals(method.getName()) && method.getParameterCount() == 3) {
+                passed = args.clone();
+                passed[1] = checked((FileData) args[0], (Iterable<?>) args[1], (ChangesetType) args[2]);
+            }
+            try {
+                return method.invoke(repository, passed);
+            } catch (InvocationTargetException e) {
+                throw e.getTargetException();
+            }
+        }
+
+        // V1: the changes of a save, all checked first for a file repository, each as it is taken for a working tree
+        private Iterable<?> checked(FileData folderData, Iterable<?> changes, ChangesetType changesetType) {
+            var prefix = folderData.getName() + "/";
+            if (!destination.workingTree() && changes instanceof Collection<?> collection) {
+                collection.forEach(change -> requireContained(prefix, (FileItem) change));
+                return changes;
+            }
+            Iterable<FileItem> checkedOneByOne = () -> {
+                // Asked for once the repository has checked out the branch it writes, right before it writes.
+                if (destination.workingTree()) {
+                    requireContainedTree(changesetType);
+                }
+                var source = changes.iterator();
+                return new Iterator<>() {
+                    @Override
+                    public boolean hasNext() {
+                        return source.hasNext();
+                    }
+
+                    @Override
+                    public FileItem next() {
+                        var change = (FileItem) source.next();
+                        try {
+                            requireContained(prefix, change);
+                        } catch (WriteRefused e) {
+                            IOUtils.closeQuietly(change.getStream());
+                            throw e;
+                        }
+                        return change;
+                    }
+                };
+            };
+            return checkedOneByOne;
+        }
+
+        // V1: the project folder in the tree the save checked out, and every folder link a full save's cleanup enters
+        private void requireContainedTree(ChangesetType changesetType) {
+            var boundary = destination.boundary();
+            try {
+                if (!realPathOf(boundary).startsWith(boundary)) {
+                    throw new WriteRefused();
+                }
+                if (changesetType != ChangesetType.FULL || !Files.isDirectory(boundary, LinkOption.NOFOLLOW_LINKS)) {
+                    return;
+                }
+                // A full save removes what it does not carry and descends into each folder link to find it. A link to
+                // a file and a link to nothing are only removed, so they stay accepted.
+                try (var entries = Files.walk(boundary)) {
+                    for (var iterator = entries.iterator(); iterator.hasNext(); ) {
+                        var entry = iterator.next();
+                        if (Files.isSymbolicLink(entry) && Files.isDirectory(entry)
+                                && !entry.toRealPath().startsWith(boundary)) {
+                            throw new WriteRefused();
+                        }
                     }
                 }
+            } catch (IOException | UncheckedIOException | IllegalArgumentException e) {
+                // A folder the walk cannot read, or a path the file system cannot resolve, is a refusal.
+                throw new WriteRefused();
             }
-        } catch (IOException | UncheckedIOException | IllegalArgumentException e) {
-            // A link that resolves nowhere, a folder the walk cannot read, or an unparsable path is a rejection.
-            log.debug("An overwritten project folder is rejected: {}", e.getClass().getSimpleName());
-            throw new BadRequestException("file.path.invalid.message");
+        }
+
+        // V1: one change, which must name a place in the project folder that no link leads out of
+        private void requireContained(String prefix, FileItem change) {
+            var name = change.getData().getName();
+            if (!name.startsWith(prefix)) {
+                throw new WriteRefused();
+            }
+            var boundary = destination.boundary();
+            try {
+                var target = boundary.resolve(name.substring(prefix.length())).normalize();
+                var reached = change.getStream() == null ? target.resolve("..").normalize() : target;
+                if (!target.startsWith(boundary) || !realPathOf(reached).startsWith(boundary)) {
+                    throw new WriteRefused();
+                }
+            } catch (IOException | IllegalArgumentException e) {
+                // A dangling link, or a name the local file system cannot represent, is a refusal.
+                throw new WriteRefused();
+            }
+        }
+    }
+
+    // V1: a write refused while the repository takes an upload, told apart from a failure of the repository's own
+    private static final class WriteRefused extends RuntimeException {
+        private final BadRequestException refusal;
+
+        private WriteRefused() {
+            this(new BadRequestException("file.path.invalid.message"));
+        }
+
+        private WriteRefused(BadRequestException refusal) {
+            super(refusal);
+            this.refusal = refusal;
         }
     }
 
@@ -436,17 +549,10 @@ public class ProjectCreationService {
         if (files.length == 0) {
             throw new NotFoundException("project.template.not-found.message");
         }
-        // V1: contain the new project folder inside the design repository root. A rejection releases the template
-        // files here, because the upload that would release them never runs.
-        try {
-            requireContainedProjectFolder(repository, projectName, path);
-        } catch (BadRequestException e) {
-            for (var file : files) {
-                file.destroy();
-            }
-            throw e;
-        }
-        return createFromFiles(repository, projectName, path, new ArrayList<>(List.of(files)), comment,
+        // V1: the template files are checked and uploaded as uploaded files are, with the folder resolved only once
+        var templateFiles = new ArrayList<>(List.of(files));
+        var destination = requireContainedUpload(repository, projectName, path, templateFiles);
+        return upload(repository, destination, projectName, path, templateFiles, comment,
                 "rules/Models.xlsx", "rules/Algorithms.xlsx", "Models", "Algorithms", tags);
     }
 
@@ -476,25 +582,44 @@ public class ProjectCreationService {
                                     String algorithmsModuleName, Map<String, String> tags) {
         var repositoryId = repository.getId();
         requireCreatePermission(repositoryId);
-        // V1: a rejected path or name never reaches the upload, so the files it would have released are released here
+        // V1: contain the new project folder, and every write of the upload, inside the design repository folder
+        var destination = requireContainedUpload(repository, projectName, path, files);
+        return upload(repository, destination, projectName, path, files, comment, modelsPath, algorithmsPath,
+                modelsModuleName, algorithmsModuleName, tags);
+    }
+
+    // V1: a rejected path or name never reaches the upload, so the files it would have released are released here
+    private @Nullable Destination requireContainedUpload(Repository repository, String projectName, String path,
+                                                         List<ProjectFile> files) {
         try {
             requireNoControlCharacters(path, projectName);
-            // V1: contain the new project folder inside the design repository root
-            requireContainedProjectFolder(repository, projectName, path);
-            // V1: an overwrite writes through the existing project folder, so none of its links may lead out of it
-            requireContainedOverwrite(repository, projectName, path);
+            return requireContainedProjectFolder(repository, projectName, path);
         } catch (BadRequestException e) {
             files.forEach(ProjectFile::destroy);
             throw e;
         }
+    }
+
+    // V1: uploads through the write check of the resolved folder; a write it refuses is a 400, never a conflict
+    private FileData upload(Repository repository, @Nullable Destination destination, String projectName,
+                            String path, List<ProjectFile> files, String comment, String modelsPath,
+                            String algorithmsPath, String modelsModuleName, String algorithmsModuleName,
+                            Map<String, String> tags) {
+        var target = destination == null ? repository : containedWrites(repository, destination);
         try {
-            var created = new ProjectUploader(repository, files, projectName, StringUtils.trimToEmpty(path),
+            var created = new ProjectUploader(target, files, projectName, StringUtils.trimToEmpty(path),
                     getUserWorkspace(), aclServiceProvider.getDesignRepoAclService(), comment, zipFilter,
                     zipCharsetDetector, modelsPath, algorithmsPath, modelsModuleName, algorithmsModuleName,
                     tags != null ? tags : Map.of(), this::registerExtensibleTags,
                     () -> awaitProjectVisibility(repository)).uploadProject();
             return created.getFileData();
         } catch (ProjectException e) {
+            // The creation reports a refused write as the cause of its own failure, however deep the repository put it.
+            for (Throwable cause = e.getCause(); cause != null; cause = cause.getCause()) {
+                if (cause instanceof WriteRefused refused) {
+                    throw refused.refusal;
+                }
+            }
             throw new ConflictException("project.create.failed.message");
         }
     }
@@ -701,9 +826,8 @@ public class ProjectCreationService {
      * <p>Every rejection is a 400 {@code file.path.invalid.message}, raised before anything is read from the
      * source or written to the target, so it is never mapped to a copy conflict.
      *
-     * <p>The check is private to this class: each V1 surface guards its own inputs, and no component is
-     * shared with the file, workspace or upload surfaces. This departs from the Minimal Change Rule's clause
-     * to isolate new code in dedicated files, which the V1 instruction overrides.
+     * <p>Like each V1 path surface, this class keeps its own copy of the check instead of sharing a component with
+     * the file, workspace or upload surfaces.
      */
     private static void requireContainedSource(AProject sourceCopy) {
         var repository = sourceCopy.getRepository();
@@ -716,7 +840,6 @@ public class ProjectCreationService {
             var anchorReal = realPathOf(root.toAbsolutePath()).normalize();
             var boundary = anchorReal.resolve(sourceCopy.getRealPath().replaceAll("^/+|/+$", "")).normalize();
             if (!boundary.startsWith(anchorReal) || !realPathOf(boundary).startsWith(boundary)) {
-                log.debug("A source project folder resolves outside its place in the repository.");
                 throw new BadRequestException("file.path.invalid.message");
             }
             if (!sourceCopy.isFolder()) {
@@ -730,13 +853,11 @@ public class ProjectCreationService {
                         ? boundary.resolve(name.substring(prefix.length())).normalize()
                         : null;
                 if (target == null || !target.startsWith(boundary) || !realPathOf(target).startsWith(boundary)) {
-                    log.debug("A file of the source project resolves outside the project folder.");
                     throw new BadRequestException("file.path.invalid.message");
                 }
             }
         } catch (IOException | IllegalArgumentException e) {
             // IllegalArgumentException covers InvalidPathException; IOException covers a link that resolves nowhere.
-            log.debug("A source project is rejected: {}", e.getClass().getSimpleName());
             throw new BadRequestException("file.path.invalid.message");
         }
     }

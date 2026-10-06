@@ -21,7 +21,10 @@ import static org.mockito.Mockito.withSettings;
 import java.io.Closeable;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.FileSystemException;
 import java.nio.file.Files;
+import java.nio.file.InvalidPathException;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
@@ -37,6 +40,9 @@ import org.junit.jupiter.api.condition.OS;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
+import org.junitpioneer.jupiter.StdErr;
+import org.junitpioneer.jupiter.StdIo;
+import org.junitpioneer.jupiter.StdOut;
 import org.mockito.Mockito;
 import org.springframework.security.authentication.TestingAuthenticationToken;
 import org.springframework.security.core.context.SecurityContextHolder;
@@ -90,6 +96,10 @@ import org.openl.util.IOUtils;
  * <p>The closed-project and repository mounts are also built over a {@code repo-file} repository
  * instantiated from its settings, as the application instantiates it, so behind
  * {@code PathCheckedRepository}.
+ *
+ * <p>A check that fails closed rejects or omits the path and writes nothing: the tests capture standard
+ * output and standard error, where the unit-test logging binding writes, and assert that a rejected
+ * input carrying a generated credential-shaped value leaves no output and no trace of that value.
  *
  * <p>The tests call API that exists only with the fix, so they are coverage of it, not evidence that
  * the finding reproduces. Only the cases that create links are disabled on Windows.
@@ -157,6 +167,42 @@ class FileRootContainmentTest {
 
         boolean contains(String projectRelative) {
             return root.contains(prefix + projectRelative);
+        }
+    }
+
+    // V1: the captured output up to a point, so a check reads only what the containment calls after it write
+    /**
+     * The lengths of standard output and standard error captured by {@link StdIo} when the mark is taken.
+     * Building the fixtures may write to them, for example when the mocking library initializes; only the
+     * containment calls made after the mark are held to writing nothing.
+     *
+     * @param out       the captured standard output
+     * @param err       the captured standard error, where the unit-test logging binding writes every level
+     * @param outLength the length of the captured standard output when the mark is taken
+     * @param errLength the length of the captured standard error when the mark is taken
+     */
+    private record Mark(StdOut out, StdErr err, int outLength, int errLength) {
+
+        static Mark of(StdOut out, StdErr err) {
+            return new Mark(out, err, out.capturedString().length(), err.capturedString().length());
+        }
+
+        /**
+         * Asserts that nothing was written to standard output or standard error since the mark, and that no
+         * output captured during the test holds any of the values. The messages never repeat the output, so a
+         * failure does not copy a rejected value into the test report either.
+         */
+        void assertNothingWrittenAndNothingLeaked(String... values) {
+            var capturedOut = out.capturedString();
+            var capturedErr = err.capturedString();
+            assertTrue(capturedOut.substring(outLength).isEmpty(),
+                    "A containment check that fails closed writes nothing to standard output");
+            assertTrue(capturedErr.substring(errLength).isEmpty(),
+                    "A containment check that fails closed writes nothing to standard error");
+            for (var value : values) {
+                assertFalse(capturedOut.contains(value) || capturedErr.contains(value),
+                        "No captured output may hold a rejected value");
+            }
         }
     }
 
@@ -848,6 +894,116 @@ class FileRootContainmentTest {
     }
 
     // ---------------------------------------------------------------------------------------------
+    // V1: a containment step that fails closed writes nothing, so a rejected path never reaches the output
+    // ---------------------------------------------------------------------------------------------
+
+    // V1: an input that cannot be parsed is rejected without any output
+    @Test
+    @StdIo
+    void resolvesInsideRejectsAnUnparsableInputWithoutOutput(StdOut out, StdErr err) throws IOException {
+        var boundary = boundary();
+        var credential = credentialLike();
+        var input = "sub/" + credential + "\u0000.txt";
+        assertThrows(InvalidPathException.class, () -> boundary.resolve(input), "Fixture: the input cannot be parsed");
+        var mark = Mark.of(out, err);
+
+        assertFalse(FileRoot.resolvesInside(boundary, input), "An input holding a NUL byte");
+
+        mark.assertNothingWrittenAndNothingLeaked(input, credential);
+    }
+
+    // V1: a dangling link is rejected without any output
+    @Test
+    @StdIo
+    @DisabledOnOs(OS.WINDOWS)
+    void resolvesInsideRejectsADanglingLinkWithoutOutput(StdOut out, StdErr err) throws IOException {
+        var boundary = boundary();
+        var credential = credentialLike();
+        var link = Files.createSymbolicLink(boundary.resolve(credential), tmp.resolve("outside/missing"));
+        assertThrows(NoSuchFileException.class, () -> link.toRealPath(), "Fixture: the link cannot be resolved");
+        var input = credential + "/x.txt";
+        var mark = Mark.of(out, err);
+
+        assertFalse(FileRoot.resolvesInside(boundary, credential), "A dangling link");
+        assertFalse(FileRoot.resolvesInside(boundary, input), "A new file under a dangling link");
+
+        mark.assertNothingWrittenAndNothingLeaked(link.toString(), input, credential);
+    }
+
+    // V1: a link loop is rejected without any output
+    @Test
+    @StdIo
+    @DisabledOnOs(OS.WINDOWS)
+    void resolvesInsideRejectsALinkLoopWithoutOutput(StdOut out, StdErr err) throws IOException {
+        var boundary = boundary();
+        var credential = credentialLike();
+        var first = boundary.resolve(credential + "-1");
+        var second = boundary.resolve(credential + "-2");
+        Files.createSymbolicLink(first, second);
+        Files.createSymbolicLink(second, first);
+        assertThrows(FileSystemException.class, () -> first.toRealPath(), "Fixture: the loop cannot be resolved");
+        var input = first.getFileName() + "/x.txt";
+        var mark = Mark.of(out, err);
+
+        assertFalse(FileRoot.resolvesInside(boundary, input), "A path through a link loop");
+
+        mark.assertNothingWrittenAndNothingLeaked(first.toString(), input, credential);
+    }
+
+    // V1: a path that cannot be parsed fails the own-path check without any output
+    @Test
+    @StdIo
+    void atOwnPathRejectsAnUnparsablePathWithoutOutput(StdOut out, StdErr err) throws IOException {
+        var root = layOutProjects(tmp.resolve("own")).toRealPath();
+        var credential = credentialLike();
+        var relative = "P1/" + credential + "\u0000.txt";
+        assertThrows(InvalidPathException.class, () -> root.resolve(relative), "Fixture: the path cannot be parsed");
+        var mark = Mark.of(out, err);
+
+        assertFalse(FileRoot.atOwnPath(root, relative), "A path holding a NUL byte");
+
+        mark.assertNothingWrittenAndNothingLeaked(relative, credential);
+    }
+
+    // V1: a configured root that cannot be resolved keeps its lexical location without any output
+    @Test
+    @StdIo
+    @DisabledOnOs(OS.WINDOWS)
+    void localRootKeepsTheLexicalLocationOfADanglingRootWithoutOutput(StdOut out, StdErr err) throws IOException {
+        var credential = credentialLike();
+        var dangling = Files.createSymbolicLink(tmp.resolve(credential), tmp.resolve("outside/missing"));
+        assertThrows(NoSuchFileException.class, () -> dangling.toRealPath(), "Fixture: the root cannot be resolved");
+        var repository = secured(fileRepository(dangling));
+        var root = repoMount(repository);
+        var mark = Mark.of(out, err);
+
+        assertEquals(Optional.of(dangling.toAbsolutePath().normalize()), FileRoot.localRoot(repository),
+                "An unresolvable root keeps its lexical location");
+        assertFalse(root.contains("P1/x.txt"), "A path under a dangling root");
+
+        mark.assertNothingWrittenAndNothingLeaked(dangling.toString(), credential);
+    }
+
+    // V1: a project path that cannot be parsed makes the mount reject every path without any output
+    @Test
+    @StdIo
+    void projectMountFailsClosedOnAnUnparsableProjectPathWithoutOutput(StdOut out, StdErr err) throws IOException {
+        var design = layOutProjects(tmp.resolve("design-flat"));
+        var credential = credentialLike();
+        var realPath = "P1/" + credential + "\u0000";
+        var project = stubbedClosedProject(secured(fileRepository(design)), realPath);
+        var root = projectMount(project);
+        var mark = Mark.of(out, err);
+
+        assertFalse(root.contains("rules.xml"), "An unparsable project path must reject every path");
+        assertFalse(root.contains(""), "An unparsable project path must reject the project folder too");
+
+        mark.assertNothingWrittenAndNothingLeaked(realPath, credential);
+        // The failure is remembered: the boundary is not resolved again.
+        verify(project, times(1)).getRealPath();
+    }
+
+    // ---------------------------------------------------------------------------------------------
     // Mount fixtures
     // ---------------------------------------------------------------------------------------------
 
@@ -1143,6 +1299,11 @@ class FileRootContainmentTest {
 
     private static String marker() {
         return RandomStringUtils.secure().nextAlphanumeric(24);
+    }
+
+    // V1: a credential-shaped value generated per test, carried by the inputs the containment checks reject
+    private static String credentialLike() {
+        return "token_" + RandomStringUtils.secure().nextAlphanumeric(40);
     }
 
     private static void write(Path file, String content) throws IOException {

@@ -40,7 +40,8 @@ import org.openl.util.StringUtils;
 public class JWTValidator implements AuthorizationChecker {
 
     private static final String BEARER = "Bearer ";
-    private static final List<String> PUBLIC_ADMIN_PREFIXES = List.of("/admin/healthcheck/", "/admin/info/", "/admin/config/");
+    private static final List<String> PUBLIC_ADMIN_PREFIXES =
+            List.of("/admin/healthcheck/", "/admin/info/", "/admin/config/");
     // V2: the longest part of a JWT ID that is logged.
     private static final int MAX_LOGGED_JWT_ID_LENGTH = 128;
 
@@ -85,7 +86,8 @@ public class JWTValidator implements AuthorizationChecker {
     @Override
     public boolean authorize(HttpServletRequest httpRequest) {
         var pathInfo = httpRequest.getPathInfo();
-        // V2: only the health-check, info and config admin paths are public; any other /admin/ path, OpenAPI documents included, needs a JWT.
+        // V2: only the health-check, info and config admin paths are public; any other /admin/ path,
+        // OpenAPI documents included, needs a JWT.
         if (pathInfo.startsWith("/admin/")) {
             if (PUBLIC_ADMIN_PREFIXES.stream().anyMatch(pathInfo::startsWith)) {
                 return true;
@@ -108,12 +110,18 @@ public class JWTValidator implements AuthorizationChecker {
         try {
             //  Validate the JWT and process it to the Claims
             var jwtClaims = jwtConsumer.processToClaims(credentials.substring(BEARER.length()));
-            // V2: the JWT ID is issuer-chosen text, so it is logged escaped and capped.
-            log.info("Authorized for JWT ID={}", loggableJwtId(jwtClaims.getJwtId()));
+            // V2: the JWT ID is read at every log level, so the authorization outcome never depends on the level.
+            var jwtId = jwtClaims.getJwtId();
+            // V2: the JWT ID is issuer-chosen text, so it is logged escaped and capped, and formatted only at INFO.
+            if (log.isInfoEnabled()) {
+                log.info("Authorized for JWT ID={}", loggableJwtId(jwtId));
+            }
         } catch (InvalidJwtException e) {
-            // V2: log only the jose4j error codes; the exception text carries the rejected token or its claims.
-            var errorCodes = e.getErrorDetails().stream().map(ErrorCodeValidator.Error::getErrorCode).toList();
-            log.warn("JWT rejected, jose4j error codes {}.", errorCodes);
+            // V2: only at WARN, log only the jose4j error codes; the exception text carries the token or its claims.
+            if (log.isWarnEnabled()) {
+                var errorCodes = e.getErrorDetails().stream().map(ErrorCodeValidator.Error::getErrorCode).toList();
+                log.warn("JWT rejected, jose4j error codes {}.", errorCodes);
+            }
             return false;
         } catch (Exception e) {
             // V2: log only the exception class; its message can quote the token or one of its claims.

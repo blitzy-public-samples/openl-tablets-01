@@ -934,6 +934,30 @@ class ZipProjectSaveStrategyTest {
         assertTrue(Files.isSymbolicLink(ghost), "The dangling link is left as it was");
     }
 
+    // V1-D: a Unix symlink entry to outside and an entry below it, saved into the flat secured file repository
+    @Test
+    @DisabledOnOs(OS.WINDOWS)
+    void saveIntoAConfiguredFileRepositoryStoresASymlinkEntryAsARegularFileAndNothingBelowIt() throws IOException {
+        var root = Files.createDirectories(tmp.resolve("repo"));
+        var repository = secured(configuredFileRepository(root));
+        // A flat repository stores the project under its name and ignores the path.
+        var model = new CreateUpdateProjectModel("design", "jsmith", "SecV1D12", "SecV1D12", "c", false);
+
+        assertSymlinkEntrySavedAsARegularFile(repository, model, root, root.resolve(BASE_RULES_LOCATION + "SecV1D12"));
+    }
+
+    // V1-D: the same symlink-entry archive, saved into the mapped secured file repository at its internal path
+    @Test
+    @DisabledOnOs(OS.WINDOWS)
+    void saveIntoAMappedConfiguredFileRepositoryStoresASymlinkEntryAsARegularFileAndNothingBelowIt()
+            throws IOException {
+        var root = Files.createDirectories(tmp.resolve("repo"));
+        var repository = secured(mapped(configuredFileRepository(root)));
+        var model = new CreateUpdateProjectModel("design", "jsmith", "SecV1D12", "catalog/SecV1D12", "c", false);
+
+        assertSymlinkEntrySavedAsARegularFile(repository, model, root, root.resolve("catalog/SecV1D12"));
+    }
+
     // V1-D: overwrite through an existing link (0.6.2.4 D15), with raw archive entry names that reach the link
     @Test
     @DisabledOnOs(OS.WINDOWS)
@@ -1242,6 +1266,89 @@ class ZipProjectSaveStrategyTest {
             }
         }
         return target;
+    }
+
+    // V1-D: an archive holding the descriptor, a Unix symlink entry 'link' to the target, then 'link/passwd'
+    private static Path symlinkEntryArchive(Path target,
+                                            byte[] descriptor,
+                                            Path linkTarget,
+                                            byte[] belowLink) throws IOException {
+        try (var zos = new ZipArchiveOutputStream(Files.newOutputStream(target))) {
+            zos.putArchiveEntry(new ZipArchiveEntry(ProjectDescriptor.FILE_NAME));
+            zos.write(descriptor);
+            zos.closeArchiveEntry();
+            // A symlink entry holds the path it points to as its content.
+            var link = new ZipArchiveEntry("link");
+            link.setUnixMode(0120777);
+            zos.putArchiveEntry(link);
+            zos.write(linkTarget.toString().getBytes(StandardCharsets.UTF_8));
+            zos.closeArchiveEntry();
+            zos.putArchiveEntry(new ZipArchiveEntry("link/passwd"));
+            zos.write(belowLink);
+            zos.closeArchiveEntry();
+        }
+        return target;
+    }
+
+    // V1-D: saves a symlink-entry archive whose link names an outside folder; no link and no outside effect follow
+    /**
+     * Saves an archive holding a Unix symlink entry {@code link} to a folder outside the repository root and an
+     * entry {@code link/passwd} below it, then checks that no link is created, that nothing beside the repository
+     * root changes, that the repository holds nothing outside the project folder and that the outside folder's
+     * content never reaches it. The symlink entry is stored as a regular file holding the link target as text, and
+     * the entry below it is not stored.
+     */
+    private void assertSymlinkEntrySavedAsARegularFile(Repository repository,
+                                                       CreateUpdateProjectModel model,
+                                                       Path root,
+                                                       Path project) throws IOException {
+        var canary = Files.createDirectories(tmp.resolve("outside"));
+        var secret = new byte[32];
+        ThreadLocalRandom.current().nextBytes(secret);
+        Files.write(canary.resolve("passwd"), secret);
+        var belowLink = new byte[16];
+        ThreadLocalRandom.current().nextBytes(belowLink);
+        var descriptor = "<project><name>SecV1D12</name></project>".getBytes(StandardCharsets.UTF_8);
+        var archive = symlinkEntryArchive(tmp.resolve("d12-symlink.zip"), descriptor, canary, belowLink);
+        var canaryBefore = snapshot(canary);
+        var besideBefore = besideRoot(root);
+
+        assertNotNull(saveStrategy.save(repository, model, archive), "The saved project folder is reported");
+
+        List<Path> saved;
+        try (var paths = Files.walk(root)) {
+            saved = paths.toList();
+        }
+        assertEquals(List.of(), saved.stream().filter(Files::isSymbolicLink).toList(),
+                "No symbolic link is created under the repository root");
+        assertEquals(canaryBefore, snapshot(canary), "The folder the symlink entry names is left as it was");
+        assertEquals(besideBefore, besideRoot(root), "Nothing is written beside the repository root");
+        assertEquals(List.of(), saved.stream().filter(p -> !p.startsWith(project) && !project.startsWith(p)).toList(),
+                "The repository holds no entry outside the project folder");
+        assertTrue(Files.isRegularFile(project.resolve(ProjectDescriptor.FILE_NAME), LinkOption.NOFOLLOW_LINKS),
+                "The descriptor is saved in the project folder");
+        var link = project.resolve("link");
+        assertTrue(Files.isRegularFile(link, LinkOption.NOFOLLOW_LINKS),
+                "The symlink entry is stored as a regular file");
+        assertArrayEquals(canary.toString().getBytes(StandardCharsets.UTF_8), Files.readAllBytes(link),
+                "The stored file holds the link target as text");
+        assertFalse(Files.exists(project.resolve("link/passwd"), LinkOption.NOFOLLOW_LINKS),
+                "The entry below the symlink entry is not stored");
+        // ISO-8859-1 maps each byte to one char, so a byte sequence is found as a substring.
+        var secretText = new String(secret, StandardCharsets.ISO_8859_1);
+        for (var file : saved) {
+            if (Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS)) {
+                assertFalse(new String(Files.readAllBytes(file), StandardCharsets.ISO_8859_1).contains(secretText),
+                        "The content of the folder the link names never reaches " + root.relativize(file));
+            }
+        }
+    }
+
+    // V1-D: the snapshot of the test folder without the repository root, so a write beside the root is seen
+    private Map<String, String> besideRoot(Path root) throws IOException {
+        var beside = new TreeMap<>(snapshot(tmp));
+        beside.keySet().removeIf(name -> tmp.resolve(name).startsWith(root));
+        return beside;
     }
 
     // V1-D: each entry below a folder, links never followed: its kind, a link's target, a file's size and SHA-256

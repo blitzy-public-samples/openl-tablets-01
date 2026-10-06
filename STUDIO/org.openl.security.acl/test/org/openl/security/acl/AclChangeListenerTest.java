@@ -46,6 +46,7 @@ import org.springframework.security.acls.model.MutableAcl;
 import org.springframework.security.acls.model.Sid;
 import org.springframework.security.authentication.TestingAuthenticationToken;
 import org.springframework.security.core.context.SecurityContextHolder;
+import org.springframework.transaction.SavepointManager;
 import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.TransactionSystemException;
 import org.springframework.transaction.support.AbstractPlatformTransactionManager;
@@ -60,7 +61,8 @@ import org.openl.security.acl.repository.Root;
 /**
  * An ACL change reaches the security audit trail as one notice per completed transaction, whatever the number of
  * mutations it made, and the notice never carries an identifier: only an outcome, a count, mutator names and
- * code-defined type names. A rollback, a commit in an unknown state or a failed mutation is a failure. A mutation
+ * code-defined type names. A rollback, a commit in an unknown state or a failed mutation is a failure. Mutations
+ * undone by a rollback to a savepoint are not counted, and a transaction left with none is not reported. A mutation
  * made outside any transaction is reported at once. A listener that throws never breaks the ACL write.
  *
  * <p>The transactions run on a stub transaction manager with Spring's real synchronization lifecycle, and the
@@ -299,6 +301,129 @@ class AclChangeListenerTest {
 
         assertEquals(List.of(new Notification(FAILURE, 1, List.of("deleteSid"), List.of("sid")),
             new Notification(SUCCESS, 1, List.of("createAcl"), List.of("ProjectArtifact"))), listener.notifications);
+    }
+
+    @Test
+    void mutationsOfARolledBackNestedTransactionAreNotCounted() {
+        transaction().executeWithoutResult(outer -> {
+            AclChangeListener.record(listener, "createAcl", PROJECT_TYPE, false);
+            nestedTransaction().executeWithoutResult(nested -> {
+                AclChangeListener.record(listener, "deleteSid", "sid", true);
+                AclChangeListener.record(listener, "updateAcl", ROOT_TYPE, false);
+                assertEquals(1, TransactionSynchronizationManager.getSynchronizations().size());
+                nested.setRollbackOnly();
+            });
+        });
+
+        assertEquals(List.of(new Notification(SUCCESS, 1, List.of("createAcl"), List.of("ProjectArtifact"))),
+            listener.notifications,
+            "Neither the rolled-back mutations nor their failure reach the committed event");
+        assertEquals(1, transactionManager.savepoints);
+        assertEquals(1, transactionManager.savepointRollbacks);
+        assertEquals(1, transactionManager.commits);
+        assertEquals(0, transactionManager.rollbacks);
+    }
+
+    @Test
+    void committedNestedTransactionJoinsTheOuterEvent() {
+        transaction().executeWithoutResult(outer -> {
+            AclChangeListener.record(listener, "createAcl", PROJECT_TYPE, false);
+            nestedTransaction().executeWithoutResult(
+                nested -> AclChangeListener.record(listener, "updateAcl", ROOT_TYPE, false));
+        });
+
+        assertEquals(List.of(new Notification(SUCCESS,
+            2,
+            List.of("createAcl", "updateAcl"),
+            List.of("ProjectArtifact", "Root"))), listener.notifications);
+        assertEquals(1, transactionManager.savepoints);
+        assertEquals(0, transactionManager.savepointRollbacks);
+        assertEquals(1, transactionManager.savepointReleases);
+        assertEquals(1, transactionManager.commits);
+    }
+
+    @Test
+    void nestedRollbackBeforeTheFirstOuterMutationKeepsOnlyTheLaterOnes() {
+        transaction().executeWithoutResult(outer -> {
+            nestedTransaction().executeWithoutResult(nested -> {
+                // The accumulator is registered here, after the savepoint, so it holds no snapshot of it.
+                AclChangeListener.record(listener, "deleteAcl", ROOT_TYPE, true);
+                nested.setRollbackOnly();
+            });
+            AclChangeListener.record(listener, "createAcl", PROJECT_TYPE, false);
+        });
+
+        assertEquals(List.of(new Notification(SUCCESS, 1, List.of("createAcl"), List.of("ProjectArtifact"))),
+            listener.notifications);
+        assertEquals(1, transactionManager.savepointRollbacks);
+        assertEquals(1, transactionManager.commits);
+    }
+
+    @Test
+    void transactionWhoseMutationsWereAllRolledBackToASavepointIsNotReported() {
+        transaction().executeWithoutResult(outer -> nestedTransaction().executeWithoutResult(nested -> {
+            AclChangeListener.record(listener, "updateSid", "sid", false);
+            nested.setRollbackOnly();
+        }));
+        transaction().executeWithoutResult(outer -> {
+            var savepoint = outer.createSavepoint();
+            AclChangeListener.record(listener, "deleteSid", "sid", false);
+            nestedTransaction().executeWithoutResult(nested -> {
+                AclChangeListener.record(listener, "deleteAcl", ROOT_TYPE, false);
+                nested.setRollbackOnly();
+            });
+            outer.rollbackToSavepoint(savepoint);
+            outer.setRollbackOnly();
+        });
+
+        assertTrue(listener.notifications.isEmpty(), "A committed and a rolled-back transaction, neither reported");
+        assertEquals(1, transactionManager.commits);
+        assertEquals(1, transactionManager.rollbacks);
+        assertTrue(TransactionSynchronizationManager.getResourceMap().isEmpty());
+        assertFalse(TransactionSynchronizationManager.isSynchronizationActive());
+    }
+
+    @Test
+    void mutationsRolledBackToAProgrammaticSavepointAreNotCounted() {
+        transaction().executeWithoutResult(status -> {
+            AclChangeListener.record(listener, "createAcl", PROJECT_TYPE, false);
+            var savepoint = status.createSavepoint();
+            AclChangeListener.record(listener, "updateAcl", ROOT_TYPE, true);
+            status.rollbackToSavepoint(savepoint);
+            AclChangeListener.record(listener, "deleteAcl", ROOT_TYPE, false);
+            AclChangeListener.record(listener, "deleteSid", "sid", false);
+            status.rollbackToSavepoint(savepoint);
+            status.releaseSavepoint(savepoint);
+            AclChangeListener.record(listener, "updateSid", "sid", false);
+        });
+
+        assertEquals(List.of(new Notification(SUCCESS,
+            2,
+            List.of("createAcl", "updateSid"),
+            List.of("ProjectArtifact", "sid"))), listener.notifications);
+        assertEquals(1, transactionManager.savepoints);
+        assertEquals(2, transactionManager.savepointRollbacks);
+        assertEquals(1, transactionManager.savepointReleases);
+        assertEquals(1, transactionManager.commits);
+    }
+
+    @Test
+    void outerRollbackAfterANestedRollbackReportsOnlyTheSurvivingMutations() {
+        transaction().executeWithoutResult(outer -> {
+            AclChangeListener.record(listener, "createAcl", ROOT_TYPE, false);
+            AclChangeListener.record(listener, "updateAcl", ROOT_TYPE, false);
+            nestedTransaction().executeWithoutResult(nested -> {
+                AclChangeListener.record(listener, "deleteSid", "sid", false);
+                nested.setRollbackOnly();
+            });
+            outer.setRollbackOnly();
+        });
+
+        assertEquals(List.of(new Notification(FAILURE, 2, List.of("createAcl", "updateAcl"), List.of("Root"))),
+            listener.notifications);
+        assertEquals(1, transactionManager.savepointRollbacks);
+        assertEquals(1, transactionManager.rollbacks);
+        assertEquals(0, transactionManager.commits);
     }
 
     @Test
@@ -601,6 +726,22 @@ class AclChangeListenerTest {
     }
 
     @Test
+    void failedDeleteSidLookupIsReportedAndRethrown() throws SQLException {
+        var dataSource = unavailableDataSource();
+        var unavailable = assertThrows(SQLException.class, dataSource::getConnection);
+        var service = service(dataSource, true);
+
+        var thrown = assertThrows(CannotGetJdbcConnectionException.class,
+            () -> service.deleteSid(new PrincipalSid(generated())));
+
+        assertSame(unavailable, thrown.getCause(), "The lookup's own failure is rethrown, not a new one");
+        assertEquals(List.of(new Notification(FAILURE, 1, List.of("deleteSid"), List.of("sid"))),
+            listener.notifications);
+        verify(aclCache, never()).clearCache();
+        assertNoGeneratedValueReported();
+    }
+
+    @Test
     @SuppressWarnings("NullAway") // passes null on purpose to check that the failure is unchanged without a listener
     void serviceWithoutListenerRethrowsTheSameFailures() throws SQLException {
         var service = service(unavailableDataSource(), false);
@@ -614,6 +755,7 @@ class AclChangeListenerTest {
             () -> service.deleteAcl(new ObjectIdentityImpl(ProjectArtifact.class, generated()), true));
         assertThrows(CannotGetJdbcConnectionException.class,
             () -> service.updateSid(new PrincipalSid(generated()), generated()));
+        assertThrows(CannotGetJdbcConnectionException.class, () -> service.deleteSid(new PrincipalSid(generated())));
 
         assertTrue(listener.notifications.isEmpty());
     }
@@ -636,6 +778,12 @@ class AclChangeListenerTest {
     private TransactionTemplate requiresNewTransaction() {
         var template = new TransactionTemplate(transactionManager);
         template.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+        return template;
+    }
+
+    private TransactionTemplate nestedTransaction() {
+        var template = new TransactionTemplate(transactionManager);
+        template.setPropagationBehavior(TransactionDefinition.PROPAGATION_NESTED);
         return template;
     }
 
@@ -759,8 +907,10 @@ class AclChangeListenerTest {
 
     /**
      * A transaction manager without a resource: it counts what Spring asks of it, so the real synchronization
-     * lifecycle (init, suspend, resume, completion) runs around the code under test. Suspension is supported, so
-     * {@code PROPAGATION_REQUIRES_NEW} works.
+     * lifecycle (init, suspend, resume, savepoint, savepoint rollback, completion) runs around the code under test.
+     * Suspension is supported, so {@code PROPAGATION_REQUIRES_NEW} works. Nesting is allowed and every transaction
+     * object is a savepoint manager, so {@code PROPAGATION_NESTED} runs on savepoints, and the savepoints of a
+     * transaction status can be created and rolled back to programmatically.
      */
     private static final class NoOpTransactionManager extends AbstractPlatformTransactionManager {
 
@@ -769,11 +919,18 @@ class AclChangeListenerTest {
         private int rollbacks;
         private int suspends;
         private int resumes;
+        private int savepoints;
+        private int savepointRollbacks;
+        private int savepointReleases;
         private boolean failCommit;
+
+        private NoOpTransactionManager() {
+            setNestedTransactionAllowed(true);
+        }
 
         @Override
         protected Object doGetTransaction() {
-            return new Object();
+            return new NoOpTransaction();
         }
 
         @Override
@@ -813,6 +970,28 @@ class AclChangeListenerTest {
         @Override
         protected void doCleanupAfterCompletion(Object transaction) {
             depth--;
+        }
+
+        /**
+         * The transaction object. A savepoint is opaque to Spring, so a fresh object stands for each one.
+         */
+        private final class NoOpTransaction implements SavepointManager {
+
+            @Override
+            public Object createSavepoint() {
+                savepoints++;
+                return new Object();
+            }
+
+            @Override
+            public void rollbackToSavepoint(Object savepoint) {
+                savepointRollbacks++;
+            }
+
+            @Override
+            public void releaseSavepoint(Object savepoint) {
+                savepointReleases++;
+            }
         }
     }
 }

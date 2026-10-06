@@ -1,7 +1,11 @@
 package org.openl.itest;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.OutputStream;
+import java.io.PrintStream;
 import java.io.UncheckedIOException;
+import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -35,6 +39,8 @@ class WebStudioTest {
         // V7: start the server directly so the generated credentials reach localEnv
         var env = new HashMap<String, String>();
         Throwable failure = null;
+        // V7: copy both console streams while the server runs, so its output is searched for the credentials too
+        var capture = ConsoleCapture.start();
         try (var client = JettyServer.get().start()) {
             putCredentials(client);
             env.putAll(client.localEnv);
@@ -43,7 +49,8 @@ class WebStudioTest {
             failure = e;
             throw e;
         } finally {
-            assertNoSecretSaved(env, failure);
+            // V7: the server has stopped here, so the capture is complete when it is restored and searched
+            assertNoSecretLeaked(env, capture, failure);
         }
     }
 
@@ -101,6 +108,41 @@ class WebStudioTest {
         }
     }
 
+    // V7: restore the console, then search the captured output and the saved responses for the credentials
+    static void assertNoSecretLeaked(Map<String, String> env, ConsoleCapture capture, @Nullable Throwable failure)
+            throws IOException {
+        capture.close();
+        try {
+            assertNoSecretPrinted(env, capture, failure);
+        } catch (AssertionError printed) {
+            // Thrown only without a primary failure, so the saved-response result is attached to it.
+            assertNoSecretSaved(env, printed);
+            throw printed;
+        }
+        assertNoSecretSaved(env, failure);
+    }
+
+    // V7: fail if a generated credential reached System.out or System.err while the capture was installed
+    static void assertNoSecretPrinted(Map<String, String> env, ConsoleCapture capture, @Nullable Throwable failure) {
+        var out = capture.out();
+        var err = capture.err();
+        var leaked = new TreeSet<String>();
+        for (var entry : env.entrySet()) {
+            var secret = secretOf(entry.getKey(), entry.getValue());
+            if (secret != null && (out.contains(secret) || err.contains(secret))) {
+                leaked.add(entry.getKey());
+            }
+        }
+        if (!leaked.isEmpty()) {
+            // Names only: neither a value nor the captured output is reported.
+            var error = new AssertionError("Generated credentials were printed to the console: " + leaked);
+            if (failure == null) {
+                throw error;
+            }
+            failure.addSuppressed(error);
+        }
+    }
+
     /**
      * The secret part of a generated or derived credential variable, or {@code null} for a variable that holds none.
      * Basic header values, the administrator's included, are reduced to their Base64 credential.
@@ -144,5 +186,81 @@ class WebStudioTest {
     private static String basic(String user, String password) {
         return BASIC_PREFIX + Base64.getEncoder()
                 .encodeToString((user + ":" + password).getBytes(StandardCharsets.UTF_8));
+    }
+
+    // V7: a tee rather than a redirect, so the harness output stays on the console while a copy is kept to search
+    static final class ConsoleCapture implements AutoCloseable {
+        private final PrintStream originalOut = System.out;
+        private final PrintStream originalErr = System.err;
+        private final ByteArrayOutputStream copyOut = new ByteArrayOutputStream();
+        private final ByteArrayOutputStream copyErr = new ByteArrayOutputStream();
+        private final PrintStream teeOut = tee(originalOut, copyOut);
+        private final PrintStream teeErr = tee(originalErr, copyErr);
+        private boolean closed;
+
+        private ConsoleCapture() {
+        }
+
+        /** Puts copying streams in place of the current {@code System.out} and {@code System.err}. */
+        static ConsoleCapture start() {
+            var capture = new ConsoleCapture();
+            System.setOut(capture.teeOut);
+            System.setErr(capture.teeErr);
+            return capture;
+        }
+
+        /** What was written to {@code System.out} while the capture was installed. */
+        Captured out() {
+            return new Captured(copyOut.toString(originalOut.charset()), originalOut.charset());
+        }
+
+        /** What was written to {@code System.err} while the capture was installed. */
+        Captured err() {
+            return new Captured(copyErr.toString(originalErr.charset()), originalErr.charset());
+        }
+
+        /** Flushes the copying streams and puts the original ones back; a later call does nothing. */
+        @Override
+        public void close() {
+            if (closed) {
+                return;
+            }
+            closed = true;
+            teeOut.flush();
+            teeErr.flush();
+            System.setOut(originalOut);
+            System.setErr(originalErr);
+        }
+
+        /** A stream that encodes as {@code console} does and writes every byte both to it and to {@code copy}. */
+        private static PrintStream tee(PrintStream console, ByteArrayOutputStream copy) {
+            return new PrintStream(new OutputStream() {
+                @Override
+                public void write(int b) {
+                    console.write(b);
+                    copy.write(b);
+                }
+
+                @Override
+                public void write(byte[] b, int off, int len) {
+                    console.write(b, off, len);
+                    copy.write(b, off, len);
+                }
+
+                @Override
+                public void flush() {
+                    console.flush();
+                }
+            }, true, console.charset());
+        }
+
+        /** Text copied from one console stream, decoded with the charset that stream encodes with. */
+        record Captured(String text, Charset charset) {
+
+            /** Whether the text holds {@code needle} as the stream encoded it, an unmappable character included. */
+            boolean contains(String needle) {
+                return text.contains(new String(needle.getBytes(charset), charset));
+            }
+        }
     }
 }

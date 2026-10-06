@@ -28,7 +28,8 @@ import org.springframework.web.context.request.ServletRequestAttributes;
  * </pre>
  *
  * <p>Successful authentications, token lifecycle events and committed ACL changes are written at INFO.
- * Failed authentications, lockouts and ACL changes whose transaction did not commit are written at WARN.
+ * Failed authentications, lockouts and ACL changes whose transaction did not commit are written at WARN. When the
+ * level an event is written at is disabled, nothing of the event is read and no line is built.
  *
  * <p>A line carries nothing but user names, the public identifiers of personal access tokens, counts,
  * code-defined names (events, authentication token classes, ACL mutators and object types), addresses and
@@ -105,6 +106,9 @@ public final class SecurityAuditLog {
      */
     public static void authSuccess(@Nullable Authentication attempt, @Nullable Authentication result) {
         try {
+            if (!enabled(false)) {
+                return;
+            }
             var user = result == null ? null : result.getName();
             var line = line(AUTH_SUCCESS, SUCCESS, user, address(attempt, result));
             write(false, pair(line, "method", method(attempt)).toString());
@@ -144,6 +148,9 @@ public final class SecurityAuditLog {
                                    @Nullable String user,
                                    @Nullable String publicId) {
         try {
+            if (!enabled(false)) {
+                return;
+            }
             var line = line(AUTH_SUCCESS, SUCCESS, user, remoteAddress(request));
             write(false, pair(pair(line, "method", PAT_METHOD), "pat", publicId).toString());
         } catch (RuntimeException e) {
@@ -160,6 +167,9 @@ public final class SecurityAuditLog {
      */
     public static void authFailure(@Nullable HttpServletRequest request, @Nullable String publicIdOrNull) {
         try {
+            if (!enabled(true)) {
+                return;
+            }
             var line = pair(line(AUTH_FAILURE, FAILURE, null, remoteAddress(request)), "method", PAT_METHOD);
             if (publicIdOrNull != null) {
                 pair(line, "pat", publicIdOrNull);
@@ -202,12 +212,16 @@ public final class SecurityAuditLog {
                                  @Nullable SortedSet<String> kinds,
                                  @Nullable SortedSet<String> objectTypes) {
         try {
+            var warn = !SUCCESS.equals(outcome);
+            if (!enabled(warn)) {
+                return;
+            }
             var authentication = SecurityContextHolder.getContext().getAuthentication();
             var line = line(ACL_CHANGE, outcome, userOf(authentication, SYSTEM_USER), address(authentication))
                     .append(" changes=").append(changes)
                     .append(" kinds=").append(join(kinds))
                     .append(" objectTypes=").append(join(objectTypes));
-            write(!SUCCESS.equals(outcome), line.toString());
+            write(warn, line.toString());
         } catch (RuntimeException e) {
             writeFailed(ACL_CHANGE, e);
         }
@@ -216,6 +230,9 @@ public final class SecurityAuditLog {
     /** Writes a failed or locked authentication attempt. */
     private static void rejectedAttempt(String event, String outcome, @Nullable Authentication attempt) {
         try {
+            if (!enabled(true)) {
+                return;
+            }
             // Only a user name and password attempt is named: the name of any other attempt, such as a bearer,
             // SAML or token attempt, can be the credential itself.
             var user = attempt instanceof UsernamePasswordAuthenticationToken ? attempt.getName() : null;
@@ -229,6 +246,9 @@ public final class SecurityAuditLog {
     /** Writes the creation or revocation of a personal access token by the current user. */
     private static void tokenLifecycle(String event, @Nullable String publicId) {
         try {
+            if (!enabled(false)) {
+                return;
+            }
             var authentication = SecurityContextHolder.getContext().getAuthentication();
             var line = line(event, SUCCESS, userOf(authentication, NONE), address(authentication));
             write(false, pair(line, "pat", publicId).toString());
@@ -373,6 +393,14 @@ public final class SecurityAuditLog {
         return Character.isISOControl(c)
                 || UNSAFE_CHARACTERS.indexOf(c) >= 0
                 || (token && (Character.isWhitespace(c) || Character.isSpaceChar(c) || c == '='));
+    }
+
+    /**
+     * Whether the level an event is written at, WARN or INFO, is enabled. Each event checks it before it reads any
+     * value or builds its line.
+     */
+    private static boolean enabled(boolean warn) {
+        return warn ? LOG.isWarnEnabled() : LOG.isInfoEnabled();
     }
 
     /** Writes one finished line, at WARN or at INFO. */

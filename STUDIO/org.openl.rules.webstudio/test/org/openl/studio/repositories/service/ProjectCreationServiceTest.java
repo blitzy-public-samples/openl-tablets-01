@@ -3,11 +3,14 @@ package org.openl.studio.repositories.service;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyIterable;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -24,9 +27,12 @@ import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.Closeable;
 import java.io.IOException;
 import java.io.InputStream;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Proxy;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
@@ -44,6 +50,8 @@ import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
 import org.apache.commons.lang3.RandomStringUtils;
+import org.eclipse.jgit.api.Git;
+import org.eclipse.jgit.lib.FileMode;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -67,6 +75,7 @@ import org.openl.rules.project.abstraction.AProject;
 import org.openl.rules.project.abstraction.LockEngine;
 import org.openl.rules.project.abstraction.ProjectStatus;
 import org.openl.rules.project.abstraction.RulesProject;
+import org.openl.rules.project.impl.local.DummyLockEngine;
 import org.openl.rules.project.impl.local.LocalRepository;
 import org.openl.rules.project.impl.local.MetainfoRegistry;
 import org.openl.rules.project.impl.local.ProjectMetainfo;
@@ -79,6 +88,8 @@ import org.openl.rules.repository.api.FeaturesBuilder;
 import org.openl.rules.repository.api.FileData;
 import org.openl.rules.repository.api.FileItem;
 import org.openl.rules.repository.api.Repository;
+import org.openl.rules.repository.api.RepositoryDelegate;
+import org.openl.rules.repository.api.UserInfo;
 import org.openl.rules.repository.file.FileSystemRepository;
 import org.openl.rules.rest.acl.service.AclProjectsHelper;
 import org.openl.rules.webstudio.util.NameChecker;
@@ -139,6 +150,11 @@ class ProjectCreationServiceTest {
     private final List<Closeable> closeables = new ArrayList<>();
     // V1-C: the constructor arguments of every upload the uploader mock stood in for, in construction order
     private final List<List<?>> uploads = new ArrayList<>();
+    // V1-C: the content of every file a real upload took, so its release can be checked
+    private final List<TrackedStream> streams = new ArrayList<>();
+    // V1-C: the branch a configured Git repository works on, and a branch an upload targets while it is not checked out
+    private static final String BASE_BRANCH = "master";
+    private static final String TARGET_BRANCH = "v1target";
 
     @BeforeEach
     void setUp() {
@@ -1032,12 +1048,16 @@ class ProjectCreationServiceTest {
         DANGLING
     }
 
-    // V1-C: payloads rejected as received on every backend (0.6.2.3 C1, C2, C4-C10, C13)
+    // V1-C: payloads rejected on every backend (C1-C10, C13); the path is checked as the route checks it, so a back
+    // slash reads as a separator (C5), and a leading slash (C3), given or read from a back slash, is never dropped
     private static Stream<Arguments> rejectedPayloads() {
         return onEveryRoute(new Backend[]{Backend.MOCK, Backend.FLAT},
                 new String[]{"C1", "NewProject", "../../outside"},
                 new String[]{"C2", "NewProject", "./p"},
                 new String[]{"C2", "NewProject", "a/./p"},
+                new String[]{"C3", "NewProject", "/etc/p"},
+                new String[]{"C3", "NewProject", "/a/b"},
+                new String[]{"C3", "NewProject", "\\a\\b"},
                 new String[]{"C4", "NewProject", "C:\\p"},
                 new String[]{"C4", "C:p", null},
                 new String[]{"C5", "NewProject", "a\\..\\..\\p"},
@@ -1059,12 +1079,10 @@ class ProjectCreationServiceTest {
                 new String[]{"C11", "NewProject", "NUL"});
     }
 
-    // V1-C: payloads the write itself keeps inside the repository: the leading slash is dropped (C3), and look-alike
-    // separators are ordinary characters (C14), so each is either rejected or written inside (0.6.2.3). The service
-    // checks the path as the write places it; the REST route keeps its existing 400 for C3 through @PathConstraint.
+    // V1-C: look-alike separators are ordinary characters (C14), so the write keeps each payload inside the repository:
+    // it is either rejected or written inside
     private static Stream<Arguments> containedPayloads() {
         return onEveryRoute(Backend.values(),
-                new String[]{"C3", "NewProject", "/etc/p"},
                 new String[]{"C14", "..\u2215p", null},
                 new String[]{"C14", "\uFF0E\uFF0E", null})
                 .filter(ProjectCreationServiceTest::isWritable);
@@ -1096,6 +1114,32 @@ class ProjectCreationServiceTest {
         return Stream.of(Backend.FLAT, Backend.MAPPED)
                 .flatMap(backend -> Stream.of(null, "a/b").map(path -> Arguments.of(backend, path)));
     }
+
+    // V1-C: a parent path with back slashes, as given and with blanks around it, which the route validates as 'a/b'
+    private static Stream<String> backSlashPaths() {
+        return Stream.of("a\\b", " a\\b ");
+    }
+
+    // V1-C: new projects on the template and file routes of every backend whose parent path has back slashes
+    private static Stream<Arguments> backSlashNewProjects() {
+        return Stream.of(Route.TEMPLATE, Route.FILES)
+                .flatMap(route -> Stream.of(Backend.values())
+                        .flatMap(backend -> backSlashPaths().map(path -> Arguments.of(route, backend, path))));
+    }
+
+    // V1-C: every real upload to both file layouts whose parent path has back slashes
+    private static Stream<Arguments> backSlashUploads() {
+        return Stream.of(Upload.values())
+                .flatMap(upload -> Stream.of(Backend.FLAT, Backend.MAPPED)
+                        .flatMap(backend -> backSlashPaths().map(path -> Arguments.of(upload, backend, path))));
+    }
+
+    // V1-C: copy targets on both file layouts whose parent path has back slashes
+    private static Stream<Arguments> backSlashCopyTargets() {
+        return Stream.of(Backend.FLAT, Backend.MAPPED)
+                .flatMap(backend -> backSlashPaths().map(path -> Arguments.of(backend, path)));
+    }
+
 
     // V1-C: each payload row {id, name, path} on every route and each given backend
     private static Stream<Arguments> onEveryRoute(Backend[] backends, String[]... rows) {
@@ -1153,7 +1197,7 @@ class ProjectCreationServiceTest {
         }
     }
 
-    // V1-C: a payload the write keeps inside the repository is rejected or written inside it (0.6.2.3 C3, C14)
+    // V1-C: a payload the write keeps inside the repository is rejected or written inside it (C14)
     @ParameterizedTest(name = "{0} {1} on {2}")
     @MethodSource("containedPayloads")
     void rejects_or_contains_a_payload_the_write_keeps_inside_the_repository(String row, Route route,
@@ -1254,6 +1298,8 @@ class ProjectCreationServiceTest {
         }
 
         assertUploaded(target, "NewProject", path);
+        // V1-C: a file repository is written through the write check; a backend without a local folder is not
+        assertEquals(backend != Backend.MOCK, uploadedRepository() != target, "Only a local folder is write-checked");
     }
 
     // V1-C: the check walks up from the deepest existing folder, so a repository root not created yet is accepted
@@ -1272,10 +1318,11 @@ class ProjectCreationServiceTest {
         assertFalse(Files.exists(tmp.resolve("absent"), LinkOption.NOFOLLOW_LINKS), "The check creates nothing");
     }
 
-    // V1-C: a valid copy target passes the checks on a backend without a local directory, with and without a path
+    // V1-C: a valid copy target passes the checks on a backend without a local directory, with and without a path,
+    // whose back slashes read as separators
     @ParameterizedTest
     @NullSource
-    @ValueSource(strings = {"a/b"})
+    @ValueSource(strings = {"a/b", "a\\b"})
     void copy_project_passes_a_valid_target_on_a_backend_without_a_local_directory(String path) throws IOException {
         var workspace = creatingUser();
         var repository = mock(Repository.class);
@@ -1308,6 +1355,59 @@ class ProjectCreationServiceTest {
         assertNotNull(service.copyProject(target, "NewProject", path, source, "comment", null));
 
         var copied = assertCopiedInside(backend, "NewProject", path);
+        assertEquals(Files.readString(tmp.resolve("design/DESIGN/rules/Src/src.txt")),
+                Files.readString(copied.resolve("src.txt")));
+        assertNothingOutside("repo", "design");
+    }
+
+    // V1-C: the route reads the back slashes of a parent path as separators, so the new project is accepted and handed
+    // to the upload with the path as the service passes it on, through the write check when a local folder takes it
+    @ParameterizedTest(name = "{0} on {1} with path {2}")
+    @MethodSource("backSlashNewProjects")
+    void hands_a_new_project_whose_path_has_back_slashes_to_the_upload(Route route, Backend backend, String path)
+            throws IOException {
+        creatingUser();
+        var target = target(backend);
+        var created = new FileData();
+
+        try (var ignored = uploaders(created)) {
+            assertSame(created, attempt(route, target, "NewProject", path, null));
+        }
+
+        assertUploaded(target, "NewProject", path);
+        assertEquals(backend != Backend.MOCK, uploadedRepository() != target, "Only a local folder is write-checked");
+        assertNothingOutside("repo");
+    }
+
+    // V1-C: a real upload whose parent path has back slashes lands where the route's 'a/b' places it: in folder a/b
+    // of a mapped repository, in the rules location of a flat one; nothing is written outside the repository
+    @ParameterizedTest(name = "{0} on {1} with path {2}")
+    @MethodSource("backSlashUploads")
+    void uploads_a_new_project_whose_path_has_back_slashes_where_the_route_places_it(Upload upload, Backend backend,
+                                                                                      String path) throws IOException {
+        realUploads();
+        var target = target(backend);
+
+        assertNotNull(upload(upload, target, "NewProject", path));
+
+        var project = backend == Backend.MAPPED ? "repo/a/b/NewProject" : "repo/DESIGN/rules/NewProject";
+        assertWrittenInside(tmp.resolve(project));
+        assertNothingOutside("repo");
+        assertReleased();
+    }
+
+    // V1-C: a copy whose parent path has back slashes is written where the route's 'a/b' places it
+    @ParameterizedTest(name = "{0} with path {1}")
+    @MethodSource("backSlashCopyTargets")
+    void copy_project_writes_a_copy_whose_path_has_back_slashes_where_the_route_places_it(Backend backend, String path)
+            throws IOException {
+        creatingUser();
+        var target = target(backend);
+        var source = sourceInFlatFileRepository();
+
+        assertNotNull(service.copyProject(target, "NewProject", path, source, "comment", null));
+
+        var copied = assertCopiedInside(backend, "NewProject", "a/b");
         assertEquals(Files.readString(tmp.resolve("design/DESIGN/rules/Src/src.txt")),
                 Files.readString(copied.resolve("src.txt")));
         assertNothingOutside("repo", "design");
@@ -1436,70 +1536,305 @@ class ProjectCreationServiceTest {
         GIT
     }
 
-    // V1-D: every link an existing project folder could hold, on each backend an upload writes through (0.6.2.4 D15)
-    // V1-D: each link is passed by name, so the test's signature does not expose the private LinkTarget
-    private static Stream<Arguments> linkedExistingProjects() {
-        return Stream.of(LinkTarget.values())
-                .flatMap(link -> Stream.of(OverwriteBackend.values())
-                        .map(backend -> Arguments.of(link.name(), backend)));
+    // V1-C: the uploads of the REST route, each writing rules.xml and rules/Main.xlsx into the project folder
+    enum Upload {
+        /** The bundled empty template, which brings its own descriptor. */
+        TEMPLATE,
+        /** One uploaded workbook, for which the upload generates the descriptor. */
+        FILES,
+        /** An uploaded archive, as the last uploaded file. */
+        ARCHIVE
     }
 
-    // V1-D: an upload over an existing project whose folder holds a link out of it is refused before anything is
-    // written, and the files it brought are released (0.6.2.4 D15)
-    @ParameterizedTest(name = "{0} on {1}")
-    @MethodSource("linkedExistingProjects")
-    @DisabledOnOs(OS.WINDOWS)
-    void rejects_an_upload_that_overwrites_a_project_through_a_link_its_folder_holds(String link,
-                                                                                    OverwriteBackend backend)
-            throws IOException {
-        creatingUser();
-        var target = overwriteTarget(backend);
-        var project = existingProject(backend);
-        var outside = Files.createDirectories(tmp.resolve("outside"));
-        write(outside.resolve("sentinel.txt"), marker());
-        var sibling = siblingProject(backend);
-        Files.createSymbolicLink(project.resolve("link"), switch (LinkTarget.valueOf(link)) {
-            case OUTSIDE -> outside;
-            case SIBLING -> sibling;
-            case DANGLING -> outside.resolve("missing");
-        });
-        var file = mock(ProjectFile.class);
-        var projectBefore = snapshot(project);
-        var siblingBefore = snapshot(sibling);
-        var outsideBefore = snapshot(outside);
+    // V1-C: an entry of project 'Existing' the overwrite writes through, and where a link there leads
+    enum WriteThrough {
+        /** The descriptor links to an outside file. */
+        DESCRIPTOR_TO_OUTSIDE_FILE,
+        /** The workbook folder links to an outside folder. */
+        RULES_TO_OUTSIDE,
+        /** The workbook folder links to the folder of the sibling project. */
+        RULES_TO_SIBLING,
+        /** The workbook folder links to nothing. */
+        RULES_TO_NOTHING
+    }
 
-        try (var uploaders = uploaders()) {
-            assertPathRejected(() -> overwrite(target, backend, List.of(file)));
-            assertTrue(uploaders.constructed().isEmpty(), "The upload never runs");
+    // V1-C: where the target branch holds a link the upload of new project 'Fresh' writes through
+    enum TargetLink {
+        /** The project folder itself links to an outside folder. */
+        PROJECT_FOLDER("DESIGN/rules/Fresh", false),
+        /** The rules location the project folder sits in links to an outside folder. */
+        ANCESTOR("DESIGN/rules", false),
+        /** The workbook every upload writes links to an outside file. */
+        WORKBOOK("DESIGN/rules/Fresh/rules/Main.xlsx", true);
+
+        private final String path;
+        private final boolean toFile;
+
+        TargetLink(String path, boolean toFile) {
+            this.path = path;
+            this.toFile = toFile;
         }
-
-        verify(file).destroy();
-        assertEquals(outsideBefore, snapshot(outside), "Nothing is written through the link");
-        assertEquals(siblingBefore, snapshot(sibling), "The sibling project is unchanged");
-        assertEquals(projectBefore, snapshot(project), "The existing project is left as it was");
     }
 
-    // V1-D: the walk reaches every depth of the existing folder, and a link to a regular file is refused as well
+    // V1-C: each write-through link with the template on every backend, and the descriptor link with every upload
+    private static Stream<Arguments> writesThroughLinks() {
+        return Stream.of(WriteThrough.values())
+                .flatMap(through -> Stream.of(Upload.values())
+                        .filter(upload -> through == WriteThrough.DESCRIPTOR_TO_OUTSIDE_FILE
+                                || upload == Upload.TEMPLATE)
+                        .flatMap(upload -> Stream.of(OverwriteBackend.values())
+                                .map(backend -> Arguments.of(through, upload, backend))));
+    }
+
+    // V1-C: every link of the target branch with every upload
+    private static Stream<Arguments> targetBranchLinks() {
+        return Stream.of(TargetLink.values())
+                .flatMap(link -> Stream.of(Upload.values()).map(upload -> Arguments.of(link, upload)));
+    }
+
+    // V1-C: an overwrite whose folder holds a link to an outside file that it neither writes through nor reads runs
+    // through the real upload, and the outside file stays as it was
     @ParameterizedTest
     @EnumSource(OverwriteBackend.class)
     @DisabledOnOs(OS.WINDOWS)
-    void rejects_an_upload_that_overwrites_a_project_holding_a_nested_link_to_an_outside_file(OverwriteBackend backend)
-            throws IOException {
-        creatingUser();
+    void overwrites_a_project_whose_folder_holds_an_unused_link_to_an_outside_file(OverwriteBackend backend)
+            throws Exception {
+        realUploads();
         var target = overwriteTarget(backend);
-        var project = existingProject(backend);
-        var outside = tmp.resolve("outside");
-        var secret = outside.resolve("secret.txt");
-        write(secret, marker());
-        Files.createSymbolicLink(Files.createDirectories(project.resolve("rules/deep")).resolve("leak.txt"), secret);
+        var project = uploadedProject(target, backend);
+        var outside = outsideFolder();
+        placeLink(backend, project.resolve("notes.txt"), outside.resolve("canary.txt"));
         var outsideBefore = snapshot(outside);
 
-        try (var uploaders = uploaders()) {
-            assertPathRejected(() -> overwrite(target, backend, List.of()));
-            assertTrue(uploaders.constructed().isEmpty(), "The upload never runs");
-        }
+        assertNotNull(upload(Upload.TEMPLATE, target, "Existing", overwritePath(backend)));
 
         assertEquals(outsideBefore, snapshot(outside), "Nothing is written through the link");
+        assertWrittenInside(project);
+    }
+
+    // V1-C: an overwrite that writes through a link its folder holds is refused when the repository takes the write,
+    // whatever the link leads to; nothing outside the project changes and the uploaded files are released
+    @ParameterizedTest(name = "{0} by {1} on {2}")
+    @MethodSource("writesThroughLinks")
+    @DisabledOnOs(OS.WINDOWS)
+    void refuses_an_overwrite_that_writes_through_a_link_its_folder_holds(WriteThrough through, Upload upload,
+                                                                         OverwriteBackend backend) throws Exception {
+        realUploads();
+        var target = overwriteTarget(backend);
+        var project = uploadedProject(target, backend);
+        var outside = outsideFolder();
+        var sibling = siblingProject(backend);
+        switch (through) {
+            case DESCRIPTOR_TO_OUTSIDE_FILE -> placeLink(backend, project.resolve("rules.xml"),
+                    outside.resolve("canary.txt"));
+            case RULES_TO_OUTSIDE -> placeLink(backend, project.resolve("rules"), outside);
+            case RULES_TO_SIBLING -> placeLink(backend, project.resolve("rules"), sibling);
+            case RULES_TO_NOTHING -> placeLink(backend, project.resolve("rules"), outside.resolve("missing"));
+        }
+        var outsideBefore = snapshot(outside);
+        var siblingBefore = snapshot(sibling);
+
+        assertPathRejected(() -> upload(upload, target, "Existing", overwritePath(backend)));
+
+        assertEquals(outsideBefore, snapshot(outside), "Nothing is written through the link");
+        assertEquals(siblingBefore, snapshot(sibling), "The sibling project is unchanged");
+        assertReleased();
+    }
+
+    // V1-C: links that stay inside the existing project folder do not stop the real overwrite
+    @ParameterizedTest
+    @EnumSource(OverwriteBackend.class)
+    @DisabledOnOs(OS.WINDOWS)
+    void overwrites_a_project_whose_links_stay_inside_it(OverwriteBackend backend) throws Exception {
+        realUploads();
+        var target = overwriteTarget(backend);
+        var project = uploadedProject(target, backend);
+        placeLink(backend, project.resolve("alias"), project.resolve("rules"));
+        placeLink(backend, project.resolve("self"), Path.of("."));
+        placeLink(backend, project.resolve("rules/descriptor.xml"), Path.of("../rules.xml"));
+
+        assertNotNull(upload(Upload.TEMPLATE, target, "Existing", overwritePath(backend)));
+
+        assertWrittenInside(project);
+        assertNothingOutside("repo");
+    }
+
+    // V1-C: a Git save checks out its target branch only when it writes, so a link only that branch holds is found in
+    // the tree the write goes through, while another branch is checked out; no upload writes through it
+    @ParameterizedTest(name = "{0} by {1}")
+    @MethodSource("targetBranchLinks")
+    @DisabledOnOs(OS.WINDOWS)
+    void refuses_an_upload_through_a_link_only_the_target_branch_holds(TargetLink link, Upload upload)
+            throws Exception {
+        realUploads();
+        var root = tmp.resolve("repo");
+        var repository = gitWithTargetBranch(root);
+        var outside = outsideFolder();
+        commitLink(root, TARGET_BRANCH, link.path, link.toFile ? outside.resolve("canary.txt") : outside);
+        assertCheckedOut(root, BASE_BRANCH);
+        assertFalse(Files.exists(root.resolve(link.path), LinkOption.NOFOLLOW_LINKS),
+                "Fixture: the checked-out tree holds no link");
+        var onTarget = repository.forBranch(TARGET_BRANCH);
+        var outsideBefore = snapshot(outside);
+
+        assertPathRejected(() -> upload(upload, onTarget, "Fresh", ""));
+
+        assertEquals(outsideBefore, snapshot(outside), "Nothing is written through the link of the target branch");
+        assertNull(onTarget.check("DESIGN/rules/Fresh/rules.xml"), "Nothing of the project is committed");
+        assertReleased();
+    }
+
+    // V1-C: a link only the checked-out branch holds is gone once the save checks out its clean target branch, so the
+    // upload runs and writes the project inside the repository
+    @ParameterizedTest
+    @EnumSource(Upload.class)
+    @DisabledOnOs(OS.WINDOWS)
+    void uploads_to_a_clean_target_branch_while_the_checked_out_branch_holds_a_link(Upload upload) throws Exception {
+        realUploads();
+        var root = tmp.resolve("repo");
+        var repository = gitWithTargetBranch(root);
+        var outside = outsideFolder();
+        commitLink(root, BASE_BRANCH, "DESIGN/rules/Fresh", outside);
+        assertTrue(Files.isSymbolicLink(root.resolve("DESIGN/rules/Fresh")),
+                "Fixture: the checked-out tree holds the link");
+        var onTarget = repository.forBranch(TARGET_BRANCH);
+        var outsideBefore = snapshot(outside);
+
+        assertNotNull(upload(upload, onTarget, "Fresh", ""));
+
+        assertEquals(outsideBefore, snapshot(outside), "Nothing is written outside the repository");
+        assertNotNull(onTarget.check("DESIGN/rules/Fresh/rules.xml"), "The project is committed on the target branch");
+        assertCheckedOut(root, TARGET_BRANCH);
+        assertWrittenInside(root.resolve("DESIGN/rules/Fresh"));
+    }
+
+    // V1-C: a full save of a Git repository removes what it does not carry by descending into every folder link, so
+    // an overwrite whose folder holds a folder link out of it is refused, even though nothing is written through it
+    @Test
+    @DisabledOnOs(OS.WINDOWS)
+    void refuses_a_full_git_overwrite_whose_cleanup_would_enter_a_folder_link_out_of_the_project() throws Exception {
+        realUploads();
+        var target = fullChangesetGit();
+        var project = uploadedProject(target, OverwriteBackend.GIT);
+        var outside = outsideFolder();
+        placeLink(OverwriteBackend.GIT, project.resolve("vendor"), outside);
+        var outsideBefore = snapshot(outside);
+
+        assertPathRejected(() -> upload(Upload.TEMPLATE, target, "Existing", ""));
+
+        assertEquals(outsideBefore, snapshot(outside), "Nothing outside the project is touched");
+        assertTrue(Files.isSymbolicLink(project.resolve("vendor")), "The project is left as it was");
+    }
+
+    // V1-C: the cleanup of a full Git save only removes a link to a file, a link to nothing and a folder link that
+    // stays inside the project, so an overwrite holding only such links runs
+    @Test
+    @DisabledOnOs(OS.WINDOWS)
+    void runs_a_full_git_overwrite_whose_folder_holds_only_links_its_cleanup_removes() throws Exception {
+        realUploads();
+        var target = fullChangesetGit();
+        var project = uploadedProject(target, OverwriteBackend.GIT);
+        var outside = outsideFolder();
+        placeLink(OverwriteBackend.GIT, project.resolve("notes.txt"), outside.resolve("canary.txt"));
+        placeLink(OverwriteBackend.GIT, project.resolve("ghost"), outside.resolve("missing"));
+        placeLink(OverwriteBackend.GIT, project.resolve("alias"), project.resolve("rules"));
+        var outsideBefore = snapshot(outside);
+
+        assertNotNull(upload(Upload.TEMPLATE, target, "Existing", ""));
+
+        assertEquals(outsideBefore, snapshot(outside), "Nothing outside the project is touched");
+        assertWrittenInside(project);
+    }
+
+    // V1-C: the template route resolves the new project folder once and hands it to the upload, so the rules location
+    // is read once
+    @Test
+    void resolves_the_folder_of_a_template_project_once() throws IOException {
+        var workspace = creatingUser();
+        var target = target(Backend.FLAT);
+
+        try (var ignored = uploaders()) {
+            assertNotNull(createFromTemplate(target, "NewProject", null));
+        }
+
+        assertUploaded(target, "NewProject", null);
+        verify(workspace.getDesignTimeRepository(), times(1)).getRulesLocation();
+    }
+
+    // V1-C: the write check passes every call but the changeset save on as it is, unwraps to the repository it
+    // checks, and is equal only to itself
+    @Test
+    void the_write_check_passes_other_calls_on_and_unwraps_to_its_repository() throws IOException {
+        creatingUser();
+        var target = target(Backend.FLAT);
+        try (var ignored = uploaders()) {
+            createFromFiles(target, "NewProject", null);
+        }
+        var checked = uploadedRepository();
+        var single = new FileData();
+        single.setName("DESIGN/rules/NewProject/notes.txt");
+
+        assertSame(target, ((RepositoryDelegate) checked).getOriginal());
+        assertEquals(target.getId(), checked.getId());
+        assertTrue(checked.equals(uploadedRepository()), "The write check equals itself");
+        assertFalse(checked.equals(target), "The write check is not the repository it checks");
+        assertEquals(System.identityHashCode(checked), checked.hashCode());
+        assertEquals(target.toString(), checked.toString());
+        assertNotNull(checked.save(single, new ByteArrayInputStream(marker().getBytes(StandardCharsets.UTF_8))));
+        assertTrue(Files.isRegularFile(tmp.resolve("repo/DESIGN/rules/NewProject/notes.txt")),
+                "A single-file save is passed on as it is");
+    }
+
+    // V1-C: a changeset with a change named outside the new project folder, by another folder or by climbing out of
+    // it, is refused before anything is written
+    @ParameterizedTest
+    @ValueSource(strings = {"DESIGN/rules/Other/rules.xml", "DESIGN/rules/NewProject/../Other/rules.xml"})
+    void the_write_check_refuses_a_change_named_outside_the_project_folder(String name) throws IOException {
+        creatingUser();
+        var target = target(Backend.FLAT);
+        try (var ignored = uploaders()) {
+            createFromFiles(target, "NewProject", null);
+        }
+        var checked = uploadedRepository();
+        var stray = new FileItem(name, tracked(descriptor("Other")));
+
+        var e = assertThrows(RuntimeException.class,
+                () -> checked.save(folderData("DESIGN/rules/NewProject"), List.of(stray), ChangesetType.FULL));
+
+        var refusal = assertInstanceOf(BadRequestException.class, e.getCause());
+        assertEquals("openl.error.400.file.path.invalid.message", refusal.getErrorCode());
+        assertFalse(Files.exists(tmp.resolve("repo/DESIGN/rules/Other"), LinkOption.NOFOLLOW_LINKS),
+                "Nothing is written");
+    }
+
+    // V1-C: a changeset that arrives as one pass is checked change by change as a file repository takes it; a
+    // refused change has its stream closed and nothing is written through the link
+    @Test
+    @DisabledOnOs(OS.WINDOWS)
+    void the_write_check_checks_a_one_pass_changeset_as_a_file_repository_takes_it() throws IOException {
+        creatingUser();
+        var target = target(Backend.FLAT);
+        try (var ignored = uploaders()) {
+            createFromFiles(target, "NewProject", null);
+        }
+        var checked = uploadedRepository();
+        var outside = outsideFolder();
+        var project = tmp.resolve("repo/DESIGN/rules/NewProject");
+        replaceWithLink(project.resolve("linked"), outside);
+        var outsideBefore = snapshot(outside);
+        var inside = new FileItem("DESIGN/rules/NewProject/rules.xml", tracked(descriptor("NewProject")));
+        var through = new FileItem("DESIGN/rules/NewProject/linked/evil.xlsx", tracked(marker()));
+        var folder = folderData("DESIGN/rules/NewProject");
+
+        assertNotNull(checked.save(folder, () -> List.of(inside).iterator(), ChangesetType.DIFF));
+        var e = assertThrows(RuntimeException.class,
+                () -> checked.save(folder, () -> List.of(through).iterator(), ChangesetType.DIFF));
+
+        assertInstanceOf(BadRequestException.class, e.getCause());
+        assertTrue(Files.isRegularFile(project.resolve("rules.xml"), LinkOption.NOFOLLOW_LINKS),
+                "An accepted change is written inside");
+        assertEquals(outsideBefore, snapshot(outside), "Nothing is written through the link");
+        assertTrue(((TrackedStream) through.getStream()).closed, "The refused change has its stream closed");
     }
 
     // V1-D: links that stay inside the existing project folder do not stop the overwrite
@@ -1558,7 +1893,7 @@ class ProjectCreationServiceTest {
         assertUploaded(target, "Existing", "");
     }
 
-    // V1-D: a new project has no folder to walk yet, so its upload runs and the check creates nothing
+    // V1-D: a new project has no folder yet, so its upload runs and the check creates nothing
     @ParameterizedTest
     @EnumSource(OverwriteBackend.class)
     void hands_a_new_project_without_a_folder_yet_to_the_upload(OverwriteBackend backend) throws IOException {
@@ -1576,26 +1911,6 @@ class ProjectCreationServiceTest {
         assertFalse(Files.exists(folder, LinkOption.NOFOLLOW_LINKS), "The check creates nothing");
     }
 
-    // V1-D: a Git repository writes through its working tree, so a project folder there that is a link is refused
-    @Test
-    @DisabledOnOs(OS.WINDOWS)
-    void rejects_an_upload_into_a_git_project_folder_that_is_a_link() throws IOException {
-        creatingUser();
-        var target = overwriteTarget(OverwriteBackend.GIT);
-        var outside = Files.createDirectories(tmp.resolve("outside"));
-        write(outside.resolve("sentinel.txt"), marker());
-        var rules = Files.createDirectories(tmp.resolve("repo/DESIGN/rules"));
-        Files.createSymbolicLink(rules.resolve("Existing"), outside);
-        var outsideBefore = snapshot(outside);
-
-        try (var uploaders = uploaders()) {
-            assertPathRejected(() -> overwrite(target, OverwriteBackend.GIT, List.of()));
-            assertTrue(uploaders.constructed().isEmpty(), "The upload never runs");
-        }
-
-        assertEquals(outsideBefore, snapshot(outside), "Nothing is written through the link");
-    }
-
     // V1-D: a rules location that climbs out of a Git working tree places the project folder outside it
     @Test
     void rejects_an_upload_into_a_git_repository_whose_rules_location_climbs_out_of_it() throws IOException {
@@ -1610,10 +1925,11 @@ class ProjectCreationServiceTest {
         assertNothingOutside("repo");
     }
 
-    // V1-D: a repository that is not wrapped is asked for its working tree directly
+    // V1-C: a repository that is not wrapped is asked for its working tree directly, and the upload writes through the
+    // write check; the checked-out tree is not inspected before the save checks out the branch it writes
     @Test
     @DisabledOnOs(OS.WINDOWS)
-    void rejects_an_overwrite_through_a_link_in_the_working_tree_of_an_unwrapped_repository() throws IOException {
+    void hands_an_upload_into_the_working_tree_of_an_unwrapped_repository_to_the_write_check() throws IOException {
         creatingUser();
         var root = Files.createDirectories(tmp.resolve("repo"));
         var outside = Files.createDirectories(tmp.resolve("outside"));
@@ -1624,11 +1940,12 @@ class ProjectCreationServiceTest {
         when(target.supports()).thenReturn(new FeaturesBuilder(target).setVersions(false).setFolders(true).build());
         when(((LocalWorkingTree) target).getLocalWorkingTree()).thenReturn(root);
 
-        try (var uploaders = uploaders()) {
-            assertPathRejected(() -> overwrite(target, OverwriteBackend.GIT, List.of()));
-            assertTrue(uploaders.constructed().isEmpty(), "The upload never runs");
+        try (var ignored = uploaders()) {
+            assertNotNull(overwrite(target, OverwriteBackend.GIT, List.of()));
         }
 
+        assertUploaded(target, "Existing", "");
+        assertInstanceOf(RepositoryDelegate.class, uploadedRepository(), "The upload writes through the write check");
         verifyNothingSaved(target);
         assertEquals(Map.of(), snapshot(outside), "Nothing is written through the link");
     }
@@ -1646,29 +1963,11 @@ class ProjectCreationServiceTest {
         }
 
         assertUploaded(target, "Existing", "");
+        // V1-C: nothing is written through a local folder, so the upload gets the repository itself
+        assertSame(target, uploadedRepository(), "No write check wraps a backend without a local folder");
         // The rules location is never looked up, so no folder was resolved and no file system call was made.
         verify(workspace, never()).getDesignTimeRepository();
         verifyNothingSaved(target);
-    }
-
-    // V1-D: the template route creates through the same upload, so it is refused the same way
-    @ParameterizedTest
-    @EnumSource(value = OverwriteBackend.class, names = {"FLAT", "GIT"})
-    @DisabledOnOs(OS.WINDOWS)
-    void rejects_a_template_that_overwrites_a_project_through_a_link_its_folder_holds(OverwriteBackend backend)
-            throws IOException {
-        creatingUser();
-        var target = overwriteTarget(backend);
-        var project = existingProject(backend);
-        var outside = Files.createDirectories(tmp.resolve("outside"));
-        Files.createSymbolicLink(project.resolve("link"), outside);
-
-        try (var uploaders = uploaders()) {
-            assertPathRejected(() -> createFromTemplate(target, "Existing", overwritePath(backend)));
-            assertTrue(uploaders.constructed().isEmpty(), "The upload never runs");
-        }
-
-        assertEquals(Map.of(), snapshot(outside), "Nothing is written through the link");
     }
 
     // V1-D: uploads files over project 'Existing' of the backend, as the REST route does with overwrite=true
@@ -1729,6 +2028,221 @@ class ProjectCreationServiceTest {
         when(repository.supports())
                 .thenReturn(new FeaturesBuilder(repository).setVersions(false).setFolders(true).build());
         return repository;
+    }
+
+    // V1-C: a user whose real upload runs: a commit identity, the rules location DESIGN/rules/, project locks that are
+    // always granted, a project index that publishes at once, granted ACLs, every file accepted and archives read as
+    // UTF-8
+    private void realUploads() {
+        grantCreate();
+        var acl = aclServiceProvider.getDesignRepoAclService();
+        when(acl.createAcl(any(), anyList(), anyBoolean())).thenReturn(true);
+        var user = mock(WorkspaceUser.class);
+        when(user.getUserName()).thenReturn("jsmith");
+        when(user.getUserInfo()).thenReturn(new UserInfo("jsmith"));
+        var workspace = workspaceWithRulesLocation("DESIGN/rules/");
+        when(workspace.getUser()).thenReturn(user);
+        when(workspace.getProjectsLockEngine()).thenReturn(new DummyLockEngine());
+        when(workspace.getDesignTimeRepository().refreshBranch(anyString(), anyString()))
+                .thenReturn(CompletableFuture.completedFuture(null));
+        var charsets = mock(ZipCharsetDetector.class);
+        when(charsets.detectCharset(any(ZipCharsetDetector.ZipSource.class))).thenReturn(StandardCharsets.UTF_8);
+        service = new TestProjectCreationService(aclProjectsHelper, aclServiceProvider, tagAssignmentValidator,
+                path -> true, charsets, "", workspace);
+    }
+
+    // V1-C: uploads project 'name' the given way through the real upload, as the REST route does; files and archives
+    // carry generated content, and their streams are recorded so their release can be checked
+    private FileData upload(Upload upload, Repository target, String name, String path) throws IOException {
+        return switch (upload) {
+            case TEMPLATE -> createFromTemplate(target, name, path);
+            case FILES -> service.createFromFiles(target, name, path,
+                    new ArrayList<>(List.of(new ProjectFile("Main.xlsx", tracked(marker())))), "comment",
+                    "rules/Models.xlsx", "rules/Algorithms.xlsx", "Models", "Algorithms", Map.of());
+            case ARCHIVE -> service.createFromFiles(target, name, path,
+                    new ArrayList<>(List.of(new ProjectFile("project.zip", tracked(archive(name))))), "comment",
+                    "rules/Models.xlsx", "rules/Algorithms.xlsx", "Models", "Algorithms", Map.of());
+        };
+    }
+
+    // V1-C: an archive holding a descriptor of the project and the workbook rules/Main.xlsx, both generated
+    private static byte[] archive(String name) throws IOException {
+        var bytes = new ByteArrayOutputStream();
+        try (var zip = new ZipOutputStream(bytes)) {
+            zip.putNextEntry(new ZipEntry("rules.xml"));
+            zip.write(descriptor(name).getBytes(StandardCharsets.UTF_8));
+            zip.closeEntry();
+            zip.putNextEntry(new ZipEntry("rules/Main.xlsx"));
+            zip.write(marker().getBytes(StandardCharsets.UTF_8));
+            zip.closeEntry();
+        }
+        return bytes.toByteArray();
+    }
+
+    // V1-C: project 'Existing' as a first real upload of the template leaves it on the backend, so a Git repository
+    // tracks it; returns its folder in tmp/repo
+    private Path uploadedProject(Repository target, OverwriteBackend backend) throws IOException {
+        assertNotNull(upload(Upload.TEMPLATE, target, "Existing", overwritePath(backend)),
+                "Fixture: the project is created");
+        var project = projectsFolder(backend).resolve("Existing");
+        assertTrue(Files.isRegularFile(project.resolve("rules.xml"), LinkOption.NOFOLLOW_LINKS),
+                "Fixture: the project folder holds its descriptor");
+        return project;
+    }
+
+    // V1-C: a folder outside the repositories holding a file with generated content, so a write through a link is seen
+    private Path outsideFolder() throws IOException {
+        var outside = Files.createDirectories(tmp.resolve("outside"));
+        write(outside.resolve("canary.txt"), marker());
+        return outside;
+    }
+
+    // V1-C: a link in place of whatever tmp/repo holds there; a Git repository has it committed on the branch its
+    // working tree holds, as a push from elsewhere brings it
+    private void placeLink(OverwriteBackend backend, Path link, Path target) throws Exception {
+        if (backend == OverwriteBackend.GIT) {
+            var root = tmp.resolve("repo");
+            commitLink(root, checkedOutBranch(root), root.relativize(link).toString(), target);
+        } else {
+            replaceWithLink(link, target);
+        }
+    }
+
+    // V1-C: a link in place of the file or folder at that place
+    private static void replaceWithLink(Path link, Path target) throws IOException {
+        if (Files.isDirectory(link, LinkOption.NOFOLLOW_LINKS)) {
+            deleteTree(link);
+        } else {
+            Files.deleteIfExists(link);
+        }
+        Files.createDirectories(link.getParent());
+        Files.createSymbolicLink(link, target);
+    }
+
+    // V1-C: a link committed on the given branch in place of what that branch holds there; the branch checked out
+    // before is checked out again, so the working tree holds the link only when it holds the given branch
+    private static void commitLink(Path workingTree, String branch, String linkPath, Path target) throws Exception {
+        try (var git = Git.open(workingTree.toFile())) {
+            var checkedOut = git.getRepository().getBranch();
+            git.checkout().setName(branch).call();
+            git.rm().setCached(true).addFilepattern(linkPath).call();
+            replaceWithLink(workingTree.resolve(linkPath), target);
+            git.add().addFilepattern(linkPath).call();
+            git.commit()
+                    .setMessage("Track a link")
+                    .setAuthor("Test", "test@example.org")
+                    .setCommitter("Test", "test@example.org")
+                    .setSign(false)
+                    .call();
+            assertEquals(FileMode.SYMLINK, git.getRepository().readDirCache().getEntry(linkPath).getFileMode(),
+                    "Fixture: the link is tracked as a link");
+            git.checkout().setName(checkedOut).call();
+        }
+    }
+
+    // V1-C: the branch the working tree holds, which is the one the last save or checkout left
+    private static String checkedOutBranch(Path workingTree) throws IOException {
+        try (var git = Git.open(workingTree.toFile())) {
+            return git.getRepository().getBranch();
+        }
+    }
+
+    // V1-C: the working tree holds the given branch
+    private static void assertCheckedOut(Path workingTree, String branch) throws IOException {
+        assertEquals(branch, checkedOutBranch(workingTree), "The branch the working tree holds");
+    }
+
+    // V1-C: a configured, secured Git repository in the folder whose base branch holds one seed commit and is checked
+    // out, with the target branch created from it
+    private BranchRepository gitWithTargetBranch(Path root) throws IOException {
+        var repository = (BranchRepository) secured(configuredRepository("repo-git", root));
+        assertNotNull(repository.save(folderData("seed.txt"),
+                new ByteArrayInputStream(marker().getBytes(StandardCharsets.UTF_8))), "Fixture: the base is seeded");
+        repository.createRepositoryBranch(TARGET_BRANCH, null);
+        assertCheckedOut(root, BASE_BRANCH);
+        return repository;
+    }
+
+    // V1-C: a configured, secured Git repository in tmp/repo that reports no unique file ids, so each upload saves it a
+    // full changeset
+    private Repository fullChangesetGit() {
+        return secured(withoutUniqueFileIds(configuredRepository("repo-git", tmp.resolve("repo"))));
+    }
+
+    // V1-C: the repository as it reports itself without unique file ids, unwrapping to it as the application's
+    // wrappers do
+    private static Repository withoutUniqueFileIds(Repository repository) {
+        return (Repository) Proxy.newProxyInstance(ProjectCreationServiceTest.class.getClassLoader(),
+                new Class<?>[]{BranchRepository.class, RepositoryDelegate.class},
+                (proxy, method, args) -> {
+                    if ("supports".equals(method.getName())) {
+                        var features = repository.supports();
+                        return new FeaturesBuilder(repository)
+                                .setVersions(features.versions())
+                                .setFolders(features.folders())
+                                .setSearchable(features.searchable())
+                                .setSupportsUniqueFileId(false)
+                                .build();
+                    }
+                    if (method.getDeclaringClass() == RepositoryDelegate.class) {
+                        return repository;
+                    }
+                    try {
+                        return method.invoke(repository, args);
+                    } catch (InvocationTargetException e) {
+                        throw e.getTargetException();
+                    }
+                });
+    }
+
+    // V1-C: the data a save names a folder or a file by, with a commit identity
+    private static FileData folderData(String name) {
+        var data = new FileData();
+        data.setName(name);
+        data.setAuthor(new UserInfo("jsmith"));
+        data.setComment("comment");
+        return data;
+    }
+
+    // V1-C: the descriptor and the workbook the upload writes sit in the project folder, inside the repository root
+    private void assertWrittenInside(Path project) throws IOException {
+        for (var file : List.of("rules.xml", "rules/Main.xlsx")) {
+            assertTrue(Files.isRegularFile(project.resolve(file), LinkOption.NOFOLLOW_LINKS), file + " is written");
+        }
+        assertTrue(project.toRealPath().startsWith(tmp.resolve("repo").toRealPath()),
+                "The project stays inside the repository");
+    }
+
+    // V1-C: every uploaded stream a real upload took was released
+    private void assertReleased() {
+        assertTrue(streams.stream().allMatch(stream -> stream.closed), "The uploaded files are released");
+    }
+
+    // V1-C: an uploaded file's content, recorded so its release can be checked
+    private TrackedStream tracked(String content) {
+        return tracked(content.getBytes(StandardCharsets.UTF_8));
+    }
+
+    // V1-C: an uploaded file's content, recorded so its release can be checked
+    private TrackedStream tracked(byte[] content) {
+        var stream = new TrackedStream(content);
+        streams.add(stream);
+        return stream;
+    }
+
+    // V1-C: the content of an uploaded file, recording whether the upload released it
+    private static final class TrackedStream extends ByteArrayInputStream {
+        private boolean closed;
+
+        private TrackedStream(byte[] content) {
+            super(content);
+        }
+
+        @Override
+        public void close() throws IOException {
+            closed = true;
+            super.close();
+        }
     }
 
 
@@ -1846,13 +2360,23 @@ class ProjectCreationServiceTest {
         });
     }
 
-    // V1-C: exactly one upload ran, for the target, the name as given and the path as the service passes it on
+    // V1-C: exactly one upload ran, for the target, the name as given and the path as the service passes it on; a
+    // target written through a local folder is handed over behind the write check, which unwraps to the target
     private void assertUploaded(Repository target, String name, String path) {
-        assertEquals(1, uploads.size(), "The upload runs once");
+        var uploaded = uploadedRepository();
+        if (uploaded != target) {
+            var checked = assertInstanceOf(RepositoryDelegate.class, uploaded, "The upload writes through the check");
+            assertSame(target, checked.getOriginal(), "The write check unwraps to the target");
+        }
         var arguments = uploads.get(0);
-        assertSame(target, arguments.get(0));
         assertEquals(name, arguments.get(2));
         assertEquals(StringUtils.trimToEmpty(path), arguments.get(3));
+    }
+
+    // V1-C: the repository the one upload that ran was handed
+    private Repository uploadedRepository() {
+        assertEquals(1, uploads.size(), "The upload runs once");
+        return (Repository) uploads.get(0).get(0);
     }
 
     // V1-C: the copy sits in its physical folder in tmp/repo, which resolves inside the real repository root

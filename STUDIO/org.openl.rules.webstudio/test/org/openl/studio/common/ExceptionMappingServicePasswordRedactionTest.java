@@ -3,7 +3,6 @@ package org.openl.studio.common;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.reset;
@@ -26,6 +25,7 @@ import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.context.MessageSource;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.test.context.junit.jupiter.SpringJUnitConfig;
+import org.springframework.validation.BeanPropertyBindingResult;
 
 import org.openl.rules.rest.model.ChangePasswordModel;
 import org.openl.rules.rest.model.InternalPasswordModel;
@@ -44,15 +44,19 @@ import org.openl.studio.common.validation.BeanValidationProvider;
 import org.openl.studio.security.CurrentUserInfo;
 
 /**
- * V7: a rejected password, or a model carrying one, never reaches the serialized 400 body, while the field, code and
- * message of the error stay as they are. Every password is generated per run, and no assertion message carries a
- * password or a serialized body.
+ * V7: a rejected password, or a model carrying one, never reaches the serialized 400 body, while the field and message
+ * of the error stay as they are. A local password policy violation carries its message key as its code, and every
+ * other error keeps its code. Every password is generated per run, and no assertion message carries a password or a
+ * serialized body.
  */
 @SpringJUnitConfig(classes = MockConfiguration.class)
 class ExceptionMappingServicePasswordRedactionTest {
 
     private static final String PASSWORD_MIN_LENGTH = "The password must contain at least 12 characters.";
     private static final String PASSWORD_MAX_BYTES = "The password must not exceed 72 bytes in UTF-8.";
+    /** A local password policy violation carries its message key, as is, as the field error code. */
+    private static final String PASSWORD_MIN_LENGTH_CODE = "openl.constraints.password.min-length.message";
+    private static final String PASSWORD_MAX_BYTES_CODE = "openl.constraints.password.max-bytes.message";
     private static final String INVALID_EMAIL = "wrongEmail";
 
     /** Serializes as plain Jackson does, so a redacted value shows as {@code "rejectedValue":null}. */
@@ -105,7 +109,7 @@ class ExceptionMappingServicePasswordRedactionTest {
 
         var fieldError = mapAndAssertRedacted(validateWithProvider(model), "internalPassword", List.of(password));
 
-        assertEquals("openl.error.InternalPasswordConstraint", fieldError.code);
+        assertEquals(PASSWORD_MIN_LENGTH_CODE, fieldError.code);
         assertEquals(PASSWORD_MIN_LENGTH, fieldError.message);
     }
 
@@ -117,7 +121,7 @@ class ExceptionMappingServicePasswordRedactionTest {
 
         var fieldError = mapAndAssertRedacted(validateWithProvider(model), "internalPassword", List.of(password));
 
-        assertEquals("openl.error.InternalPasswordConstraint", fieldError.code);
+        assertEquals(PASSWORD_MAX_BYTES_CODE, fieldError.code);
         assertEquals(PASSWORD_MAX_BYTES, fieldError.message);
     }
 
@@ -128,9 +132,8 @@ class ExceptionMappingServicePasswordRedactionTest {
 
         var fieldError = mapAndAssertRedacted(validateWithProvider(model), "password", List.of(password));
 
-        // The constraint on this field may change, so only the presence of its code and message is asserted.
-        assertNotNull(fieldError.code, "the password error has no code");
-        assertNotNull(fieldError.message, "the password error has no message");
+        assertEquals(PASSWORD_MAX_BYTES_CODE, fieldError.code);
+        assertEquals(PASSWORD_MAX_BYTES, fieldError.message);
     }
 
     @Test
@@ -146,7 +149,7 @@ class ExceptionMappingServicePasswordRedactionTest {
                 "changePassword",
                 List.of(currentPassword, newPassword));
 
-        assertEquals("openl.error.ChangePasswordConstraint", fieldError.code);
+        assertEquals(PASSWORD_MIN_LENGTH_CODE, fieldError.code);
         assertEquals(PASSWORD_MIN_LENGTH, fieldError.message);
     }
 
@@ -206,7 +209,7 @@ class ExceptionMappingServicePasswordRedactionTest {
                 "password",
                 List.of(password));
 
-        assertEquals("openl.error.LocalPasswordConstraint", fieldError.code);
+        assertEquals(PASSWORD_MIN_LENGTH_CODE, fieldError.code);
         assertEquals(PASSWORD_MIN_LENGTH, fieldError.message);
     }
 
@@ -218,21 +221,49 @@ class ExceptionMappingServicePasswordRedactionTest {
                 "password",
                 List.of(password));
 
+        assertEquals(PASSWORD_MAX_BYTES_CODE, fieldError.code);
         assertEquals(PASSWORD_MAX_BYTES, fieldError.message);
+    }
+
+    @Test
+    void localPasswordConstraint_constraintViolations_tooShort_isNotEchoed() throws Exception {
+        var password = RandomStringUtils.secure().nextAlphanumeric(11);
+
+        var fieldError = mapAndAssertRedacted(validateWithValidator(new LocalPasswordBean(password)),
+                "password",
+                List.of(password));
+
+        assertEquals(PASSWORD_MIN_LENGTH_CODE, fieldError.code);
+        assertEquals(PASSWORD_MIN_LENGTH, fieldError.message);
     }
 
     @Test
     void nonPasswordField_bindingResult_keepsRejectedValue() throws Exception {
         var model = validUserEditModel().setPassword(null).setEmail(INVALID_EMAIL);
 
-        assertRejectedValueKept(validateWithProvider(model), "email", INVALID_EMAIL);
+        var fieldError = assertRejectedValueKept(validateWithProvider(model), "email", INVALID_EMAIL);
+
+        assertEquals("openl.error.Email", fieldError.code);
     }
 
     @Test
     void nonPasswordField_constraintViolations_keepsRejectedValue() throws Exception {
         var model = new UserInfoModel().setDisplayName("John Smith").setEmail(INVALID_EMAIL);
 
-        assertRejectedValueKept(validateWithValidator(model), "email", INVALID_EMAIL);
+        var fieldError = assertRejectedValueKept(validateWithValidator(model), "email", INVALID_EMAIL);
+
+        assertEquals("openl.error.{openl.constraints.user.email.format.message}", fieldError.code);
+    }
+
+    @Test
+    void fieldErrorWithoutConstraintViolation_keepsItsCode() throws Exception {
+        var bindingResult = new BeanPropertyBindingResult(new UserInfoModel().setEmail(INVALID_EMAIL), "user");
+        bindingResult.rejectValue("email", "custom.email", "Custom message.");
+
+        var fieldError = assertRejectedValueKept(new ValidationException(bindingResult), "email", INVALID_EMAIL);
+
+        assertEquals("openl.error.custom.email", fieldError.code);
+        assertEquals("Custom message.", fieldError.message);
     }
 
     /**
@@ -263,15 +294,17 @@ class ExceptionMappingServicePasswordRedactionTest {
         return fieldError;
     }
 
-    private void assertRejectedValueKept(Exception ex,
-                                         String field,
-                                         String expectedRejectedValue) throws JsonProcessingException {
+    private FieldError assertRejectedValueKept(Exception ex,
+                                               String field,
+                                               String expectedRejectedValue) throws JsonProcessingException {
         var error = assertInstanceOf(ValidationError.class, exceptionMappingService.processException(ex));
-        assertEquals(expectedRejectedValue, findField(error, field).getRejectedValue());
+        var fieldError = findField(error, field);
+        assertEquals(expectedRejectedValue, fieldError.getRejectedValue());
         for (var mapper : List.of(PLAIN_MAPPER, PRODUCTION_INCLUSION_MAPPER)) {
             var node = findFieldNode(mapper.readTree(mapper.writeValueAsString(error)), field);
             assertEquals(expectedRejectedValue, node.path("rejectedValue").asText(null));
         }
+        return fieldError;
     }
 
     private static FieldError findField(ValidationError error, String field) {

@@ -38,14 +38,14 @@ import org.openl.studio.users.service.pat.PersonalAccessTokenService;
  * Tests the V11 audit lines of PAT creation and revocation using mocked dependencies.
  *
  * <p>The unit-test classpath binds slf4j to slf4j-simple, which writes every line to the current
- * {@code System.err}; JUnit Pioneer's {@link StdIo} captures it per test. Every public ID and secret used here is
- * generated at run time.
+ * {@code System.err}; JUnit Pioneer's {@link StdIo} captures it per test. Every public ID, secret and token name used
+ * here is generated at run time. Each token name has the shape of a token, because a name can itself be a credential,
+ * and must never reach the output.
  */
 @ExtendWith(MockitoExtension.class)
 class PersonalAccessTokenControllerTest {
 
     private static final String LOGIN_NAME = "jdoe";
-    private static final String TOKEN_NAME = "My Token";
     private static final Instant CREATED_AT = Instant.parse("2025-01-01T12:00:00Z");
 
     @Mock
@@ -72,24 +72,26 @@ class PersonalAccessTokenControllerTest {
         var publicId = randomPublicId();
         var secret = RandomStringUtils.secure().nextAlphanumeric(PatToken.SECRET_LENGTH);
         var tokenValue = new PatToken(publicId, secret).asTokenValue();
+        var tokenName = credentialLookingName();
         var created = CreatedPersonalAccessTokenResponse.builder()
                 .publicId(publicId)
-                .name(TOKEN_NAME)
+                .name(tokenName)
                 .loginName(LOGIN_NAME)
                 .token(tokenValue)
                 .createdAt(CREATED_AT)
                 .expiresAt(CREATED_AT.plus(Duration.ofDays(90)))
                 .build();
-        when(crudService.existsByLoginNameAndName(LOGIN_NAME, TOKEN_NAME)).thenReturn(false);
-        when(generatorService.generateToken(LOGIN_NAME, TOKEN_NAME, null)).thenReturn(created);
+        when(crudService.existsByLoginNameAndName(LOGIN_NAME, tokenName)).thenReturn(false);
+        when(generatorService.generateToken(LOGIN_NAME, tokenName, null)).thenReturn(created);
 
         // Act
-        var response = controller.createToken(new CreatePersonalAccessTokenRequest(TOKEN_NAME, null));
+        var response = controller.createToken(new CreatePersonalAccessTokenRequest(tokenName, null));
 
-        // Assert - the secret and the token first, so no later failure can stop that check
+        // Assert - the secret, the token and the token name first, so no later failure can stop that check
         var output = err.capturedString();
         assertFalse(output.contains(secret), "The token secret reached the log output.");
         assertFalse(output.contains(tokenValue), "The token reached the log output.");
+        assertFalse(output.contains(tokenName), "The token name reached the log output.");
         // An identity check that never formats the response, whose token() is the full PAT
         assertTrue(created == response, "The generated response must be returned as it is");
         var line = singleAuditLine(err);
@@ -103,12 +105,15 @@ class PersonalAccessTokenControllerTest {
         // Arrange - a case-insensitive collation matches a path value whose case differs from the stored ID
         var storedId = randomPublicId();
         var pathValue = StringUtils.swapCase(storedId);
-        when(crudService.getTokenForUser(pathValue, LOGIN_NAME)).thenReturn(storedToken(storedId));
+        var tokenName = credentialLookingName();
+        when(crudService.getTokenForUser(pathValue, LOGIN_NAME)).thenReturn(storedToken(storedId, tokenName));
 
         // Act
         controller.deleteToken(pathValue);
 
-        // Assert - the deletion is unchanged, and the audit line names the token as pat.create did
+        // Assert - the stored token name first, so no later failure can stop that check
+        assertFalse(err.capturedString().contains(tokenName), "The token name reached the log output.");
+        // The deletion is unchanged, and the audit line names the token as pat.create did
         verify(crudService).deleteByPublicId(pathValue);
         var line = singleAuditLine(err);
         assertTrue(line.contains("event=pat.revoke outcome=success "), "pat.revoke must carry outcome=success");
@@ -133,10 +138,10 @@ class PersonalAccessTokenControllerTest {
     }
 
     /** A stored token as the CRUD service returns it, without any secret. */
-    private static PersonalAccessTokenResponse storedToken(String publicId) {
+    private static PersonalAccessTokenResponse storedToken(String publicId, String name) {
         return PersonalAccessTokenResponse.builder()
                 .publicId(publicId)
-                .name(TOKEN_NAME)
+                .name(name)
                 .loginName(LOGIN_NAME)
                 .createdAt(CREATED_AT)
                 .expiresAt(CREATED_AT.plus(Duration.ofDays(90)))
@@ -146,6 +151,12 @@ class PersonalAccessTokenControllerTest {
     /** A Base62 public ID of letters only, so that swapping its case always yields a different value. */
     private static String randomPublicId() {
         return RandomStringUtils.secure().nextAlphabetic(PatToken.PUBLIC_ID_LENGTH);
+    }
+
+    /** A token name shaped like a token, with a generated public ID and secret of its own. */
+    private static String credentialLookingName() {
+        return new PatToken(randomPublicId(), RandomStringUtils.secure().nextAlphanumeric(PatToken.SECRET_LENGTH))
+                .asTokenValue();
     }
 
     /** The captured lines written by the audit logger, in order. */

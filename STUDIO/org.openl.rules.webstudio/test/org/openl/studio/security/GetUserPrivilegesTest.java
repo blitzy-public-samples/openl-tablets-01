@@ -18,6 +18,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.stream.Stream;
 
+import org.apache.commons.lang3.RandomStringUtils;
 import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -90,6 +91,9 @@ class GetUserPrivilegesTest {
     /** The OpenL groups known to the mocked group service, by name. Both the mock and the oracle read it. */
     private final Map<String, Group> groups = new HashMap<>();
 
+    /** The DB user's password, generated per run: no captured line may contain it. */
+    private final String dbPassword = RandomStringUtils.secure().nextAlphanumeric(16);
+
     private final GrantedAuthority dbPrivilege = new SimpleGrantedAuthority("db-privilege");
     private final List<GrantedAuthority> dbAuthorities = List.of(dbPrivilege);
 
@@ -114,6 +118,7 @@ class GetUserPrivilegesTest {
                 .thenAnswer(invocation -> groups.get(invocation.<String>getArgument(0)));
         lenient().when(userManagementService.getUser(USER)).thenReturn(dbUser);
         lenient().doReturn(dbAuthorities).when(dbUser).getAuthorities();
+        lenient().when(dbUser.getPassword()).thenReturn(dbPassword);
     }
 
     // ---------------------------------------------------------------------------------------------------------
@@ -411,12 +416,18 @@ class GetUserPrivilegesTest {
         return Stream.of(err.capturedLines()).filter(line -> line.contains(ADMIN_MATCH_MARKER)).toList();
     }
 
-    /** No credential is involved here, so no captured line may even mention a password. */
-    private static void assertNoPasswordLogged(StdErr err) {
+    /**
+     * The mapping logs only names, so no captured line may even mention a password, let alone contain the DB user's
+     * generated one.
+     */
+    private void assertNoPasswordLogged(StdErr err) {
         assertEquals(0,
                 Stream.of(err.capturedLines())
                         .filter(line -> line.toLowerCase(Locale.ROOT).contains("password"))
                         .count(),
                 "A captured line mentions a password");
+        assertEquals(0,
+                Stream.of(err.capturedLines()).filter(line -> line.contains(dbPassword)).count(),
+                "A captured line contains the generated password");
     }
 }

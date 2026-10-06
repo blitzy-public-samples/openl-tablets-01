@@ -35,12 +35,13 @@ import org.openl.rules.workspace.lw.impl.LocalWorkspaceManagerImpl;
  * a {@link LocalWorkspaceManagerImpl} through {@code setFolderNameCheck}, as {@code repository-beans.xml} wires it at
  * runtime. The second part runs the surface A path-traversal matrix through {@code getWorkspace} and
  * {@code refreshMetainfoRegistry}. It proves the {@code NameChecker} rows A7 to A11 on the runtime path: the
- * workspace module's own checks accept the A10 and A11 ids, so only the installed check can reject them.
+ * workspace module's own checks accept the A10 and A11 ids, and on Windows the drive-relative A4 id {@code C:x} on the
+ * home's drive, so only the installed check can reject them.
  *
  * <p>The tests of the check on its own assert its boolean result. The lexical rows, run through the manager, assert
  * that nothing changes in or beside the workspace home, and the exact rejection message of
- * {@code LocalWorkspaceManagerImpl}; on Windows, the drive-relative row {@code C:x} accepts either that rejection or a
- * direct child of the home. The look-alike rows A15 accept either the exact rejection or a direct child of the home,
+ * {@code LocalWorkspaceManagerImpl} on every operating system, the drive-relative A4 id {@code C:x} included. The
+ * look-alike rows A15 accept either the exact rejection or a direct child of the home,
  * and assert only that nothing changes beside the home. The link rows A12, A13 and A16 assert the exact rejection from
  * both {@code getWorkspace} and {@code refreshMetainfoRegistry}, and that the link and what lies behind it are
  * unchanged: for A13, the missing target is never created and the link is still a link. The new-user test asserts that
@@ -73,27 +74,21 @@ class WorkspaceFolderNameCheckTest {
     // The check on its own.
 
     /**
-     * Ids the check rejects on every operating system, labelled with their row id. Each row passes through a
-     * different branch of the check: {@code null} and the empty id are refused before {@code NameChecker} runs, A9
-     * makes the path API throw {@code InvalidPathException}, and the other rows make {@code NameChecker} throw
-     * {@code IOException}. On Windows the path API already refuses the control characters of A10.
-     *
-     * <p>{@code /etc} (A3), {@code C:\Windows} and {@code C:x} (A4) are left out on purpose, because the check does not
-     * reject them on every operating system. {@code NameChecker} checks the name elements of the parsed path, so it
-     * accepts {@code /etc} on Unix, and {@code C:\Windows} and {@code C:x} on Windows.
-     * {@link #managerRejectsLexicalPayloads(String, String)} covers the three ids through the manager. The manager's
-     * earlier checks reject {@code /etc} and {@code C:\Windows} on every operating system, because
-     * {@code FolderHelper.isSafeFolderName} refuses {@code /} and {@code \}. {@code C:x} holds neither separator. On
-     * Windows it is drive-relative, and the manager either rejects it or gives it a direct child of the workspace home,
-     * which stays contained. On every other operating system the installed check rejects it, because
-     * {@code NameChecker} forbids {@code :} in a single-element path. This is the existing behavior of
-     * {@code NameChecker}, which this work does not change.
+     * Ids the check rejects on every operating system, labelled with their row id. {@code null} and the empty id are
+     * refused before {@code NameChecker} runs. The reserved names of A11 pass {@code NameChecker.checkName} and make
+     * {@code NameChecker.validatePath} throw {@code IOException}. Every other row fails {@code NameChecker.checkName},
+     * which reads the id as it stands, before any path parsing: the separators of A3, A5, A6 and A14, the {@code :}
+     * of the A4 drive ids, which Windows path parsing would turn into a root and drop, the {@code %} of A7 and A8, the
+     * trailing dot of A1 and A2, and the NUL and control characters of A9 and A10.
      */
     static Stream<Arguments> rejectedIds() {
         return Stream.of(Arguments.of("null-input", null),
                 Arguments.of("empty-input", ""),
                 Arguments.of("A1", ".."),
                 Arguments.of("A2", "."),
+                Arguments.of("A3", "/etc"),
+                Arguments.of("A4-drive-path", "C:\\Windows"),
+                Arguments.of("A4-drive-relative", "C:x"),
                 Arguments.of("A5", "..\\outside"),
                 Arguments.of("A6", "a//b"),
                 Arguments.of("A7", "..%2Foutside"),
@@ -114,6 +109,26 @@ class WorkspaceFolderNameCheckTest {
 
         // A failure of NameChecker or of the path API must become false, never an exception
         assertFalse(check.test(payload), () -> row + ": the id must not name a workspace folder.");
+    }
+
+    /**
+     * Ids that path parsing would shorten, labelled by kind. On Windows a drive prefix becomes a path root, so the
+     * drive-relative {@code C:x} keeps only the name element {@code x} and the bare drive {@code C:} keeps none. On
+     * every operating system a separator splits {@code jdoe/1} into two valid name elements, so that row proves the raw
+     * check where no drive prefix exists.
+     */
+    static Stream<Arguments> idsThatParsingWouldShorten() {
+        return Stream.of(Arguments.of("drive-relative", "C:x"),
+                Arguments.of("bare-drive", "C:"),
+                Arguments.of("separator", "jdoe/1"));
+    }
+
+    // Row A4: the check reads the id as it stands, so it rejects a drive prefix on every operating system.
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("idsThatParsingWouldShorten")
+    void rejectsTheRawIdBeforePathParsing(String row, String payload) {
+        assertFalse(new WorkspaceFolderNameCheck().test(payload),
+                () -> row + ": the id is checked as it stands, so path parsing cannot drop a part of it.");
     }
 
     @Test
@@ -148,22 +163,15 @@ class WorkspaceFolderNameCheckTest {
 
     /**
      * The exact message matters: for A9 it proves that the path API's {@code InvalidPathException} is mapped, not
-     * leaked, and for A10 and A11 it proves that the installed check rejects the id, because the workspace module's
-     * own checks accept it.
+     * leaked, and for A10, A11 and, on Windows, the drive-relative A4 id on the home's drive, it proves that the
+     * installed check rejects the id, because the workspace module's own checks accept it.
      */
     @ParameterizedTest(name = "{0}")
     @MethodSource("lexicalPayloads")
     void managerRejectsLexicalPayloads(String row, String payload) throws IOException {
         var before = snapshot(root);
 
-        if ("A4-drive-relative".equals(row) && OS.WINDOWS.isCurrentOs()) {
-            // On Windows "C:x" is drive-relative: NameChecker checks its name elements, where only "x" remains, and on
-            // the drive of the home it resolves to the direct child "x". It stays contained, so either outcome is
-            // secure.
-            assertRejectedOrDirectChild(row, payload);
-        } else {
-            assertRejectedByManager(row, () -> manager.getWorkspace(payload));
-        }
+        assertRejectedByManager(row, () -> manager.getWorkspace(payload));
 
         assertEquals(before, snapshot(root), () -> row + ": nothing may change in or beside the workspace home.");
     }

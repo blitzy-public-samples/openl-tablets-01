@@ -126,10 +126,25 @@ class ZipArchiveValidatorTest extends AbstractConstraintValidatorTest {
                 Arguments.of("D6 double slash", "a//evil.xlsx"),
                 Arguments.of("D7 percent-encoded separator", "..%2Fevil.xlsx"),
                 Arguments.of("D8 double-encoded separator", "..%252Fevil.xlsx"),
-                Arguments.of("D9 null byte", "evil.xlsx\u0000.txt"),
                 Arguments.of("D10 control character", "ev\u0007il.xlsx"),
                 Arguments.of("D11 reserved name", "NUL"),
                 Arguments.of("D13 nested zip-slip", "a/../../evil.xlsx"));
+    }
+
+    // V1-D: a NUL byte keeps the rejection it has today: the InvalidPathException of the zipfs view propagates with
+    // the whole name, never truncated, and the existing InvalidPathException handler answers it with its 400.
+    // NUL is shown as '\0' in the compared values, so a failure report holds no raw NUL character.
+    @Test
+    void testArchives_NullByteKeepsItsInvalidPathRejection() throws IOException {
+        var file = archive("evil.xlsx\u0000.txt");
+        var e = assertThrows(InvalidPathException.class, () -> validateAndGetResult(file, validator),
+                "D9 null byte: the InvalidPathException must propagate");
+        assertEquals("evil.xlsx\\0.txt", e.getInput().replace("\u0000", "\\0"),
+                "D9 null byte: the whole entry name must be kept");
+        assertTrue(e.getReason().contains("nul character not allowed"), "D9 null byte: unexpected reason");
+        assertEquals("Path: nul character not allowed: evil.xlsx\\0.txt",
+                String.valueOf(e.getMessage()).replace("\u0000", "\\0"),
+                "D9 null byte: the message of the existing 400 body must be kept");
     }
 
     // V1-D: a name that only starts with a reserved word is accepted today and stays accepted (no rule is loosened

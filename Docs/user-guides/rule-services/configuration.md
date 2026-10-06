@@ -133,6 +133,8 @@ To use a relational database repository as a data source, proceed as follows:
     #secret.cipher=AES/CBC/PKCS5Padding
     ```
 
+    <!-- V6: secret.cipher applies only to legacy ENC(...) values -->
+
 ##### Amazon AWS S3
 
 To use an AWS S3 repository as a data source, proceed as follows:

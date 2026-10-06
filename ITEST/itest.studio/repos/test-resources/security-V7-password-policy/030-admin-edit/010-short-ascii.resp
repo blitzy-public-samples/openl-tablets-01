@@ -5,7 +5,7 @@ Content-Type: application/json
   "message": "Bad Request",
   "fields": [
     {
-      "code": "openl.error.LocalPasswordConstraint",
+      "code": "openl.constraints.password.min-length.message",
       "message": "The password must contain at least 12 characters.",
       "field": "password"
     }

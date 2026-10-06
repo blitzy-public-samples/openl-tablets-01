@@ -28,6 +28,7 @@ import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.security.core.session.SessionRegistry;
 import org.springframework.security.core.session.SessionRegistryImpl;
 import org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestBuilders;
+import org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors;
 import org.springframework.security.test.web.servlet.setup.SecurityMockMvcConfigurers;
 import org.springframework.test.context.TestPropertySource;
 import org.springframework.test.context.junit.jupiter.SpringJUnitConfig;
@@ -172,6 +173,29 @@ class SysInfoAuthenticationChainTest {
             assertEquals(attemptsAfterLogin,
                     provider.attempts(),
                     message("session GET " + SYS_JSON + " and " + HTTP_JSON + " reach no provider"));
+        }
+
+        /**
+         * An authentication that spring-security-test saves through the chain's own security context repository,
+         * with no login request at all, is served as well, and no provider is asked: the chains authorize the
+         * stored authentication whichever provider created it, which is why {@code ad} needs no directory server.
+         */
+        @Test
+        void authenticatedSecurityContextIsServed() throws Exception {
+            Authentication authenticated = UsernamePasswordAuthenticationToken
+                    .authenticated(USER, null, List.of(new SimpleGrantedAuthority("USER")));
+            int attemptsBefore = provider.attempts();
+
+            perform(get(SYS_JSON).with(SecurityMockMvcRequestPostProcessors.authentication(authenticated)),
+                    HttpStatus.OK,
+                    "authenticated-context GET " + SYS_JSON);
+            perform(get(HTTP_JSON).with(SecurityMockMvcRequestPostProcessors.authentication(authenticated)),
+                    HttpStatus.OK,
+                    "authenticated-context GET " + HTTP_JSON);
+
+            assertEquals(attemptsBefore,
+                    provider.attempts(),
+                    message("authenticated-context GET " + SYS_JSON + " and " + HTTP_JSON + " reach no provider"));
         }
 
         @Test

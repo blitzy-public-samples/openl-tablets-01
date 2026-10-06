@@ -31,7 +31,7 @@ The Personal Access Token (PAT) API enables users to generate and manage authent
 
 - **Secure Token Generation**: Cryptographically secure tokens using Base62 encoding
 - **Token Management**: Full CRUD operations for personal access tokens
-- **Expiration Support**: Every new token expires. When no expiration date is given, the token lives for `security.pat.default-expiration-days` (default 90) days; a requested date may be at most `security.pat.max-expiration-days` (default 365) days ahead. Tokens created before 6.5.0 without an expiration keep working and never expire
+- **Expiration Support**: Every new token expires. When no expiration date is given, the token lives for `security.pat.default-expiration-days` (default 90) days; a requested date may be at most `security.pat.max-expiration-days` (default 365) days ahead. Both properties are positive whole numbers of days, and the default must not exceed the maximum; otherwise Studio does not start in a mode that offers PATs. Tokens created before 6.5.0 without an expiration keep working and never expire
 - **User Isolation**: Users can only manage their own tokens
 - **Authenticated Modes Only**: Available in every authenticated user mode (OAuth2, SAML, AD, multi); not in single-user mode
 
@@ -112,7 +112,7 @@ POST /rest/users/personal-access-tokens
 ```json
 {
   "name": "MCP Client Token",
-  "expiresAt": "2026-12-31T23:59:59Z"
+  "expiresAt": "2026-12-22T23:59:59Z"
 }
 ```
 
@@ -134,7 +134,7 @@ POST /rest/users/personal-access-tokens
   "loginName": "john.doe",
   "token": "openl_pat_a1B2c3D4e5F6g7H8.i9J0k1L2m3N4o5P6q7R8s9T0u1V2w3X4y5Z6",
   "createdAt": "2025-12-23T10:30:00Z",
-  "expiresAt": "2026-12-31T23:59:59Z"
+  "expiresAt": "2026-12-22T23:59:59Z"
 }
 ```
 
@@ -183,7 +183,7 @@ GET /rest/users/personal-access-tokens
     "name": "MCP Client Token",
     "loginName": "john.doe",
     "createdAt": "2025-12-23T10:30:00Z",
-    "expiresAt": "2026-12-31T23:59:59Z"
+    "expiresAt": "2026-12-22T23:59:59Z"
   },
   {
     "publicId": "z9Y8x7W6v5U4t3S2",
@@ -241,7 +241,7 @@ GET /rest/users/personal-access-tokens/{publicId}
   "name": "MCP Client Token",
   "loginName": "john.doe",
   "createdAt": "2025-12-23T10:30:00Z",
-  "expiresAt": "2026-12-31T23:59:59Z"
+  "expiresAt": "2026-12-22T23:59:59Z"
 }
 ```
 
@@ -414,6 +414,8 @@ pat.not.found.message=Personal Access Token not found
 
 ### Example 1: Create a Token with Expiration
 
+<!-- V8: this example's expiration date lies within the default 365-day maximum of its creation time. -->
+
 **Request**:
 ```http
 POST /rest/users/personal-access-tokens HTTP/1.1
@@ -423,7 +425,7 @@ Content-Type: application/json
 
 {
   "name": "CI/CD Pipeline Token",
-  "expiresAt": "2026-12-31T23:59:59Z"
+  "expiresAt": "2026-12-22T23:59:59Z"
 }
 ```
 
@@ -438,7 +440,7 @@ Content-Type: application/json
   "loginName": "jenkins",
   "token": "openl_pat_x1Y2z3A4b5C6d7E8.f9G0h1I2j3K4l5M6n7O8p9Q0r1S2t3U4v5W6",
   "createdAt": "2025-12-23T10:30:00Z",
-  "expiresAt": "2026-12-31T23:59:59Z"
+  "expiresAt": "2026-12-22T23:59:59Z"
 }
 ```
 
@@ -527,7 +529,7 @@ Content-Type: application/json
     "name": "CI/CD Pipeline Token",
     "loginName": "jenkins",
     "createdAt": "2025-12-23T10:30:00Z",
-    "expiresAt": "2026-12-31T23:59:59Z"
+    "expiresAt": "2026-12-22T23:59:59Z"
   },
   {
     "publicId": "m1N2o3P4q5R6s7T8",

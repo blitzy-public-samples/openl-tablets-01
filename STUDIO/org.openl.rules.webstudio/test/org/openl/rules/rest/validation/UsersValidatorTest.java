@@ -137,16 +137,16 @@ class UsersValidatorTest extends AbstractConstraintValidatorTest {
     void testEditUser_valid() {
         var userEditModel = getValidUserEditModel();
 
-        assertNull(validateAndGetResult(userEditModel));
+        assertValid(userEditModel);
 
         userEditModel.setPassword(null);
-        assertNull(validateAndGetResult(userEditModel));
+        assertValid(userEditModel);
 
         // V7: blank password on edit means "unchanged" and stays valid
         userEditModel.setPassword("");
-        assertNull(validateAndGetResult(userEditModel));
+        assertValid(userEditModel);
         userEditModel.setPassword(" ");
-        assertNull(validateAndGetResult(userEditModel));
+        assertValid(userEditModel);
     }
 
     // V7: admin edit route, boundary cases of LocalPasswordPolicy; the 25-character maximum no longer applies
@@ -173,27 +173,27 @@ class UsersValidatorTest extends AbstractConstraintValidatorTest {
         when(userManagementService.getUser(anyString())).thenReturn(null);
         var userCreateModel = getValidUserCreateModel();
 
-        assertNull(validateAndGetResult(getValidUserCreateModel()));
+        assertValid(getValidUserCreateModel());
 
         // V7: a generated policy-compliant password instead of a literal
         userCreateModel.setInternalPassword(new InternalPasswordModel().setPassword(otherPassword));
-        assertNull(validateAndGetResult(userCreateModel));
+        assertValid(userCreateModel);
 
         userCreateModel.setUsername("a1!@#$&()_-+='.,");
-        assertNull(validateAndGetResult(userCreateModel));
+        assertValid(userCreateModel);
 
         userCreateModel.setUsername("фы漢語,汉语ęął");
-        assertNull(validateAndGetResult(userCreateModel));
+        assertValid(userCreateModel);
 
         userCreateModel.setUsername("a");
-        assertNull(validateAndGetResult(userCreateModel));
+        assertValid(userCreateModel);
     }
 
     @Test
     void testCreateUser_noGroups_valid() {
         var userCreateModel = getValidUserCreateModel();
         userCreateModel.setGroups(null);
-        assertNull(validateAndGetResult(userCreateModel));
+        assertValid(userCreateModel);
     }
 
     @Test
@@ -308,10 +308,10 @@ class UsersValidatorTest extends AbstractConstraintValidatorTest {
         existedUser.setPassword(currentPasswordHash);
         when(userManagementService.getUser(anyString())).thenReturn(existedUser);
 
-        assertNull(validateAndGetResult(userProfileEditModel));
+        assertValid(userProfileEditModel);
 
         userProfileEditModel.setChangePassword(new ChangePasswordModel());
-        assertNull(validateAndGetResult(userProfileEditModel));
+        assertValid(userProfileEditModel);
     }
 
     @Test
@@ -383,7 +383,7 @@ class UsersValidatorTest extends AbstractConstraintValidatorTest {
                 .setNewPassword("")
                 .setConfirmPassword("");
         var model = getValidUserProfileEditModel().setChangePassword(changePasswordModel);
-        assertNull(validateAndGetResult(model));
+        assertValid(model);
     }
 
     @Test
@@ -456,15 +456,26 @@ class UsersValidatorTest extends AbstractConstraintValidatorTest {
                 .setLastName("Smith");
     }
 
+    // V7: asserts a password-bearing model is valid; a failure names only fields and codes, never a submitted value
+    private void assertValid(Object model) {
+        var bindingResult = validateAndGetResult(model);
+        assertTrue(bindingResult == null,
+                () -> "unexpected violations on " + Stream.concat(
+                        bindingResult.getFieldErrors().stream().map(e -> e.getField() + "/" + e.getCode()),
+                        bindingResult.getGlobalErrors().stream().map(e -> e.getObjectName() + "/" + e.getCode()))
+                        .toList());
+    }
+
     private void assertOptionalNamesValid(UserInfoModel userInfoModel) {
         userInfoModel.setFirstName("").setLastName(" ");
-        assertNull(validateAndGetResult(userInfoModel));
+        assertValid(userInfoModel);
     }
 
     // V7: boundary cases of LocalPasswordPolicy (12 code points min, 72 UTF-8 bytes max)
     static Stream<Arguments> passwordPolicyCases() {
         var euro = "\u20AC"; // 3 UTF-8 bytes, 1 UTF-16 unit
         var emoji = Character.toString(0x1F600); // 4 UTF-8 bytes, 2 UTF-16 units
+        var loneSurrogate = "\uD800"; // 1 UTF-8 byte ('?'), 1 UTF-16 unit
         return Stream.of(
                 Arguments.of("11 code points", RandomStringUtils.secure().nextAlphanumeric(11), PASSWORD_MIN_LENGTH),
                 Arguments.of("12 code points", RandomStringUtils.secure().nextAlphanumeric(12), null),
@@ -473,7 +484,14 @@ class UsersValidatorTest extends AbstractConstraintValidatorTest {
                 Arguments.of("24 x U+20AC (72 bytes)", euro.repeat(24), null),
                 Arguments.of("24 x U+20AC + a (73 bytes)", euro.repeat(24) + "a", PASSWORD_MAX_BYTES),
                 Arguments.of("18 x U+1F600 (72 bytes, 36 UTF-16 units)", emoji.repeat(18), null),
-                Arguments.of("11 x U+1F600 (11 code points, 44 bytes)", emoji.repeat(11), PASSWORD_MIN_LENGTH));
+                Arguments.of("11 x U+1F600 (11 code points, 44 bytes)", emoji.repeat(11), PASSWORD_MIN_LENGTH),
+                // V7: oversized input is rejected before any scan, and the bytes counted are the ones bcrypt receives
+                Arguments.of("100000 ASCII characters", RandomStringUtils.secure().nextAlphanumeric(100_000),
+                        PASSWORD_MAX_BYTES),
+                Arguments.of("36 x U+1F600 (72 UTF-16 units, 144 bytes)", emoji.repeat(36), PASSWORD_MAX_BYTES),
+                Arguments.of("12 x U+1F600 (12 code points, 48 bytes)", emoji.repeat(12), null),
+                Arguments.of("71 ASCII + lone surrogate (72 bytes)",
+                        RandomStringUtils.secure().nextAlphanumeric(71) + loneSurrogate, null));
     }
 
     // V7: asserts the policy outcome without putting the submitted password into any failure message

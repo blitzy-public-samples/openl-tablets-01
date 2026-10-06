@@ -10,14 +10,18 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeFalse;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
+import static org.mockito.ArgumentMatchers.endsWith;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 import java.io.ByteArrayInputStream;
@@ -69,6 +73,7 @@ import org.openl.rules.project.impl.local.MetainfoRegistry;
 import org.openl.rules.project.impl.local.ProjectMetainfo;
 import org.openl.rules.repository.PathCheckedRepository;
 import org.openl.rules.repository.RepositoryInstatiator;
+import org.openl.rules.repository.api.FeaturesBuilder;
 import org.openl.rules.repository.api.FileData;
 import org.openl.rules.repository.api.Repository;
 import org.openl.rules.repository.api.UserInfo;
@@ -87,6 +92,7 @@ import org.openl.security.acl.repository.SecureRepository;
 import org.openl.security.acl.repository.SecuredRepositoryFactory;
 import org.openl.security.acl.repository.SimpleRepositoryAclService;
 import org.openl.studio.common.exception.BadRequestException;
+import org.openl.studio.common.exception.ConflictException;
 import org.openl.studio.common.exception.ForbiddenException;
 import org.openl.studio.common.exception.NotFoundException;
 import org.openl.studio.common.exception.RestRuntimeException;
@@ -510,8 +516,12 @@ class ProjectFilesServiceTest {
      * @param store   the physical root of the working copy or repository holding both projects
      * @param prefix  what turns a {@code P1}-relative path into a mount-relative one
      * @param acl     the project ACL that the mount and its service check
+     * @param storage the spied repositories the mount opens file content through, the one serving the current state
+     *                first, so a test can prove which files were never read
      */
-    private record Mount(FileRoot root, Path project, Path sibling, Path store, String prefix, AclProjectsHelper acl) {
+    // V1: storage makes the content-opening boundary of each mount observable.
+    private record Mount(FileRoot root, Path project, Path sibling, Path store, String prefix, AclProjectsHelper acl,
+                         List<Repository> storage) {
 
         String path(String projectRelative) {
             return prefix + projectRelative;
@@ -807,7 +817,8 @@ class ProjectFilesServiceTest {
     @ParameterizedTest
     @EnumSource(MountKind.class)
     @DisabledOnOs(OS.WINDOWS)
-    void b16AFileLinkOutsideIsNeitherListedNorSearchedNorRead(MountKind kind) throws IOException {
+    // V1: throws Exception, as the positive control reads the contained file's content
+    void b16AFileLinkOutsideIsNeitherListedNorSearchedNorRead(MountKind kind) throws Exception {
         var mount = mount(kind);
         var root = mount.root();
         var service = service(mount.acl(), new FileNodeMapperImpl());
@@ -823,10 +834,14 @@ class ProjectFilesServiceTest {
             assertTrue(listed.contains(mount.path("docs/ok.txt")), row + " lists docs/ok.txt");
             assertFalse(listed.contains(leak), row + " omits docs/leak.txt");
             assertFalse(carries(nodes, outsideSecret), row + " returns nothing read through docs/leak.txt");
+            assertNeverOpened(row, mount, "docs/leak.txt"); // V1: not read and discarded either
         }
         var found = service.search(root, FileSearchQuery.builder().content(outsideSecret).recursive(true).build());
         assertEquals(List.of(), pathsOf(found),
                 "B16 content search on " + kind + " finds nothing behind docs/leak.txt");
+        // V1: the search reads the contained files through the spied repository, and never the linked one.
+        assertOpened("B16 content search on " + kind, mount, "docs/ok.txt");
+        assertNeverOpened("B16 content search on " + kind, mount, "docs/leak.txt");
 
         var export = new ByteArrayOutputStream();
         var payloads = List.of(
@@ -843,11 +858,22 @@ class ProjectFilesServiceTest {
             var row = "B16 " + payload.description() + " on " + kind;
             assertPathRejected(row, payload.call());
             assertNothingWritten(row, mount, before);
+            assertNeverOpened(row, mount, "docs/leak.txt"); // V1: not read before the rejection either
         }
 
         assertEquals(0, export.size(), "B16 on " + kind + ": the rejected export of docs streams nothing");
         assertTrue(Files.isSymbolicLink(mount.project().resolve("docs/leak.txt")),
                 "B16 on " + kind + ": the link docs/leak.txt is kept");
+        // V1: positive control: a direct read of the contained docs/ok.txt is seen through the same spied repository;
+        // the reads of the search are forgotten first, so only this read can satisfy it.
+        clearInvocations(mount.storage().toArray());
+        var row = "B16 getResource docs/ok.txt on " + kind;
+        try (var content = service.getResource(root, mount.path("docs/ok.txt"), null).getContent()) {
+            assertEquals(Files.readString(mount.project().resolve("docs/ok.txt")),
+                    new String(content.readAllBytes(), StandardCharsets.UTF_8), row + " serves its content");
+        }
+        assertOpened(row, mount, "docs/ok.txt");
+        assertNeverOpened(row, mount, "docs/leak.txt");
     }
 
     // V1: surface B payload B17 (link into the sibling project), on every mount (B18)
@@ -1202,6 +1228,330 @@ class ProjectFilesServiceTest {
         assertOutsideAndSiblingUnchanged("Export and content search on " + kind, mount, before);
     }
 
+    // V1: surface B payload B16 (file link outside) in filtered listings, on every mount (B18): a listing resolves on
+    // disk only the entries its type, name or extension criteria keep, checks a folder it descends into once, before
+    // it does, and still omits a matching file a link places outside the mount and a folder the mount places outside
+    @ParameterizedTest
+    @EnumSource(MountKind.class)
+    @DisabledOnOs(OS.WINDOWS)
+    void b16FilteredListingsCheckContainmentOnlyForTheEntriesTheirCriteriaKeep(MountKind kind) throws IOException {
+        var mount = mount(kind);
+        var service = service(mount.acl(), new FileNodeMapperImpl());
+        write(mount.project().resolve("docs/hit.csv"), marker());
+        write(mount.project().resolve("docs/miss.txt"), marker());
+        write(mount.project().resolve("docs/archive/hit-old.csv"), marker());
+        write(mount.project().resolve("docs/archive/old.txt"), marker());
+        Files.createSymbolicLink(mount.project().resolve("docs/hit-leak.csv"), outsideFile());
+        var root = spy(mount.root());
+        var hit = mount.path("docs/hit.csv");
+        var leak = mount.path("docs/hit-leak.csv");
+        var archive = mount.path("docs/archive");
+        var archivedHit = mount.path("docs/archive/hit-old.csv");
+        // Contained files that neither the name nor the extension criterion keeps.
+        var misses = List.of(mount.path("rules.xml"), mount.path(SOURCE), mount.path("docs/miss.txt"),
+                mount.path("docs/archive/old.txt"));
+        var files = new ArrayList<>(misses);
+        files.addAll(List.of(hit, leak, archivedHit));
+        record Criteria(String description, boolean keepsFolders, FileCriteriaQuery query) {
+        }
+
+        for (var recursive : List.of(true, false)) {
+            // A listing that does not recurse lists docs, which holds the files.
+            var basePath = recursive ? null : mount.path("docs");
+            var criteria = List.of(
+                    new Criteria("name pattern hit", false,
+                            FileCriteriaQuery.builder().basePath(basePath).namePattern("hit").build()),
+                    new Criteria("extension csv", true,
+                            FileCriteriaQuery.builder().basePath(basePath).extension("csv").build()));
+            for (var criterion : criteria) {
+                for (var viewMode : FileViewMode.values()) {
+                    var row = "B16 " + (recursive ? "recursive " : "") + viewMode + " listing by "
+                            + criterion.description() + " on " + kind;
+                    clearInvocations(root);
+                    var nodes = service.getResources(root, criterion.query(), recursive, viewMode, null);
+                    var listed = pathsOf(nodes);
+                    assertTrue(listed.contains(hit), row + " lists docs/hit.csv");
+                    assertFalse(listed.contains(leak), row + " omits docs/hit-leak.csv");
+                    assertFalse(carries(nodes, outsideSecret), row + " returns nothing read through docs/hit-leak.csv");
+                    verify(root, Mockito.times(1).description(row + " resolves docs/hit.csv once")).contains(hit);
+                    verify(root, Mockito.times(1).description(row + " resolves docs/hit-leak.csv once")).contains(leak);
+                    // docs/archive/hit-old.csv is reached only by a listing that descends into docs/archive.
+                    assertEquals(recursive, listed.contains(archivedHit), row + " lists docs/archive/hit-old.csv");
+                    verify(root, Mockito.times(recursive ? 1 : 0)
+                            .description(row + " resolves docs/archive/hit-old.csv as often as it lists it"))
+                            .contains(archivedHit);
+                    for (var miss : misses) {
+                        verify(root, never().description(row + " does not resolve " + miss)).contains(miss);
+                    }
+                    // A folder the listing descends into is resolved once, before it does; a folder it does not
+                    // descend into only once its criteria pass.
+                    var folderChecks = recursive || criterion.keepsFolders() ? 1 : 0;
+                    verify(root, Mockito.times(folderChecks).description(row + " resolves docs/archive "
+                            + folderChecks + " time(s)")).contains(archive);
+                }
+            }
+            // The folders-only criterion keeps no file, so a folders-only listing resolves none.
+            var foldersOnly = FileCriteriaQuery.builder().basePath(basePath).foldersOnly(true).build();
+            for (var viewMode : FileViewMode.values()) {
+                var row = "B16 " + (recursive ? "recursive " : "") + viewMode + " folders-only listing on " + kind;
+                clearInvocations(root);
+                var listed = pathsOf(service.getResources(root, foldersOnly, recursive, viewMode, null));
+                assertTrue(listed.contains(archive), row + " lists docs/archive");
+                verify(root, Mockito.times(1).description(row + " resolves docs/archive once")).contains(archive);
+                for (var file : files) {
+                    verify(root, never().description(row + " does not resolve " + file)).contains(file);
+                }
+            }
+        }
+
+        // A file repository lists nothing under a directory link, so a folder the mount places outside, as one a link
+        // replaces once the tree is read, is stubbed; every other path is still resolved on disk.
+        Mockito.doReturn(false).when(root).contains(archive);
+        for (var viewMode : FileViewMode.values()) {
+            var row = "B16 recursive " + viewMode + " listing by extension csv on " + kind
+                    + " with docs/archive outside";
+            clearInvocations(root);
+            var listed = pathsOf(service.getResources(root, FileCriteriaQuery.builder().extension("csv").build(), true,
+                    viewMode, null));
+            assertTrue(listed.contains(hit), row + " lists docs/hit.csv");
+            assertFalse(listed.contains(archive), row + " omits docs/archive");
+            assertFalse(listed.contains(archivedHit), row + " omits docs/archive/hit-old.csv");
+            verify(root, Mockito.times(1).description(row + " resolves docs/archive once")).contains(archive);
+            verify(root, never().description(row + " does not descend into docs/archive")).contains(archivedHit);
+        }
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // V1: the project mount's own rejections, which run before the containment guard and keep their status and key
+    // ---------------------------------------------------------------------------------------------
+
+    // V1: the existing keys of the project mount's own rejections.
+    private static final String VERSION_NOT_FOUND = "openl.error.404.file.version.not.found.message";
+    private static final String NOT_MODIFIABLE = "openl.error.409.project.status.update.failed.message";
+    private static final String READ_FAILED = "openl.error.409.file.read.failed.message";
+
+    // V1: surface B preservation (ACL through the secured wrapper): without READ permission on the project, every read,
+    // listing, export and search of a project mount keeps its 403, before anything is read or looked up
+    @ParameterizedTest
+    @EnumSource(value = MountKind.class, names = {"OPENED", "CLOSED_FLAT", "CLOSED_MAPPED"})
+    void readWithoutPermissionOnTheProjectIsStillForbidden(MountKind kind) throws IOException {
+        var lookup = mock(ProjectFileLookupService.class);
+        var mount = mount(kind, lookup);
+        var root = mount.root();
+        when(mount.acl().hasPermission(any(AProject.class), eq(BasePermission.READ))).thenReturn(false);
+        var service = service(mount.acl(), new FileNodeMapperImpl());
+        var source = mount.path(SOURCE);
+        var export = new ByteArrayOutputStream();
+        var payloads = new ArrayList<>(List.of(
+                new Payload("getResource " + SOURCE, () -> service.getResource(root, source, null)),
+                new Payload("getNode " + SOURCE, () -> service.getNode(root, source, null)),
+                new Payload("writeFolderAsZip of the project", () -> service.writeFolderAsZip(root, "", export, null)),
+                new Payload("content search", () -> service.search(root,
+                        FileSearchQuery.builder().content(marker()).recursive(true).build())),
+                new Payload("ancestor search", () -> service.search(root, ancestorSearch(mount.path("sub"))))));
+        for (var viewMode : FileViewMode.values()) {
+            payloads.add(new Payload("recursive " + viewMode + " listing",
+                    () -> service.getResources(root, FileCriteriaQuery.builder().build(), true, viewMode, null)));
+        }
+
+        for (var payload : payloads) {
+            var row = "Project READ denied: " + payload.description() + " on " + kind;
+            var before = snapshot(mount);
+            assertForbidden(row, payload.call());
+            assertNothingWritten(row, mount, before);
+            assertNeverOpened(row, mount, SOURCE);
+        }
+        assertEquals(0, export.size(), "The forbidden export on " + kind + " streams nothing");
+        verifyNoInteractions(lookup);
+        // Positive control: once the project may be read, the same content search reads the file.
+        when(mount.acl().hasPermission(any(AProject.class), eq(BasePermission.READ))).thenReturn(true);
+        service.search(root, FileSearchQuery.builder().content(marker()).recursive(true).build());
+        assertOpened("Project READ granted: content search on " + kind, mount, SOURCE);
+    }
+
+    // V1: surface B preservation: a project whose state does not let the user modify it keeps the mount's 409 on every
+    // write, before any path is validated or resolved on disk, so a destination behind a link changes nothing either
+    @ParameterizedTest
+    @EnumSource(value = MountKind.class, names = {"OPENED", "CLOSED_FLAT", "CLOSED_MAPPED"})
+    @DisabledOnOs(OS.WINDOWS)
+    void writeToAProjectThatCannotBeModifiedKeepsItsConflict(MountKind kind) throws IOException {
+        var mount = unmodifiableMount(kind);
+        Files.createSymbolicLink(mount.project().resolve("link"), outsideDir());
+        var root = spy(mount.root());
+        var service = service(mount.acl(), new FileNodeMapperImpl());
+        var source = mount.path(SOURCE);
+        var linked = mount.path("link/y.txt");
+        var payloads = List.of(
+                new Payload("createResource link/y.txt",
+                        () -> service.createResource(root, linked, stream(marker()), true)),
+                new Payload("createFolder link/newdir",
+                        () -> service.createFolder(root, mount.path("link/newdir"), true)),
+                new Payload("uploadFiles link/x.txt", () -> service.uploadFiles(root, "",
+                        List.of(file(mount.path("link/x.txt"), marker())), ConflictPolicy.FAIL)),
+                new Payload("uploadArchive under link", () -> service.uploadArchive(root, mount.path("link"),
+                        zip("z.txt", marker()), true, ConflictPolicy.FAIL)),
+                new Payload("copyResource to link/y.txt", () -> service.copyResource(root, source, linked)),
+                new Payload("moveResource to link/y.txt", () -> service.moveResource(root, source, linked)),
+                new Payload("updateResource " + SOURCE,
+                        () -> service.updateResource(root, source, stream(marker()))),
+                new Payload("deleteResource " + SOURCE, () -> service.deleteResource(root, source)));
+
+        for (var payload : payloads) {
+            var row = "Unmodifiable project: " + payload.description() + " on " + kind;
+            var before = snapshot(mount);
+            var rejected = assertThrows(ConflictException.class, payload.call(), row + " is rejected");
+            assertEquals(NOT_MODIFIABLE, rejected.getErrorCode(), row + " keeps its 409");
+            assertNothingWritten(row, mount, before);
+        }
+        verify(root, never().description("The state check on " + kind + " runs before any path is resolved on disk"))
+                .contains(anyString());
+        assertTrue(Files.isRegularFile(mount.project().resolve(SOURCE), LinkOption.NOFOLLOW_LINKS),
+                "The rejected move and delete on " + kind + " leave " + SOURCE + " in P1");
+    }
+
+    // V1: surface B preservation (historical reads): on a versioned backend that is not file-backed, as Git, JDBC, S3
+    // and Azure Blob are, a version the design repository does not hold keeps its 404 on every call that takes a
+    // version, and so does a version the backend fails to resolve; a version it holds is still served
+    @Test
+    void missingOrUnresolvableVersionStaysNotFound() throws IOException {
+        var versioned = versionedBackend(marker());
+        var held = marker();
+        when(versioned.checkHistory("P1", held)).thenReturn(fileData("P1", held));
+        when(versioned.listFiles("P1/", held)).thenReturn(List.of(fileData("P1/rules.xml", held)));
+        var unresolvable = marker();
+        when(versioned.checkHistory("P1", unresolvable)).thenThrow(new IOException(marker()));
+        var mount = versionedMount(versioned);
+        var root = mount.root();
+        var service = service(mount.acl(), new FileNodeMapperImpl());
+
+        // Positive control: the backend serves the version it holds, so the rejections below come from the version.
+        assertEquals(held, service.getResource(root, "rules.xml", held).getFileData().getVersion(),
+                "A version the backend holds is served");
+
+        var missing = marker();
+        for (var version : List.of(missing, unresolvable)) {
+            var which = version.equals(missing) ? "a missing" : "an unresolvable";
+            var export = new ByteArrayOutputStream();
+            var payloads = new ArrayList<>(List.of(
+                    new Payload("getResource rules.xml", () -> service.getResource(root, "rules.xml", version)),
+                    new Payload("getNode rules.xml", () -> service.getNode(root, "rules.xml", version)),
+                    new Payload("writeFolderAsZip of the project",
+                            () -> service.writeFolderAsZip(root, "", export, version)),
+                    new Payload("content search", () -> service.search(root,
+                            FileSearchQuery.builder().content(marker()).recursive(true).version(version).build()))));
+            for (var viewMode : FileViewMode.values()) {
+                payloads.add(new Payload("recursive " + viewMode + " listing", () -> service.getResources(root,
+                        FileCriteriaQuery.builder().build(), true, viewMode, version)));
+            }
+            for (var payload : payloads) {
+                var row = payload.description() + " at " + which + " version";
+                var notFound = assertThrows(NotFoundException.class, payload.call(), row + " is not found");
+                assertEquals(VERSION_NOT_FOUND, notFound.getErrorCode(), row + " keeps its 404");
+            }
+            assertEquals(0, export.size(), "The export at " + which + " version streams nothing");
+            verify(versioned, never().description("Nothing is listed at " + which + " version"))
+                    .listFiles(anyString(), eq(version));
+            verify(versioned, never().description("Nothing is read at " + which + " version"))
+                    .readHistory(anyString(), eq(version));
+        }
+    }
+
+    // V1: surface B payloads B16 and B17 with a version: a file repository keeps no history, so a version-qualified
+    // read of a closed project serves its current state, and the containment guard still applies to every read,
+    // listing, export and search that takes the version
+    @ParameterizedTest
+    @EnumSource(value = MountKind.class, names = {"CLOSED_FLAT", "CLOSED_MAPPED"})
+    @DisabledOnOs(OS.WINDOWS)
+    void versionQualifiedReadsOfAFileRepositoryKeepTheContainmentGuard(MountKind kind) throws Exception {
+        var mount = mount(kind);
+        var root = mount.root();
+        linkFilesOutOfTheProject(mount);
+        var service = service(mount.acl(), new FileNodeMapperImpl());
+        var version = marker();
+        var before = snapshot(mount);
+
+        // Positive control: the contained file is served with its current content.
+        try (var content = service.getResource(root, mount.path(SOURCE), version).getContent()) {
+            assertEquals(Files.readString(mount.project().resolve(SOURCE)),
+                    new String(content.readAllBytes(), StandardCharsets.UTF_8),
+                    "A version-qualified read of " + SOURCE + " on " + kind + " serves its current content");
+        }
+        for (var viewMode : FileViewMode.values()) {
+            var row = "Version-qualified recursive " + viewMode + " listing on " + kind;
+            var listed = pathsOf(
+                    service.getResources(root, FileCriteriaQuery.builder().build(), true, viewMode, version));
+            assertTrue(listed.contains(mount.path(SOURCE)), row + " lists " + SOURCE);
+            for (var link : LINKED_FILES) {
+                assertFalse(listed.contains(mount.path("docs/" + link)), row + " omits docs/" + link);
+            }
+        }
+        var found = service.search(root,
+                FileSearchQuery.builder().content(outsideSecret).recursive(true).version(version).build());
+        assertEquals(List.of(), pathsOf(found),
+                "A version-qualified content search on " + kind + " finds nothing behind docs/leak.txt");
+        var export = new ByteArrayOutputStream();
+        assertPathRejected("Version-qualified writeFolderAsZip docs on " + kind,
+                () -> service.writeFolderAsZip(root, mount.path("docs"), export, version));
+        assertEquals(0, export.size(), "The rejected version-qualified export on " + kind + " streams nothing");
+        for (var link : LINKED_FILES) {
+            var path = mount.path("docs/" + link);
+            var row = "Version-qualified reads of docs/" + link + " on " + kind;
+            assertPathRejected(row + " through getResource", () -> service.getResource(root, path, version));
+            assertPathRejected(row + " through getNode", () -> service.getNode(root, path, version));
+            assertNeverOpened(row, mount, "docs/" + link);
+        }
+        assertNothingWritten("Version-qualified reads on " + kind, mount, before);
+        assertLinkedFilesKept("Version-qualified reads on " + kind, mount);
+    }
+
+    // V1: surface B preservation (ancestor search): a lookup that fails to read keeps the project mount's 409, and the
+    // lookup is anchored at the lookup path inside the project's repository-internal path
+    @ParameterizedTest
+    @EnumSource(value = MountKind.class, names = {"OPENED", "CLOSED_FLAT", "CLOSED_MAPPED"})
+    void ancestorSearchKeepsItsConflictWhenTheLookupFailsToRead(MountKind kind) throws IOException {
+        var lookup = mock(ProjectFileLookupService.class);
+        when(lookup.lookup(any(AProject.class), any(), anyString(), anyBoolean())).thenThrow(new IOException(marker()));
+        var mount = mount(kind, lookup);
+        var project = projectOf(mount);
+        var service = service(mount.acl(), new FileNodeMapperImpl());
+        var row = "The ancestor search from sub on " + kind;
+
+        var rejected = assertThrows(ConflictException.class, () -> service.search(mount.root(), ancestorSearch("sub")),
+                row + " is rejected");
+
+        assertEquals(READ_FAILED, rejected.getErrorCode(), row + " keeps its 409");
+        var realPath = switch (kind) {
+            case OPENED, CLOSED_FLAT -> "P1";
+            case CLOSED_MAPPED -> "catalog/P1";
+            case REPO -> throw new IllegalArgumentException("Fixture: the repository mount is not a project mount");
+        };
+        verify(lookup).lookup(project, project.getDesignRepository(), realPath + "/sub/AGENTS.md", true);
+    }
+
+    // V1: surface B preservation (ancestor search): a project at the root of its repository, whose repository-internal
+    // path is empty, anchors the lookup at the lookup path itself and returns what the lookup finds
+    @Test
+    void ancestorSearchOfAProjectAtItsRepositoryRootIsAnchoredAtTheLookupPath() throws IOException {
+        var design = mock(Repository.class);
+        var store = tmp.resolve("matrix-root-project");
+        for (var realPath : List.of("", "/")) {
+            var project = mock(RulesProject.class);
+            when(project.getRealPath()).thenReturn(realPath);
+            when(project.getDesignRepository()).thenReturn(design);
+            var lookup = mock(ProjectFileLookupService.class);
+            List<FsNode> nodes = List.of(
+                    FileNode.builder().path("AGENTS.md").name("AGENTS.md").content(marker()).build());
+            when(lookup.lookup(project, design, "sub/AGENTS.md", true)).thenReturn(nodes);
+            var mount = projectMount(project, store, store, lookup, List.of(design));
+            var service = service(mount.acl(), new FileNodeMapperImpl());
+
+            assertEquals(nodes, service.search(mount.root(), ancestorSearch("sub")),
+                    "The ancestor search of a project at '" + realPath + "' returns what the lookup finds");
+            verify(lookup).lookup(project, design, "sub/AGENTS.md", true);
+            verifyNoInteractions(design);
+        }
+    }
+
     // ---------------------------------------------------------------------------------------------
     // V1: fixtures of the surface B matrix
     // ---------------------------------------------------------------------------------------------
@@ -1246,22 +1596,25 @@ class ProjectFilesServiceTest {
             MetainfoRegistry.store(workspace, name,
                     new ProjectMetainfo("design", null, null, null, null, null, null, null, Map.of()));
         }
-        var workingCopy = new LocalRepository(workspace, MetainfoRegistry.open(workspace));
-        var securedDesign = SecuredRepositoryFactory.wrapToSecureRepo(fileRepository(design), grantAllRepoAcl());
+        // V1: both repositories are spied, so a test can prove which files the mount never read.
+        var workingCopy = spy(new LocalRepository(workspace, MetainfoRegistry.open(workspace)));
+        var designFiles = spy(fileRepository(design));
+        var securedDesign = SecuredRepositoryFactory.wrapToSecureRepo(designFiles, grantAllRepoAcl());
         var project = new RulesProject(user(), workingCopy, workingCopy.check("P1"), securedDesign,
                 securedDesign.check("P1"), lockEngine());
         assertTrue(project.isOpened(), "Fixture: the project is served from the working copy");
-        return projectMount(project, workspace, workspace.resolve("P1"), lookup);
+        return projectMount(project, workspace, workspace.resolve("P1"), lookup, List.of(workingCopy, designFiles));
     }
 
     // V1: a closed project P1 in the flat file design repository matrix-design-flat, behind SecureRepository.
     private Mount closedFlatMount(ProjectFileLookupService lookup) throws IOException {
         layOutOutside();
         var design = layOutProjects(tmp.resolve("matrix-design-flat"));
+        var files = spy(fileRepository(design)); // V1: spied, so a test can prove which files the mount never read
         var secured = assertInstanceOf(SecureRepository.class,
-                SecuredRepositoryFactory.wrapToSecureRepo(fileRepository(design), grantAllRepoAcl()),
+                SecuredRepositoryFactory.wrapToSecureRepo(files, grantAllRepoAcl()),
                 "Fixture: the flat secured wrapper");
-        return projectMount(closedProject(secured, "P1"), design, design.resolve("P1"), lookup);
+        return projectMount(closedProject(secured, "P1"), design, design.resolve("P1"), lookup, List.of(files));
     }
 
     // V1: a closed project P1 in the mapped file design repository matrix-design-mapped, behind SecureMappedRepository.
@@ -1269,13 +1622,14 @@ class ProjectFilesServiceTest {
         layOutOutside();
         var design = tmp.resolve("matrix-design-mapped");
         var store = layOutProjects(design.resolve("catalog"));
-        var mapped = MappedRepository.create(fileRepository(design), "DESIGN/");
+        var files = spy(fileRepository(design)); // V1: spied, so a test can prove which files the mount never read
+        var mapped = MappedRepository.create(files, "DESIGN/");
         matrixCloseables.add((Closeable) mapped);
         var secured = assertInstanceOf(SecureMappedRepository.class,
                 SecuredRepositoryFactory.wrapToSecureRepo(mapped, grantAllRepoAcl()),
                 "Fixture: the mapped secured wrapper");
         var project = closedProject(secured, mappedName(secured, "P1"));
-        return projectMount(project, store, store.resolve("P1"), lookup);
+        return projectMount(project, store, store.resolve("P1"), lookup, List.of(files));
     }
 
     // V1: the repository mount exactly as the /rest/repos/{repo}/files routes build it, through RepoFileRootFactory.
@@ -1283,9 +1637,10 @@ class ProjectFilesServiceTest {
         layOutOutside();
         var design = layOutProjects(tmp.resolve("matrix-design-repo"));
         var settings = Map.of("repository.design.factory", "repo-file", "repository.design.uri", design.toString());
-        var configured = assertInstanceOf(PathCheckedRepository.class,
+        // V1: spied, so a test can prove which files the mount never read; the mount reads through it unmapped.
+        var configured = spy(assertInstanceOf(PathCheckedRepository.class,
                 RepositoryInstatiator.newRepository("repository.design", settings::get),
-                "Fixture: the settings build a path-checked repo-file repository");
+                "Fixture: the settings build a path-checked repo-file repository"));
         // The mapped repository closes the configured one with it.
         var mapped = MappedRepository.create(configured, "DESIGN/");
         matrixCloseables.add((Closeable) mapped);
@@ -1296,7 +1651,7 @@ class ProjectFilesServiceTest {
                 "Fixture: the factory mounts the path-checked repository behind the mapping");
         var acl = grantAllProjectAcl();
         var root = factoryMount(secured, acl, lookup);
-        return new Mount(root, design.resolve("P1"), design.resolve("P2"), design, "P1/", acl);
+        return new Mount(root, design.resolve("P1"), design.resolve("P2"), design, "P1/", acl, List.of(configured));
     }
 
     // V1: RepoFileRootFactory stamps the authenticated user as the author, so a generated user is authenticated.
@@ -1327,14 +1682,16 @@ class ProjectFilesServiceTest {
         }
     }
 
-    // V1: a project mount over a grant-all project ACL, which the mount and its service share.
-    private Mount projectMount(RulesProject project, Path store, Path projectFolder, ProjectFileLookupService lookup) {
+    // V1: a project mount over a grant-all project ACL, which the mount and its service share; storage holds the
+    // spied repositories the project reads its content through.
+    private Mount projectMount(RulesProject project, Path store, Path projectFolder, ProjectFileLookupService lookup,
+                               List<Repository> storage) {
         var acl = grantAllProjectAcl();
         var stateValidator = mock(ProjectStateValidator.class);
         when(stateValidator.canModify(project)).thenReturn(true);
         var root = new ProjectFileRoot(project, acl, stateValidator, lookup, () -> new UserInfo(userName),
                 mock(DesignTimeRepository.class));
-        return new Mount(root, projectFolder, store.resolve("P2"), store, "", acl);
+        return new Mount(root, projectFolder, store.resolve("P2"), store, "", acl, storage);
     }
 
     // V1: a project served from its design repository, as a closed project is.
@@ -1347,6 +1704,54 @@ class ProjectFilesServiceTest {
         project.setFileData(designData);
         assertFalse(project.isOpened(), "Fixture: the project is served from the design repository");
         return project;
+    }
+
+    // V1: the project a project mount of the matrix serves.
+    private static RulesProject projectOf(Mount mount) {
+        return assertInstanceOf(ProjectFileRoot.class, mount.root(), "Fixture: a project mount").getProject();
+    }
+
+    // V1: the project mount of the kind over a project whose state does not let the user modify it, as for a project
+    // locked by another user or on a protected branch.
+    private Mount unmodifiableMount(MountKind kind) throws IOException {
+        var mount = mount(kind);
+        var project = projectOf(mount);
+        var stateValidator = mock(ProjectStateValidator.class);
+        when(stateValidator.canModify(project)).thenReturn(false);
+        var root = new ProjectFileRoot(project, mount.acl(), stateValidator, mock(ProjectFileLookupService.class),
+                () -> new UserInfo(userName), mock(DesignTimeRepository.class));
+        return new Mount(root, mount.project(), mount.sibling(), mount.store(), mount.prefix(), mount.acl(),
+                mount.storage());
+    }
+
+    // V1: a versioned design repository that is not file-backed, as Git, JDBC, S3 and Azure Blob are, holding P1 at the
+    // current version; any other call returns the mock's defaults unless a test stubs it.
+    private static Repository versionedBackend(String currentVersion) throws IOException {
+        var versioned = mock(Repository.class);
+        var features = new FeaturesBuilder(versioned).setVersions(true).setFolders(true).build();
+        when(versioned.supports()).thenReturn(features);
+        when(versioned.check("P1")).thenReturn(fileData("P1", currentVersion));
+        return versioned;
+    }
+
+    // V1: a closed project P1 in the versioned backend; it has no folder on disk, so the mount accepts every path.
+    private Mount versionedMount(Repository versioned) throws IOException {
+        var store = tmp.resolve("matrix-versioned");
+        return projectMount(closedProject(versioned, "P1"), store, store.resolve("P1"),
+                mock(ProjectFileLookupService.class), List.of(versioned));
+    }
+
+    // V1: the repository entry of the name at the version.
+    private static FileData fileData(String name, String version) {
+        var data = new FileData();
+        data.setName(name);
+        data.setVersion(version);
+        return data;
+    }
+
+    // V1: the ancestor search for AGENTS.md, from the mount-relative folder.
+    private static FileSearchQuery ancestorSearch(String from) {
+        return FileSearchQuery.builder().scope(FileSearchQuery.Scope.ANCESTORS).pattern("AGENTS.md").from(from).build();
     }
 
     // V1: the mapped name of a project in a mapped repository, under its base folder.
@@ -1482,6 +1887,30 @@ class ProjectFilesServiceTest {
     private static void assertForbidden(String row, Executable call) {
         var denied = assertThrows(ForbiddenException.class, call, row + " is forbidden");
         assertEquals(FORBIDDEN, denied.getErrorCode(), row + " keeps its 403");
+    }
+
+    // V1: the content of the file was never opened through the mount's repositories, whatever the call returned.
+    /**
+     * Verifies that no repository of the mount opened the content of the file: neither a read nor a historical read
+     * of it, nor a repository-side copy from it, which opens its content without returning it. Repositories receive
+     * their internal path, such as {@code P1/docs/leak.txt} or {@code catalog/P1/docs/leak.txt}, so the name is
+     * matched by its end.
+     */
+    private static void assertNeverOpened(String row, Mount mount, String projectRelative) throws IOException {
+        for (var repository : mount.storage()) {
+            verify(repository, never().description(row + " never reads " + projectRelative))
+                    .read(endsWith(projectRelative));
+            verify(repository, never().description(row + " never reads a revision of " + projectRelative))
+                    .readHistory(endsWith(projectRelative), any());
+            verify(repository, never().description(row + " never copies from " + projectRelative))
+                    .copyHistory(endsWith(projectRelative), any(), any());
+        }
+    }
+
+    // V1: the positive control of assertNeverOpened: the repository serving the current state saw the file read.
+    private static void assertOpened(String row, Mount mount, String projectRelative) throws IOException {
+        verify(mount.storage().getFirst(), atLeastOnce().description(row + " reads " + projectRelative))
+                .read(endsWith(projectRelative));
     }
 
     // V1: the regular-file links of LINKED_FILES that lead out of P1, to the outside file and to the sibling's file.

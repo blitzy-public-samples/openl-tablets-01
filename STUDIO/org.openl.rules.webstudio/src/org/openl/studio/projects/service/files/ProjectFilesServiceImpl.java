@@ -84,9 +84,10 @@ public class ProjectFilesServiceImpl implements ProjectFilesService {
         AProjectFolder projectFolder = root.readFolder(version);
         AProjectFolder baseFolder = resolveBaseFolder(projectFolder, query);
 
-        var filter = buildFilterCriteria(query);
+        // V1: a recursive listing checks each folder before it descends into it, so the filter checks only the rest.
+        var filter = buildFilterCriteria(root, query, recursive);
 
-        // V1: the builders omit every entry a link places outside the mount.
+        // V1: the builders and the filter omit every entry a link places outside the mount.
         if (viewMode == FileViewMode.NESTED && recursive) {
             return buildNested(root, baseFolder, filter);
         } else {
@@ -874,7 +875,7 @@ public class ProjectFilesServiceImpl implements ProjectFilesService {
                     }
                 }
             } else {
-                var children = buildNestedChildren(root, folder, filter, builtChildren);
+                var children = buildNestedChildren(folder, filter, builtChildren);
                 children.sort(FileNodeMapper.NODE_COMPARATOR);
                 builtChildren.put(folder, children);
             }
@@ -883,15 +884,14 @@ public class ProjectFilesServiceImpl implements ProjectFilesService {
         return builtChildren.getOrDefault(rootFolder, List.of());
     }
 
-    private List<FsNode> buildNestedChildren(FileRoot root,
-                                               AProjectFolder folder,
+    private List<FsNode> buildNestedChildren(AProjectFolder folder,
                                                Predicate<AProjectArtefact> filter,
                                                IdentityHashMap<AProjectFolder, List<FsNode>> builtChildren) {
         List<FsNode> out = new ArrayList<>();
         for (var artefact : folder.getArtefacts()) {
             if (!artefact.isFolder()) {
-                // V1: a file a link places outside the mount is omitted, before the filter's ACL check.
-                if (root.contains(artefact.getInternalPath()) && filter.test(artefact)) {
+                // V1: the filter omits a file a link places outside the mount, after its cheap criteria.
+                if (filter.test(artefact)) {
                     out.add(resourceMapper.map(artefact));
                 }
                 continue;
@@ -937,11 +937,18 @@ public class ProjectFilesServiceImpl implements ProjectFilesService {
         return (AProjectFolder) artefact;
     }
 
+    // V1: the filter checks containment in the mount after the cheap criteria and before the ACL check.
     /**
-     * Builds a filter predicate based on the query criteria and ACL permissions.
+     * Builds a filter predicate based on the query criteria, containment in the mount and ACL permissions.
      * The filter is applied before mapping to DTO to minimize overhead.
+     *
+     * @param root           the mount whose {@link FileRoot#contains(String)} the filter checks
+     * @param foldersChecked whether every folder the filter tests has been checked with
+     *                       {@link FileRoot#contains(String)} already, as a recursive listing does before
+     *                       it descends into one
      */
-    private Predicate<AProjectArtefact> buildFilterCriteria(FileCriteriaQuery query) {
+    private Predicate<AProjectArtefact> buildFilterCriteria(FileRoot root, FileCriteriaQuery query,
+                                                            boolean foldersChecked) {
         Predicate<AProjectArtefact> filter = artefact -> true;
 
         // Folders only filter
@@ -969,6 +976,11 @@ public class ProjectFilesServiceImpl implements ProjectFilesService {
             });
         }
 
+        // V1: an entry a link places outside the mount is omitted. The check resolves the entry on disk, so it runs
+        // after the cheap criteria above and is skipped for a folder that has been checked already.
+        filter = filter.and(artefact -> (foldersChecked && artefact.isFolder())
+                || root.contains(artefact.getInternalPath()));
+
         // permissions filter must always be the last to minimize effort on ACL because it's quite expensive
         return filter.and(artefact -> aclProjectsHelper.hasPermission(artefact, BasePermission.READ));
     }
@@ -988,8 +1000,9 @@ public class ProjectFilesServiceImpl implements ProjectFilesService {
         while (!queue.isEmpty()) {
             AProjectFolder folder = queue.poll();
             for (AProjectArtefact artefact : folder.getArtefacts()) {
-                // V1: an entry a link places outside the mount is neither listed nor descended into.
-                if (!root.contains(artefact.getInternalPath())) {
+                // V1: a folder the listing descends into is checked first, so one a link places outside is neither
+                // listed nor descended into. Every other entry is checked by the filter, once its cheap criteria pass.
+                if (recursive && artefact.isFolder() && !root.contains(artefact.getInternalPath())) {
                     continue;
                 }
                 if (filter.test(artefact)) {

@@ -5,7 +5,7 @@ Content-Type: application/json
   "message": "Bad Request",
   "fields": [
     {
-      "code": "openl.error.ChangePasswordConstraint",
+      "code": "openl.constraints.password.max-bytes.message",
       "message": "The password must not exceed 72 bytes in UTF-8.",
       "field": "changePassword"
     }

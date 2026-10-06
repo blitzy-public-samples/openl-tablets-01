@@ -1,10 +1,16 @@
 package org.openl.itest;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.fail;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.OutputStream;
+import java.io.PrintStream;
 import java.io.Reader;
 import java.io.UncheckedIOException;
+import java.net.http.HttpResponse;
+import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -31,23 +37,47 @@ class WebStudioTest {
     private static final SecureRandom RANDOM = new SecureRandom();
     private static final String ALPHANUMERIC = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 
+    // V10: the V10 folder's form login, and the http.json request that carries only the session cookie it sets. The
+    // latter lies outside test-resources, so the generic runner never sends, compares, prints or saves its answer.
+    private static final Path V10_LOGIN_REQUEST = Path.of("test-resources", "security-V10-sysinfo", "020-login.req");
+    private static final Path V10_HTTP_JSON_REQUEST = Path.of("test-resources-security-V10-sysinfo",
+            "031-http-json-session.req");
+    private static final String SESSION_COOKIE = "JSESSIONID";
+
     @Test
     void repos() throws Exception {
-        // V1: runtime credentials, then a scan of saved responses for generated secrets
+        // V1: runtime credentials, then scans of captured console output and saved responses for generated secrets
         Map<String, String> generated = new HashMap<>();
         Throwable failure = null;
+        var capture = OutputCapture.start(); // V1: the console output is copied from before the server starts
         try (var client = JettyServer.get().start()) {
             putAdminCredentials(client, generated); // V1: the derived administrator header is scanned for too
             putPasswordPolicyValues(client, generated); // V7: generated local-user passwords
             putLockoutValues(client, generated); // V9: generated lockout-scenario credentials
-            client.test("test-resources");
+            // V10: the http.json session check runs after the generic run, also when that run failed, whose failure
+            // then stays the reported one and carries the check's failure as suppressed
+            try {
+                client.test("test-resources");
+            } catch (Throwable generic) {
+                try {
+                    assertHttpJsonNeedsOnlySession(client, generated);
+                } catch (Throwable v10) {
+                    if (v10 instanceof InterruptedException) {
+                        Thread.currentThread().interrupt();
+                    }
+                    generic.addSuppressed(v10);
+                }
+                throw generic;
+            }
+            assertHttpJsonNeedsOnlySession(client, generated);
         } catch (Throwable t) {
             failure = t;
             throw t;
         } finally {
+            capture.close(); // V1: the server has stopped, so the copy is complete; the console is restored
             // V1: a scan error of any kind is suppressed onto the suite failure instead of replacing it
             try {
-                assertNoSecretsSaved(generated);
+                assertNoSecretsLeaked(generated, capture);
             } catch (AssertionError | RuntimeException scan) {
                 if (failure != null) {
                     failure.addSuppressed(scan);
@@ -206,6 +236,43 @@ class WebStudioTest {
         generated.put("V9_RESET_WRONG_PASSWORD", resetWrongPassword);
     }
 
+    // V10: http.json echoes the request's headers and cookies, so it is sent through a JDK client that discards both
+    // answers, never through the generic runner, which prints and saves a mismatching one. The session cookie of a
+    // form login alone must get 200, and the session ID joins the generated secrets before it is sent anywhere.
+    static void assertHttpJsonNeedsOnlySession(HttpClient client, Map<String, String> generated)
+            throws IOException, InterruptedException {
+        // HTTP/1.1, as the harness client uses; by default redirects are not followed and no cookie is stored.
+        try (var http = java.net.http.HttpClient.newBuilder()
+                .version(java.net.http.HttpClient.Version.HTTP_1_1)
+                .build()) {
+            var login = http.send(PatExpiryITest.readRequest(V10_LOGIN_REQUEST, client.getBaseURL(), client.localEnv),
+                    HttpResponse.BodyHandlers.discarding());
+            assertEquals(302, login.statusCode(), "V10 form login: status");
+            String sessionId = sessionId(login.headers().allValues("Set-Cookie"));
+            generated.put("V10_SESSION_COOKIE", sessionId);
+            Map<String, String> env = new HashMap<>(client.localEnv);
+            env.put("V10_SESSION_COOKIE", SESSION_COOKIE + "=" + sessionId);
+            int status = http.send(PatExpiryITest.readRequest(V10_HTTP_JSON_REQUEST, client.getBaseURL(), env),
+                    HttpResponse.BodyHandlers.discarding()).statusCode();
+            assertEquals(200, status, "V10 http.json with only the session cookie: status");
+        }
+    }
+
+    // V10: the value of the last JSESSIONID pair the headers set; the failure message never quotes a header
+    private static String sessionId(List<String> setCookieHeaders) {
+        String id = null;
+        for (String header : setCookieHeaders) {
+            String pair = header.split(";", 2)[0].trim();
+            if (pair.startsWith(SESSION_COOKIE + "=") && pair.length() > SESSION_COOKIE.length() + 1) {
+                id = pair.substring(SESSION_COOKIE.length() + 1);
+            }
+        }
+        if (id == null) {
+            return fail("V10 form login: no " + SESSION_COOKIE + " cookie set");
+        }
+        return id;
+    }
+
     // V1: random alphanumeric password of the given length
     static String randomPassword(int length) {
         StringBuilder builder = new StringBuilder(length);
@@ -256,6 +323,126 @@ class WebStudioTest {
         }
         if (!names.isEmpty()) {
             fail("Generated secrets found under server.responses: " + names);
+        }
+    }
+
+    // V1: fails, naming only the sorted keys, when a generated secret appears in the captured stdout or stderr. A Basic
+    // value is searched for by its Base64 part, which also covers the full header, and each value as its stream's
+    // encoding prints it, so a character that encoding cannot represent is matched as it was printed.
+    static void assertNoSecretsPrinted(Map<String, String> generated, OutputCapture capture) {
+        String out = capture.out();
+        String err = capture.err();
+        Set<String> names = new TreeSet<>();
+        for (Map.Entry<String, String> entry : generated.entrySet()) {
+            String value = entry.getValue();
+            if (value == null || value.isEmpty()) {
+                continue;
+            }
+            String needle = value.startsWith("Basic ") ? value.substring("Basic ".length()) : value;
+            if (out.contains(printed(needle, capture.outCharset()))
+                    || err.contains(printed(needle, capture.errCharset()))) {
+                names.add(entry.getKey());
+            }
+        }
+        if (!names.isEmpty()) {
+            fail("Generated secrets found in the captured output: " + names);
+        }
+    }
+
+    // V1: runs the captured-output scan, then the saved-response scan whatever the first did; a saved-response
+    // failure is attached to a captured-output failure, which is the one thrown
+    static void assertNoSecretsLeaked(Map<String, String> generated, OutputCapture capture) {
+        try {
+            assertNoSecretsPrinted(generated, capture);
+        } catch (AssertionError | RuntimeException leak) {
+            try {
+                assertNoSecretsSaved(generated);
+            } catch (AssertionError | RuntimeException scan) {
+                leak.addSuppressed(scan);
+            }
+            throw leak;
+        }
+        assertNoSecretsSaved(generated);
+    }
+
+    // V1: the text as a stream with the given encoding prints it
+    private static String printed(String text, Charset charset) {
+        return new String(text.getBytes(charset), charset);
+    }
+
+    // V1: copies System.out and System.err while they still reach the console, which shows a mismatching response and
+    // the run's progress, so the run's output can be scanned for generated secrets once the server has stopped
+    static final class OutputCapture implements AutoCloseable {
+        private final PrintStream originalOut = System.out;
+        private final PrintStream originalErr = System.err;
+        private final ByteArrayOutputStream outCopy = new ByteArrayOutputStream();
+        private final ByteArrayOutputStream errCopy = new ByteArrayOutputStream();
+        private final PrintStream teeOut = tee(originalOut, outCopy);
+        private final PrintStream teeErr = tee(originalErr, errCopy);
+        private boolean closed;
+
+        private OutputCapture() {
+        }
+
+        /** Remembers the current System.out and System.err and installs streams that write to both them and a copy. */
+        static OutputCapture start() {
+            var capture = new OutputCapture();
+            System.setOut(capture.teeOut);
+            System.setErr(capture.teeErr);
+            return capture;
+        }
+
+        /** A stream in the console stream's encoding that writes every byte to the console and to the copy. */
+        private static PrintStream tee(PrintStream console, ByteArrayOutputStream copy) {
+            return new PrintStream(new OutputStream() {
+                @Override
+                public void write(int b) {
+                    console.write(b);
+                    copy.write(b);
+                }
+
+                @Override
+                public void write(byte[] b, int off, int len) {
+                    console.write(b, off, len);
+                    copy.write(b, off, len);
+                }
+
+                @Override
+                public void flush() {
+                    console.flush();
+                }
+            }, true, console.charset());
+        }
+
+        Charset outCharset() {
+            return originalOut.charset();
+        }
+
+        Charset errCharset() {
+            return originalErr.charset();
+        }
+
+        /** The text written to System.out so far, decoded with that stream's encoding. */
+        String out() {
+            return outCopy.toString(outCharset());
+        }
+
+        /** The text written to System.err so far, decoded with that stream's encoding. */
+        String err() {
+            return errCopy.toString(errCharset());
+        }
+
+        /** Flushes the copying streams and restores the remembered ones; later calls do nothing. */
+        @Override
+        public synchronized void close() {
+            if (closed) {
+                return;
+            }
+            closed = true;
+            teeOut.flush();
+            teeErr.flush();
+            System.setOut(originalOut);
+            System.setErr(originalErr);
         }
     }
 

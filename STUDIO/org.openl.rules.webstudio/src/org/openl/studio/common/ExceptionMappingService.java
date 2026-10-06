@@ -8,6 +8,7 @@ import jakarta.validation.ConstraintViolation;
 import jakarta.validation.ConstraintViolationException;
 import jakarta.validation.Path;
 
+import org.jspecify.annotations.Nullable;
 import org.springframework.beans.TypeMismatchException;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.context.MessageSource;
@@ -24,6 +25,7 @@ import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
 
+import org.openl.rules.rest.validation.LocalPasswordPolicy;
 import org.openl.studio.common.exception.AmbiguityException;
 import org.openl.studio.common.exception.RestRuntimeException;
 import org.openl.studio.common.exception.ValidationException;
@@ -120,7 +122,9 @@ public class ExceptionMappingService {
                         .stream()
                         .sorted(Comparator.comparing(FieldError::getField, String.CASE_INSENSITIVE_ORDER))
                         .map(fieldError -> org.openl.studio.common.model.FieldError.builder()
-                                .code(buildErrorCode(fieldError.getCode()))
+                                // V7: a local password policy violation is answered with its message key as its code
+                                .code(fieldErrorCode(messageTemplateOf(fieldError),
+                                        buildErrorCode(fieldError.getCode())))
                                 .field(fieldError.getField())
                                 // V7: a rejected password, or a model carrying one, is never echoed back
                                 .rejectedValue(rejectedValueOf(fieldError.getField(), fieldError.getRejectedValue()))
@@ -152,7 +156,9 @@ public class ExceptionMappingService {
                 .filter(violation -> isFieldError(violation.getPropertyPath()))
                 .sorted(Comparator.comparing(violation -> violation.getPropertyPath().toString(), String.CASE_INSENSITIVE_ORDER))
                 .map(violation -> org.openl.studio.common.model.FieldError.builder()
-                        .code(buildErrorCode(violation.getMessageTemplate()))
+                        // V7: a local password policy violation is answered with its message key as its code
+                        .code(fieldErrorCode(violation.getMessageTemplate(),
+                                buildErrorCode(violation.getMessageTemplate())))
                         .field(violation.getPropertyPath().toString())
                         // V7: a rejected password, or a model carrying one, is never echoed back
                         .rejectedValue(rejectedValueOf(violation.getPropertyPath().toString(),
@@ -180,6 +186,24 @@ public class ExceptionMappingService {
             return null;
         }
         return rejectedValue;
+    }
+
+    // V7: the two local password policy violations use their message key as the code; any other code is unchanged
+    private static String fieldErrorCode(@Nullable String messageTemplate, String code) {
+        if (("{" + LocalPasswordPolicy.MIN_LENGTH_KEY + "}").equals(messageTemplate)) {
+            return LocalPasswordPolicy.MIN_LENGTH_KEY;
+        }
+        if (("{" + LocalPasswordPolicy.MAX_BYTES_KEY + "}").equals(messageTemplate)) {
+            return LocalPasswordPolicy.MAX_BYTES_KEY;
+        }
+        return code;
+    }
+
+    // V7: the message template of the constraint violation behind a field error, if a Bean Validation one made it
+    private static @Nullable String messageTemplateOf(FieldError fieldError) {
+        return fieldError.contains(ConstraintViolation.class)
+                ? fieldError.unwrap(ConstraintViolation.class).getMessageTemplate()
+                : null;
     }
 
     private boolean isFieldError(Path propertyPath) {

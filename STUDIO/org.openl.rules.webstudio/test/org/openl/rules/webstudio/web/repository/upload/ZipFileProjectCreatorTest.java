@@ -51,6 +51,7 @@ import java.util.zip.ZipInputStream;
 import org.apache.commons.compress.archivers.zip.ZipArchiveEntry;
 import org.apache.commons.compress.archivers.zip.ZipArchiveOutputStream;
 import org.apache.commons.lang3.RandomStringUtils;
+import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -102,9 +103,9 @@ import org.openl.rules.workspace.uw.UserWorkspace;
  * throws before it can delete its copy of the upload, so the copy stays in the temporary directory; the cases that
  * reach those branches remove it themselves.
  *
- * <p>The handlers for an archive that fails after it has opened, an entry it cannot list, find or read and an archive
- * that cannot be closed, are out of reach of a real upload, because the JDK validates the whole central directory when
- * it opens an archive. Those cases replace the {@link ZipFile} the creator opens with a mock that fails at that step.
+ * <p>The cases for the handlers of an archive that fails after it has opened replace the {@link ZipFile} the creator
+ * opens with a mock that fails at the chosen step (listing, finding or reading an entry, or closing the archive), which
+ * gives each selected fault site deterministic coverage.
  */
 class ZipFileProjectCreatorTest {
 
@@ -589,8 +590,8 @@ class ZipFileProjectCreatorTest {
 
     // Creates the creator while every ZipFile this thread opens is a mock the stubbing configures, then stages its
     // project, and keeps the archives opened, so a case can prove that its stub is the archive the creator read. The
-    // JDK validates the whole central directory when it opens an archive, so only such a stub can fail after the
-    // archive has opened.
+    // stub fails at the step the stubbing chooses after the archive has opened (listing, finding or reading an entry,
+    // or closing the archive), which gives that fault site deterministic coverage.
     private StubbedUpload uploadThroughStubbedArchive(MockedConstruction.MockInitializer<ZipFile> stubbing)
             throws IOException {
         var archive = archive(List.of());
@@ -887,10 +888,10 @@ class ZipFileProjectCreatorTest {
     }
 
     // How one upload ended: staged (builder), refused (rejection), or with a runtime exception that escaped.
-    private record Outcome(ZipFileProjectCreator creator,
-                           RulesProjectBuilder builder,
-                           Exception rejection,
-                           RuntimeException escaped) {
+    private record Outcome(@Nullable ZipFileProjectCreator creator,
+                           @Nullable RulesProjectBuilder builder,
+                           @Nullable Exception rejection,
+                           @Nullable RuntimeException escaped) {
     }
 
     // An upload run against a stubbed archive, with the archives the creator opened.

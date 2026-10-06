@@ -2,11 +2,13 @@ package org.openl.itest;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.api.Assertions.fail;
 
 import java.io.BufferedReader;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStreamReader;
+import java.io.OutputStream;
+import java.io.PrintStream;
 import java.io.Reader;
 import java.io.UncheckedIOException;
 import java.nio.charset.Charset;
@@ -65,9 +67,14 @@ class UsersRestTest {
     private static final String BASIC_PREFIX = "Basic ";
     private static String mailPassword;
     private static String adminAuth;
+    // V7: tee of System.out and System.err from setUp to tearDown, scanned for the tracked secrets after shutdown
+    private static ConsoleCapture console;
+    // V7: the verification token testMail reads from the e-mail, tracked so that both scans cover it
+    private static @Nullable String mailVerificationToken;
 
     @BeforeAll
     static void setUp() throws Exception {
+        console = ConsoleCapture.start(); // V7: first, so the output of every server started below is captured
         h2Server = Server.createTcpServer("-tcp", "-tcpAllowOthers", "-ifNotExists");
         h2Server.start();
         String dbUrl = "jdbc:h2:" + h2Server.getURL() + "/mem:mydb";
@@ -107,7 +114,7 @@ class UsersRestTest {
 
     @AfterAll
     static void tearDown() throws Exception {
-        // V7: after shutdown, fail if a generated secret was saved with a mismatching response
+        // V7: after shutdown, fail if a generated secret was saved with a mismatching response or printed
         Throwable failure = null;
         try {
             client.close();
@@ -119,7 +126,15 @@ class UsersRestTest {
             failure = t;
             throw t;
         } finally {
-            assertNoGeneratedSecretsSaved(failure);
+            console.close(); // V7: restores the original streams on every path, before the scans read the capture
+            // V7: both scans get the saved-response root, the tracked secrets and each stream's capture
+            assertNoGeneratedSecretsSaved(Path.of(System.getProperty("server.responses", "target/responses")),
+                    trackedSecrets(client == null ? Map.of() : client.localEnv, mailPassword, mailVerificationToken),
+                    console.stdout(),
+                    console.stdoutCharset(),
+                    console.stderr(),
+                    console.stderrCharset(),
+                    failure);
         }
     }
 
@@ -238,6 +253,7 @@ class UsersRestTest {
         String content = bufferedReader.lines().collect(Collectors.joining());
         int tokenStartIndex = content.indexOf(TOKEN_PARAM) + TOKEN_PARAM.length();
         String token = content.substring(tokenStartIndex, tokenStartIndex + TOKEN_LENGTH);
+        mailVerificationToken = token; // V7: tracked before the request that sends it, so the scans cover it
         // V7: the administrator header is derived at runtime
         client.getForObject("/rest/mail/verify/" + token, String.class, 204, "Authorization", adminAuth);
         inputStreamReader.close();
@@ -286,40 +302,75 @@ class UsersRestTest {
                 .encodeToString((user + ":" + password).getBytes(StandardCharsets.UTF_8));
     }
 
-    // V7: fails, naming only variables and counts, when a saved mismatching response holds a generated secret.
-    // ADMIN_AUTH_TOCKEN is left out: it is derived, not secret, and unedited fixtures still carry it literally.
-    // A scan error is suppressed onto the teardown failure, and thrown only when the teardown itself passed.
-    private static void assertNoGeneratedSecretsSaved(@Nullable Throwable failure) {
-        Path root = Path.of(System.getProperty("server.responses", "target/responses"));
-        if (!Files.isDirectory(root)) {
+    // V7: the secrets both scans track. ADMIN_AUTH_TOCKEN is a Basic encoding derived at runtime and is scanned by its
+    // Base64 part too, as the repos runners do. HttpData.log prints and saves only responses, never request headers,
+    // so the literal administrator headers in unedited .req fixtures cannot trip the scans.
+    static Map<String, String> trackedSecrets(Map<String, String> env,
+            @Nullable String smtpPassword,
+            @Nullable String verificationToken) {
+        Map<String, String> secrets = new LinkedHashMap<>();
+        for (String name : List.of("JSMITH_PASSWORD_1", "JSMITH_PASSWORD_2", "JSMITH_PASSWORD_3", "JDOE_PASSWORD")) {
+            secrets.put(name, env.get(name));
+        }
+        for (String name : List.of("ADMIN_AUTH_TOCKEN", "JSMITH_BASIC_2", "JSMITH_BASIC_3")) {
+            String value = env.get(name);
+            secrets.put(name, value);
+            if (value != null && value.startsWith(BASIC_PREFIX)) {
+                secrets.put(name + " (base64)", value.substring(BASIC_PREFIX.length()));
+            }
+        }
+        secrets.put("MAIL_PASSWORD", smtpPassword);
+        secrets.put("MAIL_VERIFICATION_TOKEN", verificationToken);
+        return secrets;
+    }
+
+    // V7: fails, naming only variables and counts, when a saved mismatching response or the captured output holds a
+    // tracked secret. Both scans always run. Their errors are suppressed onto the primary failure; without one, the
+    // first error is thrown with the other suppressed onto it.
+    static void assertNoGeneratedSecretsSaved(Path root,
+            Map<String, String> secrets,
+            String stdout,
+            Charset stdoutCharset,
+            String stderr,
+            Charset stderrCharset,
+            @Nullable Throwable failure) {
+        List<Throwable> errors = new ArrayList<>(2);
+        Throwable saved = scanSavedResponses(root, secrets);
+        if (saved != null) {
+            errors.add(saved);
+        }
+        AssertionError printed = scanCapturedOutput(secrets, stdout, stdoutCharset, stderr, stderrCharset);
+        if (printed != null) {
+            errors.add(printed);
+        }
+        if (errors.isEmpty()) {
             return;
         }
-        Map<String, String> secrets = new LinkedHashMap<>();
-        if (client != null) {
-            for (String name : List.of("JSMITH_PASSWORD_1", "JSMITH_PASSWORD_2", "JSMITH_PASSWORD_3",
-                    "JDOE_PASSWORD")) {
-                secrets.put(name, client.localEnv.get(name));
-            }
-            for (String name : List.of("JSMITH_BASIC_2", "JSMITH_BASIC_3")) {
-                String value = client.localEnv.get(name);
-                secrets.put(name, value);
-                if (value != null && value.startsWith(BASIC_PREFIX)) {
-                    secrets.put(name + " (base64)", value.substring(BASIC_PREFIX.length()));
-                }
-            }
+        if (failure != null) {
+            errors.forEach(failure::addSuppressed);
+            return;
         }
-        secrets.put("MAIL_PASSWORD", mailPassword);
+        Throwable first = errors.get(0);
+        errors.subList(1, errors.size()).forEach(first::addSuppressed);
+        if (first instanceof Error error) {
+            throw error;
+        }
+        throw (RuntimeException) first; // the scans report only AssertionError and UncheckedIOException
+    }
 
+    // V7: the saved-response scan; it returns its error instead of throwing it, so the output scan still runs
+    private static @Nullable Throwable scanSavedResponses(Path root, Map<String, String> secrets) {
+        if (!Files.isDirectory(root)) {
+            return null;
+        }
         List<Path> files;
         try (Stream<Path> walk = Files.walk(root)) {
             files = walk.filter(Files::isRegularFile).toList();
         } catch (IOException e) {
-            scanFailed(new UncheckedIOException(e), failure);
-            return;
+            return new UncheckedIOException(e);
         } catch (UncheckedIOException e) {
             // The directory stream reports a failed traversal step unchecked
-            scanFailed(e, failure);
-            return;
+            return e;
         }
         Map<String, Integer> counts = new LinkedHashMap<>();
         for (Path file : files) {
@@ -328,8 +379,7 @@ class UsersRestTest {
                 // ISO-8859-1 maps every byte, and the generated values are ASCII
                 content = new String(Files.readAllBytes(file), StandardCharsets.ISO_8859_1);
             } catch (IOException e) {
-                scanFailed(new UncheckedIOException(e), failure);
-                return;
+                return new UncheckedIOException(e); // V7: returned, so the caller still runs the output scan
             }
             secrets.forEach((name, value) -> {
                 if (value != null && !value.isEmpty() && content.contains(value)) {
@@ -337,24 +387,110 @@ class UsersRestTest {
                 }
             });
         }
-        if (!counts.isEmpty()) {
-            List<String> findings = new ArrayList<>();
-            counts.forEach((name, count) -> findings.add(name + " found in " + count + " saved response file(s)"));
-            String message = String.join("; ", findings);
-            if (failure == null) {
-                fail(message);
-            } else {
-                failure.addSuppressed(new AssertionError(message));
+        if (counts.isEmpty()) {
+            return null;
+        }
+        List<String> findings = new ArrayList<>();
+        counts.forEach((name, count) -> findings.add(name + " found in " + count + " saved response file(s)"));
+        return new AssertionError(String.join("; ", findings));
+    }
+
+    // V7: the captured-output scan; each value is normalized through the stream's charset, as its capture was decoded
+    private static @Nullable AssertionError scanCapturedOutput(Map<String, String> secrets,
+            String stdout,
+            Charset stdoutCharset,
+            String stderr,
+            Charset stderrCharset) {
+        List<String> findings = new ArrayList<>();
+        secrets.forEach((name, value) -> {
+            if (value != null && !value.isEmpty()) {
+                countPrinted(findings, name, "System.out", stdout,
+                        new String(value.getBytes(stdoutCharset), stdoutCharset));
+                countPrinted(findings, name, "System.err", stderr,
+                        new String(value.getBytes(stderrCharset), stderrCharset));
             }
+        });
+        return findings.isEmpty() ? null : new AssertionError(String.join("; ", findings));
+    }
+
+    // V7: records how often a value occurs in one stream's capture, naming only the variable, the stream and the count
+    private static void countPrinted(List<String> findings, String name, String stream, String captured, String value) {
+        int count = 0;
+        for (int at = captured.indexOf(value); at >= 0; at = captured.indexOf(value, at + value.length())) {
+            count++;
+        }
+        if (count > 0) {
+            findings.add(name + " found " + count + " time(s) in captured " + stream);
         }
     }
 
-    // V7: a scan I/O error is suppressed onto the teardown failure, and thrown only when the teardown itself passed
-    private static void scanFailed(UncheckedIOException e, @Nullable Throwable failure) {
-        if (failure == null) {
-            throw e;
+    // V7: tees System.out and System.err to the original streams and to memory, so the scans see what the run printed
+    // while the console still shows every line, a mismatching response included
+    private static final class ConsoleCapture {
+        private final PrintStream originalOut = System.out;
+        private final PrintStream originalErr = System.err;
+        private final ByteArrayOutputStream capturedOut = new ByteArrayOutputStream();
+        private final ByteArrayOutputStream capturedErr = new ByteArrayOutputStream();
+        private final PrintStream teeOut = tee(originalOut, capturedOut);
+        private final PrintStream teeErr = tee(originalErr, capturedErr);
+        private boolean closed;
+
+        static ConsoleCapture start() {
+            ConsoleCapture capture = new ConsoleCapture();
+            System.setOut(capture.teeOut);
+            System.setErr(capture.teeErr);
+            return capture;
         }
-        failure.addSuppressed(e);
+
+        // Encodes with the original stream's charset, so the forwarded bytes are what the original would have written
+        private static PrintStream tee(PrintStream console, ByteArrayOutputStream copy) {
+            return new PrintStream(new OutputStream() {
+                @Override
+                public void write(int b) {
+                    console.write(b);
+                    copy.write(b);
+                }
+
+                @Override
+                public void write(byte[] b, int off, int len) {
+                    console.write(b, off, len);
+                    copy.write(b, off, len);
+                }
+
+                @Override
+                public void flush() {
+                    console.flush();
+                }
+            }, true, console.charset());
+        }
+
+        String stdout() {
+            return capturedOut.toString(originalOut.charset());
+        }
+
+        Charset stdoutCharset() {
+            return originalOut.charset();
+        }
+
+        String stderr() {
+            return capturedErr.toString(originalErr.charset());
+        }
+
+        Charset stderrCharset() {
+            return originalErr.charset();
+        }
+
+        // Flushes the tees and restores the original streams; a repeated call does nothing
+        synchronized void close() {
+            if (closed) {
+                return;
+            }
+            closed = true;
+            teeOut.flush();
+            teeErr.flush();
+            System.setOut(originalOut);
+            System.setErr(originalErr);
+        }
     }
 
     public static class MailConfigRequest {

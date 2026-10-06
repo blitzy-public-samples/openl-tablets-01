@@ -1,7 +1,6 @@
 package org.openl.studio.projects.service.files;
 
 import java.io.IOException;
-import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
 import java.util.HashMap;
 import java.util.List;
@@ -10,7 +9,6 @@ import java.util.function.Supplier;
 import lombok.AccessLevel;
 import lombok.Getter;
 import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
 import org.jspecify.annotations.Nullable;
 import org.springframework.security.acls.domain.BasePermission;
 
@@ -49,8 +47,6 @@ import org.openl.util.StringUtils;
  * @author Yury Molchan
  */
 @RequiredArgsConstructor
-// V1: the logger traces a project folder boundary that cannot be resolved.
-@Slf4j
 public class ProjectFileRoot implements FileRoot {
 
     @Getter(AccessLevel.PACKAGE)
@@ -279,8 +275,6 @@ public class ProjectFileRoot implements FileRoot {
                 boundary = FileRoot.projectBoundary(project).orElse(null);
             } catch (IllegalArgumentException | SecurityException e) {
                 boundaryUnresolvable = true;
-                log.debug("Project folder boundary not resolved, every path is rejected: {}{}", e.getClass().getName(),
-                        e instanceof InvalidPathException invalid ? " (" + invalid.getReason() + ")" : "");
             }
             boundaryResolved = true;
         }

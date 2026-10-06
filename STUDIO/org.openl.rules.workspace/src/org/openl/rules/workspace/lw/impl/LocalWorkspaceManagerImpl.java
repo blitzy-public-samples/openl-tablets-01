@@ -136,9 +136,9 @@ public class LocalWorkspaceManagerImpl implements LocalWorkspaceManager, LocalWo
         throw new IllegalArgumentException(INVALID_USER_ID);
     }
 
-    // V1: real-path containment of the user's folder under the workspace home. It is a private helper of this class,
-    // against the Minimal Change Rule's preference for dedicated files, because path checks are not shared between
-    // the workspace, file, project and upload surfaces
+    // V1: real-path containment of the user's folder under the workspace home. No path check is shared between the
+    // workspace, file, project and upload surfaces, so it stays private to this class, not in the dedicated file the
+    // Minimal Change Rule prefers
     /**
      * Checks that the user folder is a real folder of its own right under the workspace root.
      *
@@ -174,9 +174,7 @@ public class LocalWorkspaceManagerImpl implements LocalWorkspaceManager, LocalWo
             var walked = Files.exists(boundary, LinkOption.NOFOLLOW_LINKS) ? boundary.toRealPath() : boundary;
             return walked.startsWith(boundary);
         } catch (IOException | IllegalArgumentException | SecurityException e) {
-            // V1: the caller turns the failure into the rejection; the message leaves out the id, which may hold
-            // control characters
-            log.debug("A user id failed the workspace folder check.", e);
+            // V1: the caller turns the failure into the rejection
             return false;
         }
     }

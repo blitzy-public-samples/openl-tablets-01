@@ -20,12 +20,15 @@ import org.openl.rules.webstudio.util.NameChecker;
  * {@code Repository.validatePath}, and before the real-path containment check of the user's folder. A rejection
  * becomes the {@code IllegalArgumentException} that {@code userDir} throws for every invalid user id.
  *
- * <p>A user id is accepted only if {@link NameChecker#validatePath(String)} accepts it. That rejects the characters
- * {@code \ : ; < > ? * % ' " | [ ]}, control characters, a doubled separator, a leading space, a trailing dot or
- * space, and the reserved names {@code CON}, {@code PRN}, {@code AUX}, {@code NUL}, {@code COM1} to {@code COM9}
- * and {@code LPT1} to {@code LPT9}. {@code NameChecker} reads {@code /}, and on Windows {@code \}, as a path
- * separator, so a user id that contains one relies on the caller's earlier checks, which reject separators.
- * {@code null} and the empty string are rejected without calling {@code NameChecker}.
+ * <p>A user id is accepted only if both {@link NameChecker#checkName(String)} and
+ * {@link NameChecker#validatePath(String)} accept it. {@code checkName} reads the id as it stands, before any path
+ * parsing, and rejects the characters {@code \ / : ; < > ? * % ' " | [ ]}, control characters, a leading space and a
+ * trailing dot or space. Path parsing could otherwise drop a part of the id: on Windows the drive prefix of a
+ * drive-relative id such as {@code C:x} becomes a path root, which {@code validatePath} does not check, so such an id
+ * is rejected on every operating system. {@code validatePath} then rejects the reserved names {@code CON},
+ * {@code PRN}, {@code AUX}, {@code NUL}, {@code COM1} to {@code COM9} and {@code LPT1} to {@code LPT9}, and an id
+ * that the path API cannot parse. {@code null} and the empty string are rejected without calling
+ * {@code NameChecker}.
  *
  * <p>The check is stateless and therefore thread-safe. It logs nothing and never reports the rejected id: the
  * caller turns a rejection into its own error.
@@ -36,7 +39,8 @@ public final class WorkspaceFolderNameCheck implements Predicate<String> {
      * Tests whether the user id can name a workspace folder.
      *
      * @param name the user id
-     * @return {@code true} only for a non-empty name that {@link NameChecker#validatePath(String)} accepts
+     * @return {@code true} only for a non-empty name that both {@link NameChecker#checkName(String)} and
+     *         {@link NameChecker#validatePath(String)} accept
      */
     @Override
     public boolean test(@Nullable String name) {
@@ -44,12 +48,15 @@ public final class WorkspaceFolderNameCheck implements Predicate<String> {
         if (name == null || name.isEmpty()) {
             return false;
         }
+        // V1: the raw id must be a valid single name, so path parsing cannot drop a Windows drive prefix such as C:
+        if (!NameChecker.checkName(name)) {
+            return false;
+        }
         try {
             NameChecker.validatePath(name);
             return true;
         } catch (IOException | IllegalArgumentException e) {
-            // IllegalArgumentException covers the InvalidPathException the path API raises for a name it cannot
-            // parse, such as one with a NUL byte
+            // IllegalArgumentException covers the InvalidPathException the path API raises for a name it cannot parse
             return false;
         }
     }

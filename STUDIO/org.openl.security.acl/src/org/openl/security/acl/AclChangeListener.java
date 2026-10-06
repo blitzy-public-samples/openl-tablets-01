@@ -13,7 +13,8 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
  * <p>{@link JdbcMutableAclService} reports each mutation through {@link #record}. One event is either one
  * completed transaction, committed or rolled back, that performed at least one mutation, or one mutation made
  * outside any transaction. A bulk overwrite that runs in a single transaction is therefore one event, however
- * many repositories, projects and SIDs it touches.
+ * many repositories, projects and SIDs it touches. Mutations undone by a rollback to a savepoint, as the rollback of
+ * a nested transaction does, are not counted, and a transaction left with none is not reported.
  *
  * <p>The listener is called on the thread that completes the transaction, after completion, so the transaction
  * is no longer usable from inside {@link #aclChanged}. The thread still carries its security context, which is

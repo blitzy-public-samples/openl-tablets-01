@@ -647,15 +647,16 @@ The following command produces a value in the legacy format only. To run it on L
 value for `${SECRET_KEY}` and the value to encrypt for `${PLAIN_PASSWORD}`:
 
 ```bash
-echo -n "${PLAIN_PASSWORD}" \
+printf '%s' "${PLAIN_PASSWORD}" \
   | openssl aes-128-cbc \
-    -K $(echo -n "${SECRET_KEY}" | sha1sum | awk '{ print substr($1, 1, 32) }') \
+    -K "$(printf '%s' "${SECRET_KEY}" | sha1sum | awk '{ print substr($1, 1, 32) }')" \
     -e \
     -iv 00000000000000000000000000000000 \
-    -base64 \
+    -base64 -A \
   | awk '{ print "ENC("$1")" }'
 ```
 
+`-A` keeps the Base64 text on one line, so that the command prints a single `ENC(...)` value.
 The value passed to `-K` is the first 32 characters of the SHA-1 hash of `secret.key`. On macOS, use `shasum` instead
 of `sha1sum`. The cipher of the legacy format is configurable through `secret.cipher`; it does not affect
 `ENC(v2:...)` values.

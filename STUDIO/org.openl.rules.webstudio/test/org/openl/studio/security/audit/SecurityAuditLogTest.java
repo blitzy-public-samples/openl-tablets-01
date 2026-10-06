@@ -4,9 +4,12 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
+import java.nio.charset.StandardCharsets;
 import java.util.List;
+import java.util.SortedSet;
 import java.util.TreeSet;
 import java.util.regex.Pattern;
 import jakarta.servlet.http.HttpServletRequest;
@@ -16,6 +19,8 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junitpioneer.jupiter.StdErr;
 import org.junitpioneer.jupiter.StdIo;
+import org.slf4j.LoggerFactory;
+import org.slf4j.simple.SimpleLogger;
 import org.springframework.mock.web.MockHttpServletRequest;
 import org.springframework.security.authentication.AnonymousAuthenticationToken;
 import org.springframework.security.authentication.TestingAuthenticationToken;
@@ -82,6 +87,12 @@ class SecurityAuditLogTest {
 
     /** A character outside the Basic Multilingual Plane, written as a surrogate pair. */
     private static final String SURROGATE_PAIR = "\uD83D\uDE00";
+
+    /** The slf4j-simple level constant whose level, made the lowest enabled one, disables INFO but keeps WARN. */
+    private static final String INFO_DISABLED = "LOG_LEVEL_WARN";
+
+    /** The slf4j-simple level constant whose level, made the lowest enabled one, disables WARN and INFO. */
+    private static final String WARN_DISABLED = "LOG_LEVEL_ERROR";
 
     @AfterEach
     void cleanUp() {
@@ -242,6 +253,37 @@ class SecurityAuditLogTest {
                 "pat.revoke must carry the context user and the request address");
         assertTrue(line.contains(" pat=" + publicId), "pat.revoke must carry the public ID");
         assertNoMethodOtherThanPat(line);
+    }
+
+    @Test
+    @StdIo
+    void patLifecycleLinesNeverCarryTheTokenName(StdErr err) {
+        var password = password();
+        var publicId = randomValue(16);
+        // The token name is free text that could itself be a credential, so it is generated like one.
+        var tokenName = randomValue(32);
+        authenticateInContext(password);
+        // The bound request carries the name as the creation request does, in its body, and as a parameter.
+        var request = new MockHttpServletRequest();
+        request.setRemoteAddr(CONTEXT_REQUEST_ADDRESS);
+        request.setContentType("application/json");
+        request.setContent(("{\"name\":\"" + tokenName + "\"}").getBytes(StandardCharsets.UTF_8));
+        request.setParameter("name", tokenName);
+        RequestContextHolder.setRequestAttributes(new ServletRequestAttributes(request));
+
+        SecurityAuditLog.patCreate(publicId);
+        SecurityAuditLog.patRevoke(publicId);
+
+        assertNoLeak(err, password, tokenName);
+        var lines = auditLines(err);
+        assertEquals(2, lines.size(), "Expected one audit line per token lifecycle event");
+        for (var line : lines) {
+            assertTrue(LINE.matcher(line).matches(), "The audit line does not have the audit line format");
+        }
+        var create = " - event=pat.create outcome=success user=\"jdoe\" ip=203.0.113.5 pat=" + publicId;
+        var revoke = " - event=pat.revoke outcome=success user=\"jdoe\" ip=203.0.113.5 pat=" + publicId;
+        assertTrue(lines.get(0).endsWith(create), "pat.create must carry the user, address and public ID only");
+        assertTrue(lines.get(1).endsWith(revoke), "pat.revoke must carry the user, address and public ID only");
     }
 
     @Test
@@ -874,6 +916,102 @@ class SecurityAuditLogTest {
     }
 
     // ---------------------------------------------------------------------------------------------------------
+    // Disabled levels: an event whose level is disabled reads nothing and writes nothing
+    // ---------------------------------------------------------------------------------------------------------
+
+    @Test
+    @StdIo
+    void infoEventsReadAndWriteNothingWhileInfoIsDisabled(StdErr err) throws Exception {
+        var attempt = mock(Authentication.class);
+        var result = mock(Authentication.class);
+        var request = mock(HttpServletRequest.class);
+        var context = mock(Authentication.class);
+        SecurityContextHolder.getContext().setAuthentication(context);
+        var bound = mock(HttpServletRequest.class);
+        RequestContextHolder.setRequestAttributes(new ServletRequestAttributes(bound));
+        SortedSet<String> kinds = mock();
+        SortedSet<String> objectTypes = mock();
+
+        atLevel(INFO_DISABLED, () -> {
+            var logger = LoggerFactory.getLogger(SecurityAuditLog.LOGGER_NAME);
+            assertTrue(!logger.isInfoEnabled() && logger.isWarnEnabled(), "Only INFO must be disabled");
+            SecurityAuditLog.authSuccess(attempt, result);
+            SecurityAuditLog.authSuccess(request, USER_NAME, randomValue(16));
+            SecurityAuditLog.patCreate(randomValue(16));
+            SecurityAuditLog.patRevoke(randomValue(16));
+            SecurityAuditLog.aclChange("success", 1, kinds, objectTypes);
+        });
+
+        verifyNoInteractions(attempt, result, request, context, bound, kinds, objectTypes);
+        assertTrue(auditLines(err).isEmpty(), "An event whose level is disabled must write nothing");
+    }
+
+    @Test
+    @StdIo
+    void warnEventsReadAndWriteNothingWhileWarnIsDisabled(StdErr err) throws Exception {
+        var failed = mock(Authentication.class);
+        var locked = mock(Authentication.class);
+        var request = mock(HttpServletRequest.class);
+        var context = mock(Authentication.class);
+        SecurityContextHolder.getContext().setAuthentication(context);
+        var bound = mock(HttpServletRequest.class);
+        RequestContextHolder.setRequestAttributes(new ServletRequestAttributes(bound));
+        SortedSet<String> kinds = mock();
+        SortedSet<String> objectTypes = mock();
+
+        atLevel(WARN_DISABLED, () -> {
+            assertFalse(LoggerFactory.getLogger(SecurityAuditLog.LOGGER_NAME).isWarnEnabled(), "WARN must be disabled");
+            SecurityAuditLog.authFailure(failed);
+            SecurityAuditLog.lockout(locked);
+            SecurityAuditLog.authFailure(request, randomValue(16));
+            SecurityAuditLog.aclChange("failure", 1, kinds, objectTypes);
+            SecurityAuditLog.aclChange(null, 1, kinds, objectTypes);
+        });
+
+        verifyNoInteractions(failed, locked, request, context, bound, kinds, objectTypes);
+        assertTrue(auditLines(err).isEmpty(), "An event whose level is disabled must write nothing");
+    }
+
+    @Test
+    @StdIo
+    void warnEventsAreWrittenUnchangedWhileOnlyInfoIsDisabled(StdErr err) throws Exception {
+        var password = password();
+        var publicId = randomValue(16);
+        var secret = randomValue(32);
+        authenticateInContext(password);
+
+        var root = new TreeSet<>(List.of("Root"));
+
+        atLevel(INFO_DISABLED, () -> {
+            SecurityAuditLog.authFailure(UsernamePasswordAuthenticationToken.unauthenticated(USER_NAME, password));
+            SecurityAuditLog.lockout(UsernamePasswordAuthenticationToken.unauthenticated(USER_NAME, password));
+            SecurityAuditLog.authFailure(patRequest(pat(publicId, secret)), publicId);
+            SecurityAuditLog.aclChange("success", 1, new TreeSet<>(List.of("createAcl")), root);
+            SecurityAuditLog.aclChange("failure", 1, new TreeSet<>(List.of("deleteAcl")), root);
+        });
+
+        assertNoLeak(err, password, secret, pat(publicId, secret));
+        var lines = auditLines(err);
+        assertEquals(4, lines.size(), "Expected the four WARN events and no committed ACL change");
+        for (var line : lines) {
+            assertTrue(LINE.matcher(line).matches(), "The audit line does not have the audit line format");
+            assertLevel(line, "WARN");
+        }
+        var method = " method=UsernamePasswordAuthenticationToken";
+        assertTrue(lines.get(0).endsWith("event=auth.failure outcome=failure user=\"jdoe\" ip=-" + method),
+                "auth.failure must be written unchanged");
+        assertTrue(lines.get(1).endsWith("event=auth.lockout outcome=locked user=\"jdoe\" ip=-" + method),
+                "auth.lockout must be written unchanged");
+        assertTrue(lines.get(2)
+                .endsWith("event=auth.failure outcome=failure user=\"-\" ip=198.51.100.7 method=pat pat=" + publicId),
+                "PAT auth.failure must be written unchanged");
+        assertTrue(lines.get(3)
+                .endsWith("event=acl.change outcome=failure user=\"jdoe\" ip=- changes=1 kinds=deleteAcl"
+                        + " objectTypes=Root"),
+                "acl.change that did not commit must be written unchanged");
+    }
+
+    // ---------------------------------------------------------------------------------------------------------
     // Helpers
     // ---------------------------------------------------------------------------------------------------------
 
@@ -1005,6 +1143,30 @@ class SecurityAuditLogTest {
             return false;
         } catch (RuntimeException e) {
             return true;
+        }
+    }
+
+    /**
+     * Runs the calls while the audit logger's lowest enabled level is the given one, then restores the level it had.
+     * slf4j-simple, the unit-test binding, fixes the level of a logger when it creates the logger and has no API to
+     * change it, so the current level of the logger is set directly.
+     *
+     * @param lowestEnabled the name of the slf4j-simple level constant, {@link #INFO_DISABLED} or
+     *                      {@link #WARN_DISABLED}
+     */
+    private static void atLevel(String lowestEnabled, Runnable calls) throws ReflectiveOperationException {
+        var logger = LoggerFactory.getLogger(SecurityAuditLog.LOGGER_NAME);
+        assertTrue(logger instanceof SimpleLogger, "The unit tests must bind slf4j to slf4j-simple");
+        var current = SimpleLogger.class.getDeclaredField("currentLogLevel");
+        var lowest = SimpleLogger.class.getDeclaredField(lowestEnabled);
+        current.setAccessible(true);
+        lowest.setAccessible(true);
+        var original = current.getInt(logger);
+        current.setInt(logger, lowest.getInt(null));
+        try {
+            calls.run();
+        } finally {
+            current.setInt(logger, original);
         }
     }
 

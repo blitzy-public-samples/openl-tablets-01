@@ -25,7 +25,8 @@ import org.springframework.mock.env.MockEnvironment;
 class AuthenticationDisabledWarningTest {
 
     private static final String PROPERTY = "ruleservice.authentication.enabled";
-    private static final String MESSAGE = "ruleservice.authentication.enabled=false: every Rule Services endpoint, including /admin/deploy when the deployer is enabled, is reachable without authentication.";
+    private static final String MESSAGE = "ruleservice.authentication.enabled=false: every Rule Services endpoint,"
+            + " including /admin/deploy when the deployer is enabled, is reachable without authentication.";
 
     @ParameterizedTest
     @ValueSource(strings = {"false", "FALSE", "   "})

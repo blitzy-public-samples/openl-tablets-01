@@ -47,8 +47,8 @@ import org.openl.itest.core.JettyServer;
  *
  * <p><b>Secrets.</b> The administrator header is derived at runtime by {@link WebStudioTest#putAdminCredentials}.
  * The created token is never printed, logged or put into a message: failure messages name only the field or the
- * step. Once the server has stopped, the saved responses are scanned for the Base64 part of the administrator header,
- * the token and its secret part.
+ * step. Once the server has stopped, the console output captured since before its start and the saved responses are
+ * scanned for the Base64 part of the administrator header, the token and its secret part.
  */
 class PatExpiryITest {
 
@@ -82,11 +82,12 @@ class PatExpiryITest {
 
     @Test
     void tokenWithoutExpiryExpiresAfterDefaultLifetime() throws Exception {
-        // V8: the generated secrets, searched for in the saved responses: the administrator header by its Base64
-        // part, the created token and its secret part.
+        // V8: the generated secrets, searched for in the captured console output and the saved responses: the
+        // administrator header by its Base64 part, the created token and its secret part.
         Map<String, String> generated = new HashMap<>();
         // The scan runs once the server has stopped, on success and on failure alike. It is not thrown from a
         // finally block, so a scan failure never replaces the test failure; it is attached to it instead.
+        var capture = WebStudioTest.OutputCapture.start(); // V8: the console output is copied from before the start
         try (var client = JettyServer.get().start()) {
             WebStudioTest.putAdminCredentials(client, generated); // V8: the administrator header joins the scan
             // The message names only the variable, never its value.
@@ -137,24 +138,27 @@ class PatExpiryITest {
             }
             revoke(client.getBaseURL(), publicId, admin);
         } catch (Throwable t) {
+            capture.close(); // V8: the server has stopped, so the copy is complete; the console is restored
             try {
-                WebStudioTest.assertNoSecretsSaved(generated);
+                WebStudioTest.assertNoSecretsLeaked(generated, capture); // V8: captured output, then saved responses
             } catch (AssertionError | RuntimeException scan) {
                 t.addSuppressed(scan);
             }
             throw t;
         }
-        WebStudioTest.assertNoSecretsSaved(generated);
+        capture.close(); // V8: as on the failure path
+        WebStudioTest.assertNoSecretsLeaked(generated, capture);
     }
 
     // V8: the over-maximum request is sent from Java, so an unexpected token-bearing answer is never printed or saved
     @Test
     void tokenBeyondMaximumLifetimeIsRejected() throws Exception {
-        // The generated secrets, searched for in the saved responses: the administrator header by its Base64 part,
-        // and the token and its secret part if one is issued by mistake.
+        // V8: the generated secrets, searched for in the captured console output and the saved responses: the
+        // administrator header by its Base64 part, and the token and its secret part if one is issued by mistake.
         Map<String, String> generated = new HashMap<>();
         // The scan runs once the server has stopped, on success and on failure alike, and a scan failure is attached
         // to the test failure instead of replacing it.
+        var capture = WebStudioTest.OutputCapture.start(); // V8: the console output is copied from before the start
         try (var client = JettyServer.get().start()) {
             WebStudioTest.putAdminCredentials(client, generated);
             WebStudioTest.putPatExpiryValues(client);
@@ -198,14 +202,16 @@ class PatExpiryITest {
             assertTrue(body != null, "over-maximum expiresAt: body");
             assertTrue(EXPIRES_AT_MAX_KEY.equals(optionalText(body, "code")), "over-maximum expiresAt: code");
         } catch (Throwable t) {
+            capture.close(); // V8: the server has stopped, so the copy is complete; the console is restored
             try {
-                WebStudioTest.assertNoSecretsSaved(generated);
+                WebStudioTest.assertNoSecretsLeaked(generated, capture); // V8: captured output, then saved responses
             } catch (AssertionError | RuntimeException scan) {
                 t.addSuppressed(scan);
             }
             throw t;
         }
-        WebStudioTest.assertNoSecretsSaved(generated);
+        capture.close(); // V8: as on the failure path
+        WebStudioTest.assertNoSecretsLeaked(generated, capture);
     }
 
     /**
@@ -213,7 +219,8 @@ class PatExpiryITest {
      * the body. Each {@code ${NAME}} of a header value or of the body is replaced from the environment, and the URI is
      * the base URL followed by the path. A failure names only the file part or the variable, never a value.
      */
-    private static HttpRequest readRequest(Path file, URI baseUrl, Map<String, String> env) throws IOException {
+    // V10: package-private, so WebStudioTest sends its http.json session check without the generic runner
+    static HttpRequest readRequest(Path file, URI baseUrl, Map<String, String> env) throws IOException {
         String text = Files.readString(file, StandardCharsets.UTF_8);
         Matcher headerEnd = HEADER_END.matcher(text);
         if (!headerEnd.find()) {

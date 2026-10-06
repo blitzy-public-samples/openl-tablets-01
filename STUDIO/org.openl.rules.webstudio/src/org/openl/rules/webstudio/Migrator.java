@@ -195,22 +195,31 @@ public class Migrator {
     }
 
     /**
-     * V1 surface A (workspace directory) name check, private to {@code Migrator}: the single-user name becomes a
-     * workspace folder, so it must be a single workspace folder name (no {@code /}, no {@code \}, no leading
-     * {@code .}), the rule {@link FolderHelper#isSafeFolderName(String)} applies to the user workspace directory. It
+     * V1 surface A (workspace directory) name check, private to {@code Migrator}: the name, the single-user name or a
+     * user folder name listed in the workspace root, names a workspace folder, so it must be a single workspace folder
+     * name (no {@code /}, no {@code \}, no leading {@code .}), the rule {@link FolderHelper#isSafeFolderName(String)}
+     * applies to the user workspace directory. It
      * must also pass both the repository path rules (no absolute path, no {@code .} or {@code ..} segment, no
      * {@code //}, no backslash) and the cross-platform name rules of {@link NameChecker} (no forbidden or control
      * character, no reserved name, no leading or trailing space, no trailing dot).
+     * {@link NameChecker#checkName(String)} applies those rules to the name as it stands, before
+     * {@link NameChecker#validatePath(String)} parses it, so a Windows drive prefix, which parsing turns into a path
+     * root, is rejected on every operating system: the name {@code C:x} is skipped and never moves the workspace to
+     * {@code x}.
      *
      * <p>It runs before the name is resolved as a path, so an unparsable name (for example one with a NUL
      * character) is skipped like any other invalid name instead of failing the startup.
      *
-     * @param username a non-blank single-user name
+     * @param username a non-blank single-user name or a user folder name listed in the workspace root
      * @return {@code true} if the name is a valid workspace folder name
      */
     private static boolean isValidWorkspaceFolderName(String username) {
         // V1: the name must be a single folder name, as the user workspace directory (userDir) requires.
         if (!FolderHelper.isSafeFolderName(username)) {
+            return false;
+        }
+        // V1: the raw name must be a valid single name, so path parsing cannot drop a Windows drive prefix such as C:
+        if (!NameChecker.checkName(username)) {
             return false;
         }
         try {
@@ -264,13 +273,15 @@ public class Migrator {
     }
 
     /**
-     * V1 surface A (workspace directory) log form of a text that holds a single-user name, such as the name itself or
-     * the description of an exception whose message holds the name's path: every ISO control character and the
+     * V1 surface A (workspace directory) log form of a text that holds the single-user name or a user folder name
+     * listed in the workspace root, such as the name itself or the description of an exception whose message holds
+     * the name's path: every ISO control character and the
      * Unicode line and paragraph separators, which some log viewers render as a line break, are replaced with
      * {@code _}, so the text can neither break its log line nor forge another one.
      *
-     * @param text the text to log; the callers pass a name already checked to be non-blank or an exception
-     *        description, and {@code null} is written as {@code null}
+     * @param text the text to log; the callers pass a single-user name already checked to be non-blank, a user folder
+     *        name listed in the workspace root or an exception description, and {@code null} is written as
+     *        {@code null}
      * @return the text with every such character replaced
      */
     private static String printable(@Nullable String text) {
@@ -292,6 +303,9 @@ public class Migrator {
      * <p>A project folder with a missing or unreadable repository link gets no record: the registry is
      * authoritative, and such folders are deleted at the first workspace load. For linked projects the
      * legacy {@code .studioProps} folder and the in-project edit history are deleted right away.
+     *
+     * <p>V1: a user folder that is not a valid workspace folder of its own, such as a link out of the workspace
+     * root or into another user's folder, is skipped with a WARN.
      */
     private static void migrateUserWorkspacesToMetainfoRegistry() {
         String workspacePath = Props.text(AdministrationSettings.USER_WORKSPACE_HOME);
@@ -308,10 +322,45 @@ public class Migrator {
         try (var userDirs = Files.list(workspacesRoot)) {
             userDirs.filter(Files::isDirectory)
                     .filter(dir -> !dir.getFileName().toString().startsWith("."))
+                    // V1: only a valid user folder of its own is converted, so nothing behind a link is touched.
+                    .filter(dir -> isOwnUserWorkspace(workspacesRoot, dir))
                     .forEach(Migrator::migrateUserWorkspace);
         } catch (IOException e) {
             log.error("Migration of user workspaces failed.", e);
         }
+    }
+
+    /**
+     * V1 surface A (workspace directory) guard of the metainfo conversion, which reads, writes and deletes files in
+     * each user folder: the folder is converted only if its name is a valid workspace folder name and it sits at its
+     * own place under the real workspace root, as the user workspace directory requires. A folder with an invalid
+     * name, one that links out of the root or into another user's folder, and one that cannot be resolved are each
+     * skipped with a WARN that names the folder, and the cause, in their printable form.
+     *
+     * @param workspacesRoot the existing workspace root
+     * @param userDir a folder listed in the workspace root
+     * @return {@code true} if the folder may be converted
+     */
+    private static boolean isOwnUserWorkspace(Path workspacesRoot, Path userDir) {
+        var name = userDir.getFileName().toString();
+        if (!isValidWorkspaceFolderName(name)) {
+            log.warn("The user workspace folder '{}' is not a valid workspace folder name; its metainfo migration is "
+                    + "skipped.", printable(name));
+            return false;
+        }
+        try {
+            if (!isOwnWorkspaceFolder(workspacesRoot, name)) {
+                log.warn("The user workspace folder '{}' resolves outside the workspace root; its metainfo migration "
+                        + "is skipped.", printable(name));
+                return false;
+            }
+        } catch (IOException | IllegalArgumentException e) {
+            log.warn("The user workspace folder '{}' cannot be resolved ({}); its metainfo migration is skipped.",
+                    printable(name),
+                    printable(e.toString()));
+            return false;
+        }
+        return true;
     }
 
     private static void migrateUserWorkspace(Path userDir) {

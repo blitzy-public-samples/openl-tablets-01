@@ -1,8 +1,7 @@
 package org.openl.studio.repositories.service;
 
 // V1: Iterator, LinkOption, Nullable, LocalWorkingTree, PathCheckedRepository, RepositoryDelegate,
-// FileSystemRepository, NameChecker, FolderMapper and BadRequestException serve the upload destination guard; the
-// import block itself cannot hold a comment, as Spotless rewrites it.
+// FileSystemRepository, NameChecker, FolderMapper and BadRequestException serve the upload destination guard.
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;

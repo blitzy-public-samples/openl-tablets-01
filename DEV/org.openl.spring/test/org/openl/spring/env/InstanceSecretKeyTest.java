@@ -19,6 +19,8 @@ import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.nio.file.attribute.FileTime;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.security.SecureRandom;
@@ -34,6 +36,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
 import org.jspecify.annotations.Nullable;
@@ -78,6 +81,10 @@ class InstanceSecretKeyTest {
      * How long a key file stays empty before its writer completes it: well within the wait of a reader.
      */
     private static final Duration WRITE_DELAY = Duration.ofMillis(100);
+    /**
+     * Text that imitates a log record, which a hostile directory name places after a line break.
+     */
+    private static final String FORGED_RECORD = "2026-10-06 10:53:42,902 INFO OpenL.config - forged record";
 
     @BeforeAll
     static void initLog() {
@@ -194,6 +201,102 @@ class InstanceSecretKeyTest {
         assertFalse(original.equals(key), "The cached key of the replaced file must not be returned");
     }
 
+    @ParameterizedTest(name = "create = {0}")
+    @ValueSource(booleans = {false, true})
+    void readsAtomicReplacementWithSameTimeAndSize(boolean create, @TempDir Path dir) throws IOException {
+        long checked = System.nanoTime();
+        String original = requireKey(InstanceSecretKey.get(dir, true, checked));
+        Path file = dir.resolve(InstanceSecretKey.FILE_NAME);
+        BasicFileAttributes before = Files.readAttributes(file, BasicFileAttributes.class);
+        String replacement = generatedKey();
+
+        // A key written beside the file, given the file's modification time and moved over it, as a restore does.
+        Path staged = Files.writeString(dir.resolve("replacement-key"), replacement);
+        Files.setLastModifiedTime(staged, before.lastModifiedTime());
+        Files.move(staged, file, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+        assertSameTimeAndSize(before, file);
+
+        assertSameKey(original, InstanceSecretKey.get(dir, false, checked),
+                "A read within the recheck interval must be served from memory");
+        // A lookup that may create checks the file at once; a read-only one once the recheck interval has passed.
+        long due = create ? checked : checked + InstanceSecretKey.RECHECK_INTERVAL_NANOS;
+        String key = InstanceSecretKey.get(dir, create, due);
+        assertSameKey(replacement, key, "A key file replaced with the same time and size must be read again");
+        assertFalse(original.equals(key), "The cached key of the replaced file must not be returned");
+        assertSameKey(replacement, InstanceSecretKey.get(dir, true), "A save must use the key that is in the file");
+        assertTrue(Arrays.equals(ascii(replacement), Files.readAllBytes(file)),
+                "A replaced key file must not be overwritten");
+    }
+
+    @ParameterizedTest(name = "create = {0}")
+    @ValueSource(booleans = {false, true})
+    void readsInPlaceRewriteWithSameTimeAndSize(boolean create, @TempDir Path dir) throws IOException {
+        long checked = System.nanoTime();
+        String original = requireKey(InstanceSecretKey.get(dir, true, checked));
+        Path file = dir.resolve(InstanceSecretKey.FILE_NAME);
+        BasicFileAttributes before = Files.readAttributes(file, BasicFileAttributes.class);
+        String replacement = generatedKey();
+
+        // The same file, rewritten and given back its modification time: no attribute tells the contents apart.
+        Files.writeString(file, replacement);
+        Files.setLastModifiedTime(file, before.lastModifiedTime());
+        BasicFileAttributes after = assertSameTimeAndSize(before, file);
+        assertEquals(before.fileKey(), after.fileKey(), "A file rewritten in place must keep its file key");
+
+        // A lookup that may create checks the file at once; a read-only one once the recheck interval has passed.
+        long due = create ? checked : checked + InstanceSecretKey.RECHECK_INTERVAL_NANOS;
+        String key = InstanceSecretKey.get(dir, create, due);
+        assertSameKey(replacement, key, "A key file rewritten with the same time and size must be read again");
+        assertFalse(original.equals(key), "The cached key of the rewritten file must not be returned");
+        assertTrue(Arrays.equals(ascii(replacement), Files.readAllBytes(file)),
+                "A rewritten key file must not be overwritten");
+    }
+
+    @Test
+    void rejectsInPlaceRewriteWithoutKey(@TempDir Path dir) throws IOException {
+        requireKey(InstanceSecretKey.get(dir, true));
+        Path file = dir.resolve(InstanceSecretKey.FILE_NAME);
+        BasicFileAttributes before = Files.readAttributes(file, BasicFileAttributes.class);
+        String invalid = "*" + generatedKey().substring(1);
+
+        Files.writeString(file, invalid);
+        Files.setLastModifiedTime(file, before.lastModifiedTime());
+        assertSameTimeAndSize(before, file);
+
+        // The remembered key is no longer in the file, so a save must not encrypt with it.
+        IOException e = assertThrows(IOException.class, () -> InstanceSecretKey.get(dir, true));
+        assertNamesFileOnly(e, invalid);
+        assertThrows(IOException.class, () -> InstanceSecretKey.get(dir, false, afterRecheckInterval()));
+        assertTrue(Arrays.equals(ascii(invalid), Files.readAllBytes(file)),
+                "A file without a valid key must not be replaced");
+    }
+
+    @Test
+    void unchangedFileWithoutKeyIsNotWaitedForAgain(@TempDir Path dir) throws IOException {
+        String unfinished = generatedKey().substring(0, KEY_TEXT_LENGTH - 1);
+        Path file = Files.writeString(dir.resolve(InstanceSecretKey.FILE_NAME), unfinished);
+        // The first check waits for the file to be completed, in vain.
+        assertThrows(IOException.class, () -> InstanceSecretKey.get(dir, false));
+
+        // With the interrupt status set, a further wait fails with InterruptedIOException, so a plain failure proves
+        // that the unchanged file was read without waiting for it again.
+        Thread.currentThread().interrupt();
+        try {
+            IOException e = assertThrows(IOException.class, () -> InstanceSecretKey.get(dir, true));
+            assertFalse(e instanceof InterruptedIOException, "An unchanged file must not be waited for again");
+            assertNamesFileOnly(e, unfinished);
+            IOException later = assertThrows(IOException.class,
+                    () -> InstanceSecretKey.get(dir, false, afterRecheckInterval()));
+            assertFalse(later instanceof InterruptedIOException, "An unchanged file must not be waited for again");
+            assertTrue(Thread.interrupted(), "The interrupt status must be kept");
+        } finally {
+            // Clear the status so that nothing after this test runs interrupted.
+            Thread.interrupted();
+        }
+
+        assertSameKey(unfinished, Files.readString(file), "An unfinished key file must not be replaced");
+    }
+
     @Test
     void createsKeyOnFileSystemWithoutPosixPermissions(@TempDir Path dir) throws IOException {
         try (FileSystem zip = FileSystems.newFileSystem(dir.resolve("shared.zip"), Map.of("create", "true"))) {
@@ -260,6 +363,33 @@ class InstanceSecretKeyTest {
                 .count();
         assertEquals(1, infoLines, "Creating the key must log one INFO line naming the key file");
         assertFalse(stdErr.capturedString().contains(key), "The key must never be logged");
+    }
+
+    @Test
+    @StdIo
+    @DisabledOnOs(OS.WINDOWS)
+    void creationLogsControlCharactersOfPathEscaped(StdErr stdErr, @TempDir Path dir) throws IOException {
+        // A POSIX directory name may hold every character but '/' and NUL, so also a line break and a forged record.
+        Path directory = dir.resolve("shared\n" + FORGED_RECORD + "\rreturn\ttab\u001Bescape");
+
+        assertCreationLoggedOnOneLine(stdErr,
+                directory,
+                dir.toAbsolutePath() + "/shared\\u000A" + FORGED_RECORD + "\\u000Dreturn\\u0009tab\\u001Bescape/"
+                        + InstanceSecretKey.FILE_NAME);
+    }
+
+    @Test
+    @StdIo
+    void creationLogsLineSeparatorsOfPathEscaped(StdErr stdErr, @TempDir Path dir) throws IOException {
+        // The ZIP file system stores names in UTF-8, whatever encoding the platform uses for file names.
+        try (FileSystem zip = FileSystems.newFileSystem(dir.resolve("shared.zip"), Map.of("create", "true"))) {
+            Path directory = zip.getPath("/shared\u2028" + FORGED_RECORD + "\u2029paragraph\u0085next-line");
+
+            assertCreationLoggedOnOneLine(stdErr,
+                    directory,
+                    "/shared\\u2028" + FORGED_RECORD + "\\u2029paragraph\\u0085next-line/"
+                            + InstanceSecretKey.FILE_NAME);
+        }
     }
 
     @Test
@@ -406,6 +536,51 @@ class InstanceSecretKeyTest {
                 Arguments.of("binary", binary));
     }
 
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("oversizedFiles")
+    void rejectsOversizedFileWithoutWaiting(String kind, byte[] content, @TempDir Path dir) throws IOException {
+        Path file = Files.write(dir.resolve(InstanceSecretKey.FILE_NAME), content);
+
+        // With the interrupt status set, a wait for the file to be completed fails with InterruptedIOException, so
+        // a plain failure proves that the file was rejected without that wait.
+        Thread.currentThread().interrupt();
+        try {
+            IOException e = assertThrows(IOException.class, () -> InstanceSecretKey.get(dir, true));
+            assertFalse(e instanceof InterruptedIOException, "An oversized file must not be waited for");
+            assertNamesFileOnly(e, new String(content, StandardCharsets.US_ASCII));
+            IOException later = assertThrows(IOException.class,
+                    () -> InstanceSecretKey.get(dir, false, afterRecheckInterval()));
+            assertFalse(later instanceof InterruptedIOException, "An oversized file must not be waited for");
+            assertTrue(Thread.interrupted(), "The interrupt status must be kept");
+        } finally {
+            // Clear the status so that nothing after this test runs interrupted.
+            Thread.interrupted();
+        }
+
+        assertTrue(Arrays.equals(content, Files.readAllBytes(file)), "An oversized key file must not be replaced");
+    }
+
+    static Stream<Arguments> oversizedFiles() {
+        // Trimmed, either file is a valid key; only its size makes it hold none.
+        return Stream.of(
+                Arguments.of("one byte past the bound",
+                        ascii(padded(generatedKey(), InstanceSecretKey.MAX_FILE_BYTES + 1))),
+                Arguments.of("1 MiB", ascii(padded(generatedKey(), 1024 * 1024))));
+    }
+
+    @Test
+    void acceptsKeyWithWhitespaceUpToTheBound(@TempDir Path dir) throws IOException {
+        String key = generatedKey();
+        byte[] content = ascii(padded(key, InstanceSecretKey.MAX_FILE_BYTES));
+        Path file = Files.write(dir.resolve(InstanceSecretKey.FILE_NAME), content);
+
+        assertSameKey(key, InstanceSecretKey.get(dir, true), "Whitespace within the bound must not hide the key");
+        assertSameKey(key,
+                InstanceSecretKey.get(dir, false, afterRecheckInterval()),
+                "Whitespace within the bound must not hide the key");
+        assertTrue(Arrays.equals(content, Files.readAllBytes(file)), "An existing key file must never be overwritten");
+    }
+
     @Test
     void interruptedWhileWaitingKeepsInterruptStatus(@TempDir Path dir) throws IOException {
         Path file = Files.createFile(dir.resolve(InstanceSecretKey.FILE_NAME));
@@ -540,6 +715,17 @@ class InstanceSecretKeyTest {
     }
 
     /**
+     * Asserts that {@code file} has the modification time and size {@code before} describes, and returns its
+     * attributes.
+     */
+    private static BasicFileAttributes assertSameTimeAndSize(BasicFileAttributes before, Path file) throws IOException {
+        BasicFileAttributes after = Files.readAttributes(file, BasicFileAttributes.class);
+        assertEquals(before.lastModifiedTime(), after.lastModifiedTime(), "The new content must keep the file's time");
+        assertEquals(before.size(), after.size(), "The new content must keep the file's size");
+        return after;
+    }
+
+    /**
      * Asserts that {@code e} names the key file and does not quote {@code content}.
      */
     private static void assertNamesFileOnly(IOException e, String content) {
@@ -550,8 +736,48 @@ class InstanceSecretKeyTest {
         assertTrue(quoted.isEmpty() || !message.contains(quoted), "The failure must not quote the file content");
     }
 
+    /**
+     * Creates the key in {@code directory} and asserts what is logged meanwhile: whole records only, none holding a
+     * raw control character or line separator; one INFO record naming the key file as {@code rendered}, the only
+     * record that holds {@link #FORGED_RECORD}; and never the key.
+     */
+    private static void assertCreationLoggedOnOneLine(StdErr stdErr, Path directory, String rendered)
+            throws IOException {
+        int mark = stdErr.capturedString().length();
+
+        String key = requireKey(InstanceSecretKey.get(directory, true));
+
+        // Each record ends with the line separator of the platform, so any other break would start a forged record.
+        List<String> records = List
+                .of(stdErr.capturedString().substring(mark).split(Pattern.quote(System.lineSeparator())));
+        assertTrue(records.stream().flatMapToInt(String::chars).noneMatch(InstanceSecretKeyTest::breaksLine),
+                "No logged record may hold a raw control character or line separator");
+        List<String> created = records.stream()
+                .filter(line -> line.contains("INFO")
+                        && line.contains("Created the instance secret key '" + rendered + "'."))
+                .toList();
+        assertEquals(1, created.size(), "Creating the key must log one INFO line naming the escaped key file");
+        assertEquals(created,
+                records.stream().filter(line -> line.contains(FORGED_RECORD)).toList(),
+                "A directory name must not forge a log record");
+        assertFalse(stdErr.capturedString().contains(key), "The key must never be logged");
+    }
+
+    private static boolean breaksLine(int c) {
+        int type = Character.getType(c);
+        return Character.isISOControl(c) || type == Character.LINE_SEPARATOR || type == Character.PARAGRAPH_SEPARATOR;
+    }
+
     private static byte[] ascii(String text) {
         return text.getBytes(StandardCharsets.US_ASCII);
+    }
+
+    /**
+     * {@code key} between surrounding whitespace, {@code length} characters in all.
+     */
+    private static String padded(String key, int length) {
+        String leading = " \t\r\n";
+        return leading + key + " ".repeat(length - leading.length() - key.length() - 1) + "\n";
     }
 
     private static String encodedRandom(int length) {
