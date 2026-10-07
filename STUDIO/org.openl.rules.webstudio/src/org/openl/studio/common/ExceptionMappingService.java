@@ -181,7 +181,7 @@ public class ExceptionMappingService {
     }
 
     // V7: a field whose name contains "password" gets no rejected value, so no password is echoed back
-    private static Object rejectedValueOf(String field, Object rejectedValue) {
+    private static @Nullable Object rejectedValueOf(@Nullable String field, @Nullable Object rejectedValue) {
         if (field != null && field.toLowerCase(Locale.ROOT).contains("password")) {
             return null;
         }

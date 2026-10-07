@@ -2,6 +2,7 @@ package org.openl.studio.common.model;
 
 import io.swagger.v3.oas.annotations.Parameter;
 import lombok.Getter;
+import org.jspecify.annotations.Nullable;
 
 import org.openl.studio.common.ApiExceptionControllerAdvice;
 
@@ -17,9 +18,10 @@ public final class FieldError extends BaseError {
     @Parameter(description = "Affected field of the validated object")
     private final String field;
 
+    // V7: a password field's rejected value is redacted to null, so rejectedValue is nullable here and in the Builder
     @Getter
     @Parameter(description = "Rejected field value")
-    private final Object rejectedValue;
+    private final @Nullable Object rejectedValue;
 
     private FieldError(Builder from) {
         super(from);
@@ -34,7 +36,7 @@ public final class FieldError extends BaseError {
     public static class Builder extends BaseError.Builder {
 
         private String field;
-        private Object rejectedValue;
+        private @Nullable Object rejectedValue;
 
         private Builder() {
         }
@@ -44,7 +46,7 @@ public final class FieldError extends BaseError {
             return this;
         }
 
-        public Builder rejectedValue(Object rejectedValue) {
+        public Builder rejectedValue(@Nullable Object rejectedValue) {
             this.rejectedValue = rejectedValue;
             return this;
         }

@@ -1,19 +1,28 @@
 package org.openl.rules.rest.validation;
 
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.reset;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.withSettings;
 
+import java.time.Duration;
 import java.util.HashSet;
 import java.util.Objects;
 import java.util.stream.Stream;
 import jakarta.validation.ConstraintValidatorContext;
 
 import org.apache.commons.lang3.RandomStringUtils;
+import org.hibernate.validator.constraintvalidation.HibernateConstraintValidatorContext;
+import org.hibernate.validator.constraintvalidation.HibernateConstraintViolationBuilder;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -385,6 +394,33 @@ class UsersValidatorTest extends AbstractConstraintValidatorTest {
         assertValid(model);
     }
 
+    // V7: guards the oversized-input shortcut, which rejects more than MAX_BYTES UTF-16 units without scanning them
+    @Test
+    void testPasswordPolicy_oversizedInput_rejectedWithoutScan() {
+        // A generated 2 MB size fixture outside Latin-1, so counting its code points and encoding it are both linear
+        var oversized = "\u20AC".repeat(1_000_000);
+
+        var context = mock(HibernateConstraintValidatorContext.class);
+        var builder = mock(HibernateConstraintViolationBuilder.class);
+        stubViolationChain(context, builder);
+        assertFalse(LocalPasswordPolicy.check(oversized, context));
+        verify(context).unwrap(HibernateConstraintValidatorContext.class);
+        verify(context).addMessageParameter("max", LocalPasswordPolicy.MAX_BYTES);
+        verify(context).buildConstraintViolationWithTemplate("{" + LocalPasswordPolicy.MAX_BYTES_KEY + "}");
+        verify(builder).addConstraintViolation();
+        verifyNoMoreInteractions(context, builder);
+
+        // Stub-only mocks record no invocations, so the loop measures the policy. Scanning and encoding the fixture
+        // on every call takes tens of seconds; the shortcut takes well under 1 s.
+        var stubContext = mock(HibernateConstraintValidatorContext.class, withSettings().stubOnly());
+        stubViolationChain(stubContext, mock(HibernateConstraintViolationBuilder.class, withSettings().stubOnly()));
+        assertTimeoutPreemptively(Duration.ofSeconds(5), () -> {
+            for (int i = 0; i < 20_000; i++) {
+                assertFalse(LocalPasswordPolicy.check(oversized, stubContext));
+            }
+        }, "an oversized password must be rejected without being scanned or encoded");
+    }
+
     @Test
     void testEditUserProfile_requiredFields() {
         var userProfileEditModel = getValidUserProfileEditModel()
@@ -516,5 +552,14 @@ class UsersValidatorTest extends AbstractConstraintValidatorTest {
         assertTrue(Objects.equals(expectedRejectedValue, fieldError.getRejectedValue()),
                 label + ": rejected value is not the submitted one");
         assertFieldError(field, expectedMessage, expectedRejectedValue, fieldError);
+    }
+
+    // V7: the Hibernate violation chain LocalPasswordPolicy calls, each step returning the next
+    private static void stubViolationChain(HibernateConstraintValidatorContext context,
+                                           HibernateConstraintViolationBuilder builder) {
+        when(context.unwrap(HibernateConstraintValidatorContext.class)).thenReturn(context);
+        when(context.addMessageParameter(anyString(), any())).thenReturn(context);
+        when(context.buildConstraintViolationWithTemplate(anyString())).thenReturn(builder);
+        when(builder.addConstraintViolation()).thenReturn(context);
     }
 }
