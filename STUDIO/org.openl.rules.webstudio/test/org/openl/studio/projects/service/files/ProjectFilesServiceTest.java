@@ -64,6 +64,7 @@ import org.mockito.Mockito;
 import org.springframework.security.acls.domain.BasePermission;
 import org.springframework.security.authentication.TestingAuthenticationToken;
 import org.springframework.security.core.context.SecurityContextHolder;
+import org.springframework.transaction.PlatformTransactionManager;
 
 import org.openl.rules.lock.LockInfo;
 import org.openl.rules.project.abstraction.AProject;
@@ -2041,6 +2042,27 @@ class ProjectFilesServiceTest {
                 .read(anyString());
     }
 
+    // V1: a content search on a project mount checks READ before it reads a file, so a denied file is never opened.
+    @ParameterizedTest
+    @EnumSource(value = MountKind.class, names = {"OPENED", "CLOSED_FLAT", "CLOSED_MAPPED"})
+    void projectMountContentSearchNeverReadsADeniedFile(MountKind kind) throws IOException {
+        var mount = mount(kind);
+        var needle = marker();
+        write(mount.project().resolve(SOURCE), needle);
+        write(mount.project().resolve("docs/found.txt"), needle);
+        when(mount.acl().hasPermission(argThat((AProjectArtefact artefact) -> artefact != null
+                && "inside.txt".equals(artefact.getName())), eq(BasePermission.READ))).thenReturn(false);
+        var service = service(mount.acl(), new FileNodeMapperImpl());
+        var row = "SB-F03 content search on " + kind;
+        clearInvocations(mount.storage().toArray());
+
+        var found = service.search(mount.root(), FileSearchQuery.builder().content(needle).recursive(true).build());
+
+        assertEquals(List.of(mount.path("docs/found.txt")), pathsOf(found), row + " finds the readable file only");
+        assertNeverOpened(row, mount, SOURCE);
+        assertOpened(row, mount, "docs/found.txt");
+    }
+
     // V1: the type, extension and pattern criteria run before the containment and READ checks and read no content.
     @Test
     void repositoryMountSearchCriteriaRunBeforeTheStorageChecksAndOmitDeniedEntries() throws IOException {
@@ -2457,7 +2479,9 @@ class ProjectFilesServiceTest {
 
     // V1: the files service with a real node mapper and the real content search over it.
     private static ProjectFilesServiceImpl service(AclProjectsHelper acl, FileNodeMapper mapper) {
-        return new ProjectFilesServiceImpl(acl, mapper, new FileSearchSupport(acl, mapper), new FileArchiveSupport(acl),
+        // V1: the mocked transaction manager runs the search's one READ transaction as a no-op around its checks.
+        var search = new FileSearchSupport(acl, mapper, mock(PlatformTransactionManager.class));
+        return new ProjectFilesServiceImpl(acl, mapper, search, new FileArchiveSupport(acl),
                 mock(ProjectDescriptorCleaner.class), new BeanValidationProvider(List.of()));
     }
 

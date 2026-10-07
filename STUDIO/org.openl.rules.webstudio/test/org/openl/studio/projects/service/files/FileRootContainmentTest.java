@@ -4,6 +4,8 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -18,18 +20,32 @@ import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 import static org.mockito.Mockito.withSettings;
 
+import java.io.ByteArrayInputStream;
 import java.io.Closeable;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.FileSystem;
 import java.nio.file.FileSystemException;
 import java.nio.file.Files;
 import java.nio.file.InvalidPathException;
+import java.nio.file.LinkOption;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
+import java.nio.file.attribute.BasicFileAttributes;
+import java.nio.file.spi.FileSystemProvider;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
+import java.util.TreeMap;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.BiPredicate;
+import java.util.function.Predicate;
 
 import org.apache.commons.lang3.RandomStringUtils;
 import org.junit.jupiter.api.AfterEach;
@@ -82,7 +98,10 @@ import org.openl.util.IOUtils;
  * Covers V1-B, the new-file surface of the files API: the real-path containment of
  * {@link FileRoot#contains(String)} and of its static helpers {@link FileRoot#localRoot(Repository)},
  * {@link FileRoot#projectBoundary(AProject)}, {@link FileRoot#resolvesInside(Path, String)} and
- * {@link FileRoot#atOwnPath(Path, String)}.
+ * {@link FileRoot#atOwnPath(Path, String)}, and of the overloads the mounts use to reuse the real locations
+ * their earlier checks resolved, {@link FileRoot#resolvesInside(Path, String, Map)} and
+ * {@link FileRoot#atOwnPath(Path, String, Map)}, which must give the same verdicts in every order of paths
+ * and keep a file contained while a save replaces it.
  *
  * <p>The checks run on the four mounts the REST routes build, each reached through the secured wrapper
  * the route receives: an opened project served from the user's working copy, a closed project in a
@@ -621,6 +640,345 @@ class FileRootContainmentTest {
         assertFalse(FileRoot.atOwnPath(root, "P1/ghost"), "A dangling link");
         assertTrue(FileRoot.atOwnPath(root, "P1/sub/inside.txt"), "The link target at its own place");
     }
+
+    // ---------------------------------------------------------------------------------------------
+    // V1: checks that reuse the real locations a mount resolved, and checks racing with a save
+    // ---------------------------------------------------------------------------------------------
+
+    // V1: reusing real locations changes the cost of a check, never its verdict, in whatever order paths come
+    @Test
+    @DisabledOnOs(OS.WINDOWS)
+    void reusingChecksGiveTheVerdictsOfTheFullWalkUnderEveryBoundaryInEveryOrder() throws IOException {
+        var boundary = boundary();
+        write(boundary.resolve("deep/a/b/c.txt"), marker());
+        var sibling = tmp.toRealPath().resolve("b-sibling");
+        write(sibling.resolve("rules.xml"), descriptor("P2"));
+        Files.createSymbolicLink(boundary.resolve("inner"), boundary.resolve("sub"));
+        Files.createSymbolicLink(boundary.resolve("deep/a/rel"), Path.of("b"));
+        Files.createSymbolicLink(boundary.resolve("sub/up"), boundary);
+        Files.createSymbolicLink(boundary.resolve("leak"), outsideFile);
+        Files.createSymbolicLink(boundary.resolve("out"), outsideDir);
+        Files.createSymbolicLink(boundary.resolve("sib"), sibling);
+        Files.createSymbolicLink(boundary.resolve("ghost"), tmp.resolve("outside/missing"));
+        Files.createSymbolicLink(boundary.resolve("loop1"), boundary.resolve("loop2"));
+        Files.createSymbolicLink(boundary.resolve("loop2"), boundary.resolve("loop1"));
+        var linkedBoundary = Files.createSymbolicLink(tmp.toRealPath().resolve("b2"), outsideDir);
+        var inputs = List.of("", "sub", "sub/file.txt", "sub/file.txt/x", "sub/up", "sub/up/sub/file.txt", "inner",
+                "inner/file.txt", "inner/new.txt", "deep", "deep/a", "deep/a/b", "deep/a/b/c.txt", "deep/a/rel",
+                "deep/a/rel/c.txt", "leak", "leak/x", "out", "out/rules.xml", "out/new/x.txt", "sib", "sib/rules.xml",
+                "sib/x.txt", "ghost", "ghost/x", "loop1", "loop1/x", "rules.xml", "new", "new/sub/x.txt", "../x",
+                "sub/../../x", outsideFile.toString(), "a\u0000b");
+        assertEquals(Set.of(true, false), Set.copyOf(inputs.stream().map(i -> FileRoot.resolvesInside(boundary, i))
+                .toList()), "Fixture: the layout holds contained and uncontained paths");
+
+        for (var checked : List.of(boundary, linkedBoundary, linkedBoundary.resolve("deeper"),
+                tmp.toRealPath().resolve("missing/deeper"), Path.of("missing-" + marker()))) {
+            assertEquals(FileRoot.resolvesInside(checked, null),
+                    FileRoot.resolvesInside(checked, null, new HashMap<>()),
+                    "resolvesInside under " + checked + ", a null input");
+            assertSameVerdicts("resolvesInside under " + checked, inputs,
+                    input -> FileRoot.resolvesInside(checked, input),
+                    (input, realLocations) -> FileRoot.resolvesInside(checked, input, realLocations));
+        }
+    }
+
+    // V1: the own-path check reusing real locations answers as the full own-path check, in whatever order paths come
+    @Test
+    @DisabledOnOs(OS.WINDOWS)
+    void reusingOwnPathChecksGiveTheVerdictsOfTheFullWalkUnderEveryRootInEveryOrder() throws IOException {
+        var root = layOutProjects(tmp.resolve("own")).toRealPath();
+        Files.createSymbolicLink(root.resolve("P1/inner"), root.resolve("P1/sub"));
+        Files.createSymbolicLink(root.resolve("P1/ghost"), tmp.resolve("outside/missing"));
+        Files.createSymbolicLink(root.resolve("P1/link"), outsideDir);
+        Files.createSymbolicLink(root.resolve("P1/leak.txt"), outsideFile);
+        Files.createSymbolicLink(root.resolve("P1/sib"), root.resolve("P2"));
+        Files.createSymbolicLink(root.resolve("P1/loop1"), root.resolve("P1/loop2"));
+        Files.createSymbolicLink(root.resolve("P1/loop2"), root.resolve("P1/loop1"));
+        Files.createSymbolicLink(root.resolve("rootlink"), outsideDir);
+        var linkedRoot = Files.createSymbolicLink(tmp.toRealPath().resolve("own-link"), root);
+        var danglingRoot = Files.createSymbolicLink(tmp.toRealPath().resolve("own-ghost"),
+                tmp.resolve("outside/missing"));
+        var paths = List.of("", "/P1/", "P1", "P1/rules.xml", "P1/sub", "P1/sub/inside.txt", "P1/sub/inside.txt/x",
+                "P1/inner", "P1/inner/inside.txt", "P1/inner/new.txt", "P1/ghost", "P1/ghost/x.txt", "P1/link",
+                "P1/link/rules.xml", "P1/link/new/deep/x.txt", "P1/leak.txt", "P1/sib", "P1/sib/rules.xml",
+                "P1/loop1/x", "rootlink", "rootlink/rules.xml", "P1/new/x.txt", "P2/rules.xml", "../outside",
+                "P1/../../outside", "P1/a\u0000b");
+        assertEquals(Set.of(true, false), Set.copyOf(paths.stream().map(p -> FileRoot.atOwnPath(root, p)).toList()),
+                "Fixture: the layout holds paths at and away from their own place");
+
+        for (var checked : List.of(root, linkedRoot, danglingRoot, tmp.toRealPath().resolve("not-yet/root"))) {
+            assertSameVerdicts("atOwnPath under " + checked, paths,
+                    path -> FileRoot.atOwnPath(checked, path),
+                    (path, realLocations) -> FileRoot.atOwnPath(checked, path, realLocations));
+        }
+    }
+
+    // V1: every mount answers as the full walk it reuses real locations for, on one mount and on a fresh one
+    @ParameterizedTest
+    @EnumSource(MountKind.class)
+    @DisabledOnOs(OS.WINDOWS)
+    void mountsGiveTheVerdictsOfTheFullWalkInEveryOrder(MountKind kind) throws IOException {
+        var mount = mount(kind);
+        var project = mount.project();
+        Files.createSymbolicLink(project.resolve("inner"), project.resolve("sub"));
+        Files.createSymbolicLink(project.resolve("link"), outsideDir);
+        Files.createSymbolicLink(project.resolve("leak.txt"), outsideFile);
+        Files.createSymbolicLink(project.resolve("sib"), mount.sibling());
+        Files.createSymbolicLink(project.resolve("ghost"), tmp.resolve("outside/missing"));
+        Files.createSymbolicLink(project.resolve("loop1"), project.resolve("loop2"));
+        Files.createSymbolicLink(project.resolve("loop2"), project.resolve("loop1"));
+        var paths = List.of("", "rules.xml", "sub", "sub/inside.txt", "sub/inside.txt/x", "inner", "inner/inside.txt",
+                "inner/new.txt", "link", "link/rules.xml", "link/x.txt", "leak.txt", "sib", "sib/rules.xml",
+                "sib/x.txt", "ghost", "ghost/x.txt", "loop1/x", "newdir/sub/x.txt", "new.txt", "../P2/rules.xml",
+                "a\u0000b.txt");
+        Predicate<String> full;
+        if (kind == MountKind.REPO) {
+            var root = project.getParent().toRealPath();
+            full = path -> FileRoot.atOwnPath(root, mount.prefix() + path);
+        } else {
+            var boundary = FileRoot.projectBoundary(projectOf(mount)).orElseThrow();
+            full = path -> FileRoot.resolvesInside(boundary, FilePaths.trimSlashes(path));
+        }
+        var expected = paths.stream().map(full::test).toList();
+        var fresh = kind == MountKind.REPO
+                ? repoMount(secured(fileRepository(project.getParent())))
+                : projectMount(projectOf(mount));
+
+        for (var round = 1; round <= 2; round++) {
+            for (var i = 0; i < paths.size(); i++) {
+                assertEquals(expected.get(i), mount.contains(paths.get(i)),
+                        "Parents first, round " + round + ", on " + kind + ": " + paths.get(i));
+            }
+        }
+        for (var i = paths.size() - 1; i >= 0; i--) {
+            assertEquals(expected.get(i), fresh.contains(mount.prefix() + paths.get(i)),
+                    "Children first on " + kind + ": " + paths.get(i));
+        }
+    }
+
+    // V1: one nested check records the boundary and the directories and links it walked, and nothing absent
+    @Test
+    @DisabledOnOs(OS.WINDOWS)
+    void aCheckRecordsTheRealLocationsOfTheDirectoriesAndLinksItWalked() throws IOException {
+        var boundary = boundary();
+        write(boundary.resolve("deep/a/b/c.txt"), marker());
+        Files.createSymbolicLink(boundary.resolve("inner"), boundary.resolve("sub"));
+        var realLocations = new HashMap<Path, Path>();
+        var walked = Map.of(boundary, boundary, boundary.resolve("deep"), boundary.resolve("deep"),
+                boundary.resolve("deep/a"), boundary.resolve("deep/a"), boundary.resolve("deep/a/b"),
+                boundary.resolve("deep/a/b"));
+
+        assertTrue(FileRoot.resolvesInside(boundary, "deep/a/b/c.txt", realLocations), "A nested regular file");
+        assertEquals(walked, realLocations, "The boundary and the directories walked are recorded, a file is not");
+
+        assertTrue(FileRoot.resolvesInside(boundary, "deep/a/b/d.txt", realLocations), "A sibling to be created");
+        assertTrue(FileRoot.resolvesInside(boundary, "deep/a/new/x.txt", realLocations), "A path to be created");
+        assertEquals(walked, realLocations, "A sibling reads only its own entry, and absent entries are not recorded");
+
+        assertTrue(FileRoot.resolvesInside(boundary, "inner/file.txt", realLocations), "A file through a link inside");
+        assertEquals(boundary.resolve("sub"), realLocations.get(boundary.resolve("inner")),
+                "A link is recorded at its real location");
+    }
+
+    // V1: a check starts at its nearest recorded ancestor and resolves the start directory only once
+    @Test
+    void aCheckWalksOnlyBelowItsNearestRecordedAncestor() throws IOException {
+        var boundary = boundary();
+        var root = layOutProjects(tmp.resolve("own")).toRealPath();
+        var outside = outsideDir.toRealPath();
+        // Each record names an entry that does not exist at its lexical place, so only a walk that starts
+        // from the record reaches the real location recorded for it; the full walk sees a path to be created.
+        var projectRecords = new HashMap<Path, Path>(Map.of(boundary, boundary, boundary.resolve("virtual"), outside));
+        var ownRecords = new HashMap<Path, Path>(Map.of(root, root, root.resolve("P9"), root.resolve("P1")));
+        var startRecord = new HashMap<Path, Path>(Map.of(boundary, outside));
+
+        assertTrue(FileRoot.resolvesInside(boundary, "virtual/rules.xml"), "Fixture: the full walk sees a new path");
+        assertFalse(FileRoot.resolvesInside(boundary, "virtual/rules.xml", projectRecords),
+                "The walk starts at the recorded ancestor of the input");
+        assertTrue(FileRoot.atOwnPath(root, "P9/rules.xml"), "Fixture: the full own-path walk sees a new path");
+        assertFalse(FileRoot.atOwnPath(root, "P9/rules.xml", ownRecords),
+                "The own-path walk starts at the recorded ancestor of the path");
+        assertFalse(FileRoot.resolvesInside(boundary, "", startRecord), "The recorded start directory is reused");
+    }
+
+    // V1: a version read checks the design repository folder; the real locations of the working copy go with it
+    @Test
+    @DisabledOnOs(OS.WINDOWS)
+    void aMountThatReadsAnotherTreeChecksThatTreesFolder() throws IOException {
+        var workspace = layOutProjects(tmp.resolve("ws"));
+        register(workspace, "P1", "P2");
+        var design = layOutProjects(tmp.resolve("design-opened"));
+        Files.createSymbolicLink(design.resolve("P1/inner"), outsideDir);
+        var root = projectMount(openedProject(workspace, design, "P1"));
+
+        assertTrue(root.contains("sub/inside.txt"), "A regular file of the working copy");
+        assertTrue(root.contains("inner/rules.xml"), "A new path of the working copy");
+        // A file repository keeps no history, so it serves its current state as every revision.
+        assertNotNull(root.readFolder("v1"), "Fixture: the revision is found");
+        assertTrue(root.contains("sub/inside.txt"), "A regular file of the revision");
+        assertFalse(root.contains("inner/rules.xml"), "A link of the revision that leaves its folder");
+        assertNotNull(root.readFolder(null), "Fixture: the current state is read again");
+        assertTrue(root.contains("inner/rules.xml"), "The working copy is checked again after the revision");
+    }
+
+    // V1: a save deletes and recreates the file it replaces; no check racing with it may reject that file
+    @Test
+    void everyCheckAcceptsAFileWhileASaveKeepsReplacingIt() throws Exception {
+        var mount = closedFlatMount();
+        var design = mount.project().getParent();
+        var root = design.toRealPath();
+        var boundary = FileRoot.projectBoundary(projectOf(mount)).orElseThrow();
+        var repositoryRoot = repoMount(secured(fileRepository(design)));
+        var file = mount.project().resolve("sub/inside.txt");
+        var content = marker().getBytes(StandardCharsets.UTF_8);
+        var stop = new AtomicBoolean();
+        var saves = new AtomicInteger();
+        var saveFailure = new AtomicReference<Exception>();
+        var writer = new Thread(() -> {
+            try {
+                while (!stop.get()) {
+                    // FileSystemRepository.save writes a file this way: the existing one is deleted, then created.
+                    Files.copy(new ByteArrayInputStream(content), file, StandardCopyOption.REPLACE_EXISTING);
+                    saves.incrementAndGet();
+                }
+            } catch (IOException | RuntimeException e) {
+                saveFailure.set(e);
+            }
+        });
+        var rejected = new TreeMap<String, Integer>();
+
+        writer.start();
+        try {
+            while (saves.get() == 0 && writer.isAlive()) {
+                Thread.onSpinWait();
+            }
+            for (var i = 0; i < 3000; i++) {
+                tally(rejected, "project mount", mount.root().contains("sub/inside.txt"));
+                tally(rejected, "repository mount", repositoryRoot.contains("P1/sub/inside.txt"));
+                tally(rejected, "resolvesInside", FileRoot.resolvesInside(boundary, "sub/inside.txt"));
+                tally(rejected, "resolvesInside reusing nothing",
+                        FileRoot.resolvesInside(boundary, "sub/inside.txt", new HashMap<>()));
+                tally(rejected, "atOwnPath", FileRoot.atOwnPath(root, "P1/sub/inside.txt"));
+                tally(rejected, "atOwnPath reusing nothing",
+                        FileRoot.atOwnPath(root, "P1/sub/inside.txt", new HashMap<>()));
+            }
+        } finally {
+            stop.set(true);
+            writer.join();
+        }
+
+        assertNull(saveFailure.get(), "Fixture: the saves keep replacing the file");
+        assertTrue(saves.get() > 1, "Fixture: the file is replaced while it is checked");
+        assertEquals(Map.of(), rejected, "Rejections of a file a save keeps replacing, by check");
+    }
+
+    // V1: an entry that is not a link and vanishes between the probe and its resolution is resolved through its parent
+    @Test
+    void theFullWalkResolvesAnEntryThatVanishesWhileItIsResolvedThroughItsParent() throws IOException {
+        var provider = mock(FileSystemProvider.class);
+        var parent = pathOn(provider);
+        var file = pathOn(provider);
+        var name = mock(Path.class);
+        when(provider.exists(parent, LinkOption.NOFOLLOW_LINKS)).thenReturn(true);
+        when(provider.exists(file, LinkOption.NOFOLLOW_LINKS)).thenReturn(true);
+        when(provider.readAttributes(file, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS))
+                .thenThrow(new NoSuchFileException("replaced"));
+        when(file.toRealPath()).thenThrow(new NoSuchFileException("replaced"));
+        when(file.getParent()).thenReturn(parent);
+        when(file.startsWith(file)).thenReturn(true);
+        when(parent.toRealPath()).thenReturn(parent);
+        when(parent.relativize(file)).thenReturn(name);
+        when(parent.resolve(name)).thenReturn(file);
+
+        assertTrue(FileRoot.resolvesInside(file, ""), "A file replaced while it is resolved stays contained");
+        verify(parent).toRealPath();
+    }
+
+    // V1: a link that dangles when it is resolved is rejected at once, without walking past it
+    @Test
+    void theFullWalkRejectsALinkThatDanglesWhenItIsResolved() throws IOException {
+        var provider = mock(FileSystemProvider.class);
+        var parent = pathOn(provider);
+        var link = pathOn(provider);
+        var linkAttributes = attributes(true, false);
+        when(provider.exists(parent, LinkOption.NOFOLLOW_LINKS)).thenReturn(true);
+        when(provider.exists(link, LinkOption.NOFOLLOW_LINKS)).thenReturn(true);
+        when(provider.readAttributes(link, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS))
+                .thenReturn(linkAttributes);
+        when(link.toRealPath()).thenThrow(new NoSuchFileException("dangling"));
+        when(link.getParent()).thenReturn(parent);
+        when(link.startsWith(link)).thenReturn(true);
+
+        assertFalse(FileRoot.resolvesInside(link, ""), "A dangling link");
+        verify(parent, never()).toRealPath();
+    }
+
+    // V1: a link removed while a reusing check resolves it is a path to be created, and is not recorded
+    @Test
+    void aReusingCheckTakesALinkRemovedWhileItIsResolvedAsAPathToBeCreated() throws IOException {
+        var boundary = boundary();
+        var provider = mock(FileSystemProvider.class);
+        var real = pathOn(provider);
+        var entry = pathOn(provider);
+        var linkAttributes = attributes(true, false);
+        when(real.resolve(Path.of("link"))).thenReturn(entry);
+        when(provider.readAttributes(entry, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS))
+                .thenReturn(linkAttributes)
+                .thenThrow(new NoSuchFileException("removed"));
+        when(entry.toRealPath()).thenThrow(new NoSuchFileException("removed"));
+        when(entry.startsWith(boundary)).thenReturn(true);
+        var realLocations = new HashMap<Path, Path>(Map.of(boundary, real));
+
+        assertTrue(FileRoot.resolvesInside(boundary, "link", realLocations), "A link removed while it is resolved");
+        assertEquals(Map.of(boundary, real), realLocations, "An entry that is gone is not recorded");
+    }
+
+    // V1: a link replaced by a directory while a reusing check resolves it is taken, and recorded, as that directory
+    @Test
+    void aReusingCheckTakesALinkReplacedWhileItIsResolvedAsWhatReplacedIt() throws IOException {
+        var boundary = boundary();
+        var provider = mock(FileSystemProvider.class);
+        var real = pathOn(provider);
+        var entry = pathOn(provider);
+        var linkAttributes = attributes(true, false);
+        var directoryAttributes = attributes(false, true);
+        when(real.resolve(Path.of("link"))).thenReturn(entry);
+        when(provider.readAttributes(entry, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS))
+                .thenReturn(linkAttributes)
+                .thenReturn(directoryAttributes);
+        when(entry.toRealPath()).thenThrow(new NoSuchFileException("replaced"));
+        when(entry.startsWith(boundary)).thenReturn(true);
+        var realLocations = new HashMap<Path, Path>(Map.of(boundary, real));
+
+        assertTrue(FileRoot.resolvesInside(boundary, "link", realLocations), "A link replaced while it is resolved");
+        assertSame(entry, realLocations.get(boundary.resolve("link")), "The directory is recorded where it is");
+    }
+
+    // V1: the race tolerance never accepts a dangling link, on any check or mount
+    @Test
+    @DisabledOnOs(OS.WINDOWS)
+    void everyCheckStillRejectsADanglingLink() throws IOException {
+        var boundary = boundary();
+        var root = boundary.getParent();
+        Files.createSymbolicLink(boundary.resolve("ghost"), tmp.resolve("outside/missing"));
+        var realLocations = new HashMap<Path, Path>();
+        var ownLocations = new HashMap<Path, Path>();
+        var projectRoot = closedFlatMount();
+        Files.createSymbolicLink(projectRoot.project().resolve("ghost"), tmp.resolve("outside/missing"));
+        var repositoryRoot = repoMount(secured(fileRepository(projectRoot.project().getParent())));
+
+        for (var input : List.of("ghost", "ghost/x.txt")) {
+            assertFalse(FileRoot.resolvesInside(boundary, input), "The full walk: " + input);
+            assertFalse(FileRoot.resolvesInside(boundary, input, realLocations), "The reusing walk: " + input);
+            assertFalse(FileRoot.atOwnPath(root, "b/" + input), "The full own-path walk: " + input);
+            assertFalse(FileRoot.atOwnPath(root, "b/" + input, ownLocations), "The reusing own-path walk: " + input);
+            assertFalse(projectRoot.contains(input), "The project mount: " + input);
+            assertFalse(repositoryRoot.contains("P1/" + input), "The repository mount: " + input);
+        }
+        assertFalse(realLocations.containsKey(boundary.resolve("ghost")), "A dangling link is never recorded");
+        assertFalse(ownLocations.containsKey(boundary.resolve("ghost")), "A dangling link is never recorded");
+    }
+
 
 
     // ---------------------------------------------------------------------------------------------
@@ -1285,6 +1643,56 @@ class FileRootContainmentTest {
         var boundary = tmp.toRealPath().resolve("b");
         write(boundary.resolve("sub/file.txt"), marker());
         return boundary;
+    }
+
+    // V1: the verdicts of a check that reuses real locations, held to the full check in every order
+    /**
+     * Asserts that the reusing check answers every input as the full check does: each input on a map of its
+     * own, parents before children twice on one map, and children before parents on another map.
+     */
+    private static void assertSameVerdicts(String what, List<String> inputs, Predicate<String> full,
+            BiPredicate<String, Map<Path, Path>> reusing) {
+        var expected = inputs.stream().map(full::test).toList();
+        for (var i = 0; i < inputs.size(); i++) {
+            assertEquals(expected.get(i), reusing.test(inputs.get(i), new HashMap<>()),
+                    what + ", alone: " + inputs.get(i));
+        }
+        var parentsFirst = new HashMap<Path, Path>();
+        for (var round = 1; round <= 2; round++) {
+            for (var i = 0; i < inputs.size(); i++) {
+                assertEquals(expected.get(i), reusing.test(inputs.get(i), parentsFirst),
+                        what + ", parents first, round " + round + ": " + inputs.get(i));
+            }
+        }
+        var childrenFirst = new HashMap<Path, Path>();
+        for (var i = inputs.size() - 1; i >= 0; i--) {
+            assertEquals(expected.get(i), reusing.test(inputs.get(i), childrenFirst),
+                    what + ", children first: " + inputs.get(i));
+        }
+    }
+
+    // V1: counts the rejections of each check racing with a save
+    private static void tally(Map<String, Integer> rejected, String check, boolean contained) {
+        if (!contained) {
+            rejected.merge(check, 1, Integer::sum);
+        }
+    }
+
+    // V1: a path on a mocked file system provider, so a test decides what each probe of a walk finds
+    private static Path pathOn(FileSystemProvider provider) {
+        var fileSystem = mock(FileSystem.class);
+        when(fileSystem.provider()).thenReturn(provider);
+        var path = mock(Path.class);
+        when(path.getFileSystem()).thenReturn(fileSystem);
+        return path;
+    }
+
+    // V1: the attributes a probe without following a link reads for an entry
+    private static BasicFileAttributes attributes(boolean link, boolean directory) {
+        var attributes = mock(BasicFileAttributes.class);
+        when(attributes.isSymbolicLink()).thenReturn(link);
+        when(attributes.isDirectory()).thenReturn(directory);
+        return attributes;
     }
 
     /**

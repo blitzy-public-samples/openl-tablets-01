@@ -3,8 +3,11 @@ package org.openl.studio.projects.service.files;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 import org.jspecify.annotations.Nullable;
@@ -233,6 +236,42 @@ public interface FileRoot {
         }
     }
 
+    // V1: resolvesInside for a mount that checks many paths, reusing the real locations its earlier checks resolved.
+    /**
+     * Tells whether the input, resolved under the boundary, stays inside the boundary on disk, exactly as
+     * {@link #resolvesInside(Path, String)} tells, reusing the real locations that earlier checks with the
+     * same map resolved.
+     *
+     * <p>The boundary is resolved once and recorded in the map. Each entry below it is then read once,
+     * without following a link at its end. An entry that is not a link is named under a real directory,
+     * so it is its own real location, and only a link is resolved. The real locations of directories and
+     * links are recorded, so a later check reads only the entries below its nearest recorded ancestor.
+     * Absent entries are never recorded. A boundary that does not exist or cannot be resolved is checked
+     * as {@link #resolvesInside(Path, String)} checks it, and nothing is recorded.
+     *
+     * <p>The map belongs to one caller, which uses it from one thread for the checks of one tree.
+     *
+     * @param boundary      absolute, normalized directory the input may not leave
+     * @param input         path relative to the boundary; {@code null} or empty for the boundary itself
+     * @param realLocations real locations resolved by earlier checks, keyed by absolute normalized path;
+     *                      this check adds the ones it resolves
+     * @return {@code true} only when the real location of the input lies under the boundary
+     */
+    static boolean resolvesInside(Path boundary, @Nullable String input, Map<Path, Path> realLocations) {
+        try {
+            var target = input == null || input.isEmpty() ? boundary : boundary.resolve(input).normalize();
+            if (!target.startsWith(boundary)) {
+                return false;
+            }
+            return resolveThroughKnown(boundary, target, realLocations)
+                    .map(real -> real.startsWith(boundary))
+                    .orElse(false);
+        } catch (IOException | IllegalArgumentException | SecurityException e) {
+            // V1: fails closed on the same failures as resolvesInside(boundary, input).
+            return false;
+        }
+    }
+
     // V1: the per-path check of the repository mount and the ancestor search; no link leads to the path.
     /**
      * Tells whether the path under the root sits at its own lexical place on disk: neither the entry
@@ -260,6 +299,32 @@ public interface FileRoot {
         return target.startsWith(root) && resolvesInside(target, "");
     }
 
+    // V1: atOwnPath for a mount that checks many paths, reusing the real locations its earlier checks resolved.
+    /**
+     * Tells whether the path under the root sits at its own lexical place on disk, exactly as
+     * {@link #atOwnPath(Path, String)} tells, reusing the real locations that earlier checks with the same
+     * map resolved. The root is resolved once and recorded, and the entries below it are read as
+     * {@link #resolvesInside(Path, String, Map)} reads the entries below its boundary.
+     *
+     * @param root          real directory the path is read from or written to
+     * @param relative      slash-separated path relative to the root; empty for the root itself
+     * @param realLocations real locations resolved by earlier checks, keyed by absolute normalized path;
+     *                      this check adds the ones it resolves
+     * @return {@code true} only when no link lies between the root and the path, the path included
+     */
+    static boolean atOwnPath(Path root, String relative, Map<Path, Path> realLocations) {
+        try {
+            var target = root.resolve(FilePaths.trimSlashes(relative)).normalize();
+            return target.startsWith(root)
+                    && resolveThroughKnown(root, target, realLocations)
+                            .map(real -> real.startsWith(target))
+                            .orElse(false);
+        } catch (IOException | IllegalArgumentException | SecurityException e) {
+            // V1: fails closed on the same failures as atOwnPath(root, relative).
+            return false;
+        }
+    }
+
     // V1: the anchor's real location; an unresolvable anchor stays lexical so later checks fail closed.
     /**
      * Real location of the path, resolved through its deepest existing ancestor before it is
@@ -284,18 +349,117 @@ public interface FileRoot {
      * rest of the path appended. An entry exists when it is present itself, so a dangling link is
      * found and then fails to resolve.
      *
+     * <p>An entry that is not a link can vanish between the existence probe and its resolution, as a
+     * file does while a save replaces it. Such an entry is resolved through its parent instead, where
+     * it is to be created again, so a concurrent write never turns a contained path into a rejected
+     * one. An entry that is still a link when its resolution fails is a dangling link and is rejected.
+     * The walk only ascends, so it ends at the root of the path at the latest.
+     *
      * @return the resolved path, or empty when no ancestor of the path exists
      * @throws IOException when the deepest existing entry cannot be resolved, such as a dangling link
      */
     private static Optional<Path> resolveThroughDeepestExisting(Path path) throws IOException {
+        // V1: an entry that vanished while it was resolved is walked past; a dangling link still fails the walk
+        for (var existing = deepestExisting(path); existing != null; existing = deepestExisting(existing.getParent())) {
+            try {
+                return Optional.of(existing.toRealPath().resolve(existing.relativize(path)));
+            } catch (NoSuchFileException e) {
+                if (Files.isSymbolicLink(existing)) {
+                    throw e;
+                }
+            }
+        }
+        return Optional.empty();
+    }
+
+    // V1: the existence probe of the walk; a dangling link counts as existing.
+    /**
+     * The path itself or its nearest ancestor that exists without following a link at its end.
+     *
+     * @param path the path to probe; may be {@code null}, as the parent of a root is
+     * @return the deepest existing entry, or {@code null} when neither the path nor any ancestor exists
+     */
+    private static @Nullable Path deepestExisting(@Nullable Path path) {
         var existing = path;
         while (existing != null && !Files.exists(existing, LinkOption.NOFOLLOW_LINKS)) {
             existing = existing.getParent();
         }
-        if (existing == null) {
-            return Optional.empty();
+        return existing;
+    }
+
+    // V1: the walk of the checks that reuse real locations; below the start directory it resolves only links.
+    /**
+     * Resolves the target, which lies lexically under the start directory, as
+     * {@link #resolveThroughDeepestExisting(Path)} resolves it: the real location of its deepest existing
+     * entry with the rest of the target appended.
+     *
+     * <p>The start directory is resolved on first use and recorded. A start directory that does not exist
+     * or cannot be resolved records nothing, and the target is resolved by
+     * {@link #resolveThroughDeepestExisting(Path)}. Otherwise the walk begins at the target's nearest
+     * ancestor whose real location is recorded, the start directory at the latest, and reads each further
+     * entry under the real location reached so far without following a link at its end. An entry that
+     * cannot be read is absent, as {@link Files#exists(Path, LinkOption...)} counts it, and ends the walk
+     * with the rest of the target appended, since only existing entries can be links. An entry that is
+     * not a link is its own real location. A link is resolved: when it is gone or no longer a link by
+     * then, it is taken as it is found then, and when it is still a link, it is dangling and rejected.
+     * The real locations of directories and links are recorded.
+     *
+     * @return the real location of the target, or empty when no ancestor of the target exists
+     * @throws IOException when an entry cannot be resolved, such as a dangling link or a link loop
+     */
+    private static Optional<Path> resolveThroughKnown(Path start, Path target, Map<Path, Path> realLocations)
+            throws IOException {
+        if (!realLocations.containsKey(start)) {
+            Path startReal;
+            try {
+                startReal = start.toRealPath();
+            } catch (IOException e) {
+                // V1: a missing or unresolvable start directory is walked from the target, recording nothing.
+                return resolveThroughDeepestExisting(target);
+            }
+            realLocations.put(start, startReal);
         }
-        return Optional.of(existing.toRealPath().resolve(existing.relativize(path)));
+        var known = target;
+        var current = realLocations.get(known);
+        while (current == null) {
+            known = known.getParent();
+            current = realLocations.get(known);
+        }
+        var lexical = known;
+        for (var i = known.getNameCount(); i < target.getNameCount(); i++) {
+            var name = target.getName(i);
+            lexical = lexical.resolve(name);
+            var entry = current.resolve(name);
+            var attributes = attributesOf(entry);
+            if (attributes != null && attributes.isSymbolicLink()) {
+                try {
+                    entry = entry.toRealPath();
+                } catch (NoSuchFileException e) {
+                    // V1: a link removed or replaced meanwhile is taken as it is now; one still there is dangling
+                    attributes = attributesOf(entry);
+                    if (attributes != null && attributes.isSymbolicLink()) {
+                        throw e;
+                    }
+                }
+            }
+            if (attributes == null) {
+                return Optional.of(current.resolve(target.subpath(i, target.getNameCount())));
+            }
+            current = entry;
+            if (attributes.isDirectory() || attributes.isSymbolicLink()) {
+                realLocations.put(lexical, current);
+            }
+        }
+        return Optional.of(current);
+    }
+
+    // V1: one read of an entry without following a link at its end; an entry that cannot be read is absent.
+    private static @Nullable BasicFileAttributes attributesOf(Path entry) {
+        try {
+            return Files.readAttributes(entry, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
+        } catch (IOException e) {
+            return null;
+        }
     }
 
     // V1: a slash-separated relative path resolved lexically under an anchor.

@@ -4,6 +4,7 @@ import java.io.IOException;
 import java.nio.file.Path;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.function.Supplier;
 
 import lombok.AccessLevel;
@@ -80,6 +81,14 @@ public class ProjectFileRoot implements FileRoot {
     private @Nullable Path boundary;
     private boolean boundaryResolved;
     private boolean boundaryUnresolvable;
+    // V1: the real locations contains() resolved under the boundary, reused by its later checks of the same tree.
+    /**
+     * Real locations of the boundary and of the directories and links below it that {@link #contains(String)}
+     * resolved, keyed by absolute normalized path, for {@link FileRoot#resolvesInside(Path, String, Map)}. They
+     * belong to the current {@link #boundary} and are dropped with it, and they need no synchronization for the
+     * same reason it needs none.
+     */
+    private final Map<Path, Path> realLocations = new HashMap<>();
     // V1: the tree readFolder last served, whose folder contains() checks; null before the first read.
     private @Nullable AProject source;
 
@@ -270,6 +279,12 @@ public class ProjectFileRoot implements FileRoot {
      * A link that exists only in the design repository is therefore rejected even when the working copy
      * of an opened project is clean.
      *
+     * <p>The checks of one tree reuse what the earlier ones resolved, through
+     * {@link FileRoot#resolvesInside(Path, String, Map)}: the project folder is resolved once, and the real
+     * locations of the directories and links below it are kept until the mount reads another tree. A
+     * listing, export or search therefore reads each entry once without following a link at its end, and
+     * resolves only links, with the verdicts of {@link FileRoot#resolvesInside(Path, String)}.
+     *
      * @param path mount-relative path; empty for the project folder
      * @return {@code false} when the path resolves outside the project folder or the boundary cannot
      *         be resolved
@@ -286,8 +301,9 @@ public class ProjectFileRoot implements FileRoot {
             boundaryResolved = true;
         }
         var folder = boundary;
+        // V1: the checks of one tree share the real locations they resolve, so each entry costs one read.
         return !boundaryUnresolvable
-                && (folder == null || FileRoot.resolvesInside(folder, FilePaths.trimSlashes(path)));
+                && (folder == null || FileRoot.resolvesInside(folder, FilePaths.trimSlashes(path), realLocations));
     }
 
     // V1: records the tree a read serves; a read of another tree drops the boundary resolved for the previous one.
@@ -296,6 +312,7 @@ public class ProjectFileRoot implements FileRoot {
             boundary = null;
             boundaryResolved = false;
             boundaryUnresolvable = false;
+            realLocations.clear(); // V1: the real locations resolved under the dropped boundary go with it
         }
         source = tree;
     }

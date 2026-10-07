@@ -2,11 +2,16 @@ package org.openl.rules.project.abstraction;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.nio.file.Files;
+import java.nio.file.LinkOption;
+import java.nio.file.NoSuchFileException;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Predicate;
 
 import lombok.Getter;
 import lombok.Setter;
@@ -17,10 +22,13 @@ import org.openl.rules.common.ArtefactPath;
 import org.openl.rules.common.CommonUser;
 import org.openl.rules.common.ProjectException;
 import org.openl.rules.common.impl.ArtefactPathImpl;
+import org.openl.rules.repository.PathCheckedRepository;
 import org.openl.rules.repository.api.ChangesetType;
 import org.openl.rules.repository.api.FileData;
 import org.openl.rules.repository.api.FileItem;
 import org.openl.rules.repository.api.Repository;
+import org.openl.rules.repository.api.RepositoryDelegate;
+import org.openl.rules.repository.file.FileSystemRepository;
 import org.openl.rules.workspace.dtr.FolderMapper;
 import org.openl.rules.workspace.dtr.impl.FileMappingData;
 import org.openl.util.IOUtils;
@@ -164,6 +172,8 @@ public class AProjectFolder extends AProjectArtefact implements IProjectFolder {
         super.update(newFolder, user);
         if (this.isFolder()) {
             var from = (AProjectFolder) newFolder;
+            // V1: decided once, before anything is read, which source files stay inside the source project folder
+            var contained = containedFiles(from);
 
             List<FileItem> changes = new ArrayList<>();
             try {
@@ -174,10 +184,10 @@ public class AProjectFolder extends AProjectArtefact implements IProjectFolder {
                 var toRepository = getRepository();
                 if (fromRepository.supports().uniqueFileId() && toRepository.supports().uniqueFileId()) {
                     changesetType = ChangesetType.DIFF;
-                    fromProjectVersion = findDiffChanges(from, changes);
+                    fromProjectVersion = findDiffChanges(from, contained, changes); // V1: only contained files
                 } else {
                     changesetType = ChangesetType.FULL;
-                    findChanges(from, changes);
+                    findChanges(from, contained, changes); // V1: only contained files
                 }
                 if (getResourceTransformer() != null) {
                     changes = getResourceTransformer().transformChangedFiles(getFolderPath(), changes);
@@ -205,6 +215,7 @@ public class AProjectFolder extends AProjectArtefact implements IProjectFolder {
      * @return the version of the given folder the files are read from, or {@code null} if there is none
      */
     private @Nullable String findDiffChanges(AProjectFolder from,
+                                             Predicate<String> contained, // V1: the source files a copy may read
                                              List<FileItem> changes) throws IOException, ProjectException {
         String fromProjectVersion = null;
 
@@ -227,6 +238,8 @@ public class AProjectFolder extends AProjectArtefact implements IProjectFolder {
         } else {
             fromList = fromRepository.list(fromFilePath);
         }
+        // V1: a source file whose real location leaves the source project folder is neither read nor compared
+        fromList = fromList.stream().filter(fromData -> contained.test(fromData.getName())).toList();
 
         var toRepository = getRepository();
         var toFilePath = getFolderPath() + "/";
@@ -324,18 +337,136 @@ public class AProjectFolder extends AProjectArtefact implements IProjectFolder {
         return null;
     }
 
-    private void findChanges(AProjectFolder from, List<FileItem> files) throws ProjectException {
+    private void findChanges(AProjectFolder from,
+                             Predicate<String> contained, // V1: the source files a copy may read
+                             List<FileItem> files) throws ProjectException {
         var transformer = getResourceTransformer();
         var path = getFolderPath();
 
         for (AProjectArtefact artefact : from.getArtefacts()) {
             if (artefact instanceof AProjectResource resource) {
+                // V1: a source file whose real location leaves the source project folder is not read
+                if (!contained.test(resource.getFileData().getName())) {
+                    continue;
+                }
                 InputStream content = transformer != null ? transformer.transform(resource) : resource.getContent();
                 files.add(new FileItem(path + "/" + artefact.getInternalPath(), content));
             } else {
-                findChanges((AProjectFolder) artefact, files);
+                findChanges((AProjectFolder) artefact, contained, files); // V1: the same source files
             }
         }
+    }
+
+    // V1: real-path containment of the files a copy reads from a file-backed source project folder. It is private
+    // to this copy routine, not a dedicated class as the Minimal Change Rule asks for new code: the path-containment
+    // fix forbids a component shared between path surfaces, and this module cannot reach the FileRoot helpers of the
+    // files service.
+    /**
+     * Tells which files of the source folder a copy may read: those whose real location stays inside the source
+     * project folder.
+     *
+     * <p>The source repository is unwrapped through every {@link RepositoryDelegate}, then through one
+     * {@link FolderMapper}, down to a {@link PathCheckedRepository} or a {@link FileSystemRepository}, which is only
+     * asked for its root directory. That root is the anchor: links in its own path are trusted and followed. The
+     * boundary is the source's real path, resolved lexically under the anchor's real location. A file is accepted
+     * when its name lies under the source folder path and its real location, links inside the boundary followed,
+     * stays under the boundary. A link to another project or outside, a dangling link, a link loop and a name that is
+     * not a valid path are not. A file that a concurrent save is replacing is accepted, so a copy never leaves it out.
+     * Any other backend, such as Git or JDBC, is not read through filesystem links, so it accepts every file and is
+     * never asked for its real path or touched on disk.
+     *
+     * @param from the folder a copy reads from
+     * @return the test over the full file names the source repository lists, such as {@code <folder>/rules/Main.xlsx}
+     * @throws ProjectException when the source project folder itself is reached through a link or cannot be
+     *                          resolved, so the copy is refused before anything is read or written
+     */
+    static Predicate<String> containedFiles(AProjectFolder from) throws ProjectException {
+        var root = localRoot(from.getRepository());
+        if (root == null) {
+            return name -> true;
+        }
+        var anchor = realLocation(root);
+        var folderPath = from.getFolderPath();
+        Path boundary;
+        try {
+            boundary = anchor.resolve(trimSlashes(from.getRealPath())).normalize();
+        } catch (IllegalArgumentException e) {
+            throw new ProjectException("The folder of the project '%s' is not a valid path.".formatted(folderPath),
+                    e);
+        }
+        if (!boundary.startsWith(anchor) || !staysInside(boundary, "")) {
+            throw new ProjectException(
+                    "The folder of the project '%s' is reached through a link or cannot be resolved.".formatted(
+                            folderPath));
+        }
+        // The prefix the source lists its files under, as createInternalArtefacts() builds it
+        var prefix = folderPath.isEmpty() || folderPath.endsWith("/") ? folderPath : folderPath + "/";
+        return name -> name.startsWith(prefix) && staysInside(boundary, name.substring(prefix.length()));
+    }
+
+    // V1: the root directory behind a file-backed repository, unwrapped the way the files service unwraps it
+    private static @Nullable Path localRoot(Repository repository) {
+        var current = repository;
+        while (current instanceof RepositoryDelegate delegate) {
+            current = delegate.getOriginal();
+        }
+        if (current instanceof FolderMapper mapper) {
+            current = mapper.getDelegate();
+        }
+        if (current instanceof PathCheckedRepository pathChecked) {
+            return pathChecked.getLocalRoot();
+        }
+        return current instanceof FileSystemRepository fileSystem ? fileSystem.getRoot() : null;
+    }
+
+    // V1: the anchor's real location; an unresolvable anchor stays lexical, so the containment checks fail closed
+    private static Path realLocation(Path root) {
+        var absolute = root.toAbsolutePath();
+        try {
+            return realThroughDeepestExisting(absolute).normalize();
+        } catch (IOException | SecurityException e) {
+            return absolute.normalize();
+        }
+    }
+
+    // V1: whether a path relative to the boundary stays under it on disk; anything unresolvable fails closed
+    private static boolean staysInside(Path boundary, String relative) {
+        try {
+            var target = boundary.resolve(relative).normalize();
+            return target.startsWith(boundary) && realThroughDeepestExisting(target).startsWith(boundary);
+        } catch (IOException | IllegalArgumentException | SecurityException e) {
+            return false;
+        }
+    }
+
+    // V1: the real location of the deepest existing entry, a dangling link included, with the missing tail appended.
+    // An entry that is not a link and vanishes before it is resolved, as a file does while a save replaces it, is
+    // walked past and resolved through its parent; an entry still a link when it fails to resolve is a dangling link.
+    private static Path realThroughDeepestExisting(Path path) throws IOException {
+        for (var existing = deepestExisting(path); existing != null; existing = deepestExisting(existing.getParent())) {
+            try {
+                return existing.toRealPath().resolve(existing.relativize(path));
+            } catch (NoSuchFileException e) {
+                if (Files.isSymbolicLink(existing)) {
+                    throw e;
+                }
+            }
+        }
+        return path;
+    }
+
+    // V1: the path itself or its nearest ancestor present without following a link at its end, or null if none is
+    private static @Nullable Path deepestExisting(@Nullable Path path) {
+        var existing = path;
+        while (existing != null && !Files.exists(existing, LinkOption.NOFOLLOW_LINKS)) {
+            existing = existing.getParent();
+        }
+        return existing;
+    }
+
+    // V1: a slash-separated repository path as a relative filesystem path
+    private static String trimSlashes(String path) {
+        return path.replaceAll("^/+|/+$", "");
     }
 
     private final Object lock = new Object();

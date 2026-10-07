@@ -11,6 +11,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.function.Predicate;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 import java.util.zip.ZipOutputStream;
@@ -423,13 +424,15 @@ public class AProject extends AProjectFolder implements IProject {
     }
 
     private void transformAndArchive(AProject projectFrom, CommonUser user) throws ProjectException {
+        // V1: decided once, before anything is read, which source files stay inside the source project folder
+        var contained = containedFiles(projectFrom);
         // Archive the folder using zip
         var fileData = getFileData();
         var out = new ByteArrayOutputStream();
         try {
             List<FileItem> changes = new ArrayList<>();
             for (AProjectArtefact artefact : projectFrom.getArtefacts()) {
-                writeArtefact(changes, artefact);
+                writeArtefact(changes, artefact, contained); // V1: only contained files
             }
 
             if (getResourceTransformer() != null) {
@@ -482,15 +485,21 @@ public class AProject extends AProjectFolder implements IProject {
         }
     }
 
-    private void writeArtefact(List<FileItem> files, AProjectArtefact artefact) throws IOException,
-            ProjectException {
+    private void writeArtefact(List<FileItem> files,
+                               AProjectArtefact artefact,
+                               Predicate<String> contained) // V1: the source files a copy may read
+            throws IOException, ProjectException {
         if (artefact instanceof AProjectResource resource) {
+            // V1: a source file whose real location leaves the source project folder is neither read nor archived
+            if (!contained.test(resource.getFileData().getName())) {
+                return;
+            }
             InputStream content = getResourceTransformer() != null ? getResourceTransformer().transform(resource) : resource.getContent();
             files.add(new FileItem(resource.getInternalPath(), content));
         } else {
             var folder = (AProjectFolder) artefact;
             for (AProjectArtefact a : folder.getArtefacts()) {
-                writeArtefact(files, a);
+                writeArtefact(files, a, contained); // V1: the same source files
             }
         }
     }

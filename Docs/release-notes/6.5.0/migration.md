@@ -141,7 +141,13 @@ browser.
   that is not a valid relative path, such as one with
   a `..` segment or a leading `/`, is refused before anything is written. Copying a project answers that `400` as well
   when a file of the project being copied leads out of its folder through a link, in a `repo-file` design repository or,
-  for an opened project, in the user's workspace.
+  for an opened project, in the user's workspace. Opening a project from a `repo-file` design repository no longer
+  copies a file that a symbolic link in the project folder leads to outside that folder, outside the repository or into
+  another project, and saving a project leaves out such a link in the user's workspace, whether the design repository
+  is `repo-git`, `repo-file` or JDBC; Local changes do not list such entries either. Opening or saving a project whose
+  folder is itself reached through such a link is refused, and saving into a `repo-file` design repository removes
+  such a link from the project folder there, as it already removed links to folders, leaving the file it points to
+  untouched.
 
   In a `repo-file` design repository, and in the working tree of a `repo-git` design repository, uploading files or a
   template over an existing project answers that `400` when any entry of the existing project folder is a symbolic

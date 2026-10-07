@@ -6,6 +6,7 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 import lombok.RequiredArgsConstructor;
 import org.jspecify.annotations.Nullable;
@@ -63,6 +64,13 @@ public class RepoFileRoot implements FileRoot {
      */
     private @Nullable Path anchor;
     private boolean anchorResolved;
+    // V1: the real locations contains() resolved under the anchor, reused by its later checks.
+    /**
+     * Real locations of the anchor and of the directories and links below it that {@link #contains(String)}
+     * resolved, keyed by absolute normalized path, for {@link FileRoot#atOwnPath(Path, String, Map)}. They live
+     * as long as the anchor, and they need no synchronization for the same reason it needs none.
+     */
+    private final Map<Path, Path> realLocations = new HashMap<>();
 
     @Override
     public AProjectFolder readFolder(String version) {
@@ -154,6 +162,12 @@ public class RepoFileRoot implements FileRoot {
      * wrapper. Any other backend accepts every path, including Git, whose {@code PathCheckedRepository}
      * reveals no root: Git reads blobs from its object database, never through working-tree links.
      *
+     * <p>The checks of the mount reuse what the earlier ones resolved, through
+     * {@link FileRoot#atOwnPath(Path, String, Map)}: the root is resolved once, and the real locations of the
+     * directories and links below it are kept for the lifetime of the mount. A listing, export or search
+     * therefore reads each entry once without following a link at its end, with the verdicts of
+     * {@link FileRoot#atOwnPath(Path, String)}.
+     *
      * @param path repository-relative path; empty for the repository root
      * @return {@code false} when the path, or a directory above it, is a link, or when it cannot be
      *         resolved
@@ -167,7 +181,8 @@ public class RepoFileRoot implements FileRoot {
         }
         var root = anchor;
         // V1: a repository that is not file-backed has no filesystem links to follow.
-        return root == null || FileRoot.atOwnPath(root, path);
+        // V1: the checks of the mount share the real locations they resolve, so each entry costs one read.
+        return root == null || FileRoot.atOwnPath(root, path, realLocations);
     }
 
     /**
