@@ -84,7 +84,8 @@ public class GetUserPrivileges implements BiFunction<String, Collection<? extend
             // Only names are logged, never credentials; the warning repeats at every IdP-backed login.
             // The ADMIN membership check and the name copies run only when WARN is enabled for this logger.
             if (warn && log.isWarnEnabled() && group != null && group.hasPrivilege(Privileges.ADMIN.name())) {
-                // V12: only loggable() copies of the names are logged, so no IdP-supplied name can forge a log line.
+                // V12: only loggable() copies of the names are logged, so no IdP-supplied name can forge a log line
+                // or fake one of this warning's quoted fields.
                 // The group lookup and the mapping use the names exactly as supplied, never the sanitized copies.
                 log.warn(
                         "External group '{}' of user '{}' matches OpenL group '{}', which holds ADMIN; "
@@ -113,9 +114,11 @@ public class GetUserPrivileges implements BiFunction<String, Collection<? extend
     }
 
     /**
-     * V12: returns a copy of an identity-provider name that stays on one log line. Every ISO control character
-     * (CR, LF and TAB included) and the Unicode line and paragraph separators U+2028 and U+2029 become
-     * {@code '_'}, so a name cannot end the warning line and start a forged one.
+     * V12: returns a copy of an identity-provider name that stays on one log line and inside its quoted field.
+     * Every ISO control character (CR, LF and TAB included), the Unicode line and paragraph separators U+2028 and
+     * U+2029, the quote that delimits each name in the warning, and the backslash, which a log parser may read as
+     * escaping the next character, become {@code '_'}. A name can therefore neither end the warning line and start
+     * a forged one nor close its field and fake the user or group of the warning.
      *
      * @param name the name as the identity provider supplied it, or {@code null}
      * @return the name with those characters replaced, or {@code null} when {@code name} is {@code null}
@@ -127,7 +130,9 @@ public class GetUserPrivileges implements BiFunction<String, Collection<? extend
         var safe = new StringBuilder(name.length());
         for (var i = 0; i < name.length(); i++) {
             var c = name.charAt(i);
-            safe.append(Character.isISOControl(c) || c == '\u2028' || c == '\u2029' ? '_' : c);
+            // V12: the quote and the backslash are replaced too, so a name cannot fake a field of the warning
+            safe.append(
+                    Character.isISOControl(c) || c == '\u2028' || c == '\u2029' || c == '\'' || c == '\\' ? '_' : c);
         }
         return safe.toString();
     }

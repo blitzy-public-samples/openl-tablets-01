@@ -21,6 +21,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.function.Supplier;
+import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
 import org.apache.commons.lang3.RandomStringUtils;
@@ -60,10 +61,10 @@ import org.openl.rules.webstudio.service.UserManagementService;
  * authorities. With WARN disabled for the {@link GetUserPrivileges} logger, {@link GetUserPrivileges#apply} maps
  * identically without asking any matched group whether it holds {@code ADMIN}.
  *
- * <p>The warning names the external group, the user and the matched OpenL group with every ISO control character
- * and the Unicode line and paragraph separators replaced by {@code '_'}, so a name the identity provider supplies
- * cannot end the warning line and start a forged one. The mapping still looks up and returns the names as they
- * were supplied.
+ * <p>The warning names the external group, the user and the matched OpenL group with every ISO control character,
+ * the Unicode line and paragraph separators, the quote and the backslash replaced by {@code '_'}, so a name the
+ * identity provider supplies can neither end the warning line and start a forged one nor close its quoted field and
+ * fake the user or group of the warning. The mapping still looks up and returns the names as they were supplied.
  */
 @ExtendWith(MockitoExtension.class)
 class GetUserPrivilegesTest {
@@ -81,6 +82,20 @@ class GetUserPrivilegesTest {
     /** A user name carrying LF, TAB, U+2028, U+2029 and the C1 control NEL (U+0085), as the IdP sends it. */
     private static final String CRAFTED_USER = "mallory\n\tforged-user\u2028\u2029\u0085end";
     private static final String CRAFTED_USER_LOGGED = "mallory__forged-user___end";
+
+    /**
+     * An ADMIN-holding OpenL group name whose quotes, logged unchanged, would close its field of the warning and fake
+     * the user {@code root} and the matched group {@code Administrators} after it, as the IdP sends it.
+     */
+    private static final String QUOTED_GROUP = "qa-inj4' of user 'root' matches OpenL group 'Administrators";
+    private static final String QUOTED_GROUP_LOGGED = "qa-inj4_ of user _root_ matches OpenL group _Administrators";
+
+    /**
+     * A user name carrying a quote, a backslash that a log parser may read as escaping the quote after it, and a fake
+     * user field, as the IdP sends it.
+     */
+    private static final String QUOTED_USER = "o'brien\\' of user 'root";
+    private static final String QUOTED_USER_LOGGED = "o_brien__ of user _root";
 
     private static final String USER = "alice";
     private static final String USER_WITHOUT_DB_RECORD = "bob";
@@ -114,6 +129,7 @@ class GetUserPrivilegesTest {
     private final Group defaultGroup = new SimpleGroup(DEFAULT_GROUP,
             List.<GrantedAuthority>of(new SimpleGrantedAuthority("VIEW_PROJECTS")));
     private final Group craftedAdminGroup = new SimpleGroup(CRAFTED_GROUP, List.<GrantedAuthority>of(Privileges.ADMIN));
+    private final Group quotedAdminGroup = new SimpleGroup(QUOTED_GROUP, List.<GrantedAuthority>of(Privileges.ADMIN));
 
     @BeforeEach
     void setUp() {
@@ -122,6 +138,7 @@ class GetUserPrivilegesTest {
         groups.put(nestedAdminGroup.getAuthority(), nestedAdminGroup);
         groups.put(defaultGroup.getAuthority(), defaultGroup);
         groups.put(craftedAdminGroup.getAuthority(), craftedAdminGroup);
+        groups.put(quotedAdminGroup.getAuthority(), quotedAdminGroup);
         // "unmatched" has no OpenL group, so the lookup answers null for it.
         lenient().when(groupManagementService.getGroupByName(anyString()))
                 .thenAnswer(invocation -> groups.get(invocation.<String>getArgument(0)));
@@ -324,6 +341,37 @@ class GetUserPrivilegesTest {
 
     @Test
     @StdIo
+    void quotesAndBackslashesInIdentityProviderNamesCannotFakeAWarningField(StdErr err) {
+        var external = authorities(QUOTED_GROUP);
+
+        var result = List.copyOf(new GetUserPrivileges(userManagementService, groupManagementService,
+                NO_DEFAULT_GROUP).apply(QUOTED_USER, external));
+
+        assertNoPasswordLogged(err);
+        assertEquals(1, err.capturedLines().length, "The warning is the only line written");
+        var warning = err.capturedLines()[0];
+        assertTrue(warning.contains("WARN"), "The ADMIN name-match warning must be logged at WARN");
+        assertTrue(warning.endsWith("External group '" + QUOTED_GROUP_LOGGED + "' of user '" + QUOTED_USER_LOGGED
+                + "' matches OpenL group '" + QUOTED_GROUP_LOGGED + "', which holds ADMIN; "
+                + "the user gains administrator rights through this name match."),
+                "The warning must name the sanitized group, user and matched group");
+        // A parser reading the quoted fields finds each field once, holding the sanitized name it belongs to.
+        assertEquals(List.of(QUOTED_GROUP_LOGGED), quotedFields(warning, "External group"),
+                "The warning must name one external group, the sanitized one");
+        assertEquals(List.of(QUOTED_USER_LOGGED), quotedFields(warning, "of user"),
+                "The warning must name one user, the sanitized real one, not the faked root");
+        assertEquals(List.of(QUOTED_GROUP_LOGGED), quotedFields(warning, "matches OpenL group"),
+                "The warning must name one matched group, the sanitized one, not the faked Administrators");
+        // The mapping looks up and returns the names as the IdP sent them; only the logged copies change.
+        verify(groupManagementService).getGroupByName(QUOTED_GROUP);
+        verify(userManagementService).getUser(QUOTED_USER);
+        assertSame(quotedAdminGroup, result.get(0));
+        assertEquals(List.of(quotedAdminGroup), result);
+        assertEquals(expectedPreChange(null, external, null), result);
+    }
+
+    @Test
+    @StdIo
     void disabledWarnLevelSkipsTheAdminMembershipCheck(StdErr err) throws ReflectiveOperationException {
         // Spies keep the real groups, so only the disabled level can explain a skipped check and a missing warning.
         var spiedAdminGroup = spy(adminGroup);
@@ -475,6 +523,22 @@ class GetUserPrivilegesTest {
         } finally {
             level.setInt(logger, previous);
         }
+    }
+
+    /**
+     * The values of every {@code <label> '<value>'} field in a line, in order, as a parser that splits the line on
+     * its quotes reads them.
+     *
+     * @param line  the captured line
+     * @param label the text in front of the field's opening quote
+     * @return the field values found, in order
+     */
+    private static List<String> quotedFields(String line, String label) {
+        return Pattern.compile(Pattern.quote(label) + " '([^']*)'")
+                .matcher(line)
+                .results()
+                .map(match -> match.group(1))
+                .toList();
     }
 
     private static List<String> adminMatchWarnings(StdErr err) {
