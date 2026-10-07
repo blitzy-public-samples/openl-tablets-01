@@ -110,12 +110,18 @@ browser.
 
 * **Workspace folders, project files, new projects and uploaded archives are kept inside their own folders.** A user's
   workspace folder under `user.workspace.home` must be a real folder of its own: one that is a symbolic link into
-  another user's folder or out of the workspace home, or a dangling link, is refused, and so is the folder of a user
-  whose login name holds a character that OpenL Studio does not allow in file names, such as `'`, `:` or `%` (on every
-  operating system, so a name with a Windows drive prefix such as `C:x` too), starts with a space, ends with a dot or a
-  space, or is a reserved name such as `CON`, `NUL` or `COM1` in upper case. OpenL Studio does not open the workspace of
-  such a user. The startup conversion of legacy `.studioProps` project metadata also leaves such folders out and logs a
-  WARN for each of them except a dangling link, which is not a folder. It likewise leaves out, with a WARN each, a user
+  another user's folder or out of the workspace home, or a dangling link, is refused. OpenL Studio names that folder
+  after the login name, with every character other than a letter, a digit, `_` or `-` written as its hexadecimal code in
+  parentheses, so login names that hold `'`, `:`, `%`, spaces or dots keep working: `qa'q` gets the folder `qa(27)q`. A
+  login name that is itself a reserved name such as `CON`, `NUL` or `COM1` in upper case is refused too. OpenL Studio
+  does not open a refused workspace: the REST calls that need it answer `403` with `openl.error.403.default.message`. A
+  name that OpenL Studio uses as a folder name unchanged must, in addition, hold no character that OpenL Studio does not
+  allow in file names, such as `'`, `:` or `%` (on every operating system, so a Windows drive prefix such as `C:x` is
+  refused too), not start with a space, not end with a dot or a space, and not be a reserved name. At startup in
+  `single` mode, the move of a legacy `DEFAULT` workspace to `security.single.username` is skipped with a WARN when that
+  name breaks these rules or its folder is such a link. The startup conversion of legacy `.studioProps` project metadata
+  also leaves out the folders in the workspace home that break these rules or are such a link, and logs a WARN for each
+  of them except a dangling link, which is not a folder. It likewise leaves out, with a WARN each, a user
   folder whose `.metainfo` is a symbolic link, with all its projects, and a project not yet converted whose folder is a
   symbolic link to a folder or whose `.studioProps`, `.history`, `.studioProps/.version` or
   `.studioProps/file-properties` is a symbolic link; a dangling `.metainfo` or metadata link counts too, and the legacy

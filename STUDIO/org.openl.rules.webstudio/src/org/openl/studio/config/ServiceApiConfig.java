@@ -26,6 +26,7 @@ import org.openl.rules.workspace.MultiUserWorkspaceManager;
 import org.openl.rules.workspace.uw.UserWorkspace;
 import org.openl.security.acl.repository.RepositoryAclService;
 import org.openl.security.acl.repository.SimpleRepositoryAclService;
+import org.openl.studio.common.exception.ForbiddenException;
 import org.openl.studio.projects.service.ProjectAccessService;
 import org.openl.studio.projects.service.protection.ProtectedBranchBypassService;
 import org.openl.studio.repositories.service.HistoryRepositoryMapper;
@@ -71,6 +72,14 @@ public class ServiceApiConfig {
         rulesUserSession.setUserName(currentUserInfo.getUserName());
         rulesUserSession.setWorkspaceManager(workspaceManager);
         rulesUserSession.setUserManagementService(userManagementService);
+        // V1: a user id that is not a valid workspace folder name gets no workspace, so the session is refused
+        try {
+            rulesUserSession.getUserWorkspace();
+        } catch (IllegalArgumentException e) {
+            var refusal = new ForbiddenException();
+            refusal.initCause(e);
+            throw refusal;
+        }
 
         var webStudio = new WebStudio(rulesUserSession,
                 testSuiteExecutor,
