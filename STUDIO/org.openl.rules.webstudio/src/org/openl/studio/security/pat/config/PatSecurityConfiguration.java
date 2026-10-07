@@ -13,6 +13,7 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.security.core.GrantedAuthority;
 import org.springframework.security.core.userdetails.UserDetailsService;
 import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.util.NumberUtils;
 
 import org.openl.rules.security.standalone.dao.PersonalAccessTokenDao;
 import org.openl.rules.security.standalone.dao.UserDao;
@@ -50,6 +51,47 @@ import org.openl.studio.users.service.pat.PersonalAccessTokenService;
 @Configuration
 @ConditionalOnExpression("'${user.mode}' != 'single'")
 public class PatSecurityConfiguration {
+
+    /**
+     * Creates the configuration and checks that both PAT lifetime properties hold a whole number of days.
+     * <p>
+     * Spring creates this configuration before it resolves the arguments of its bean methods, so a value that cannot
+     * be bound to an {@code int} stops the startup here, with an error naming its property, instead of a type
+     * conversion error on a {@code patGeneratorService} parameter. Whether each lifetime is positive, and whether the
+     * default exceeds the maximum, is checked by {@link PatGeneratorServiceImpl}.
+     * </p>
+     *
+     * @param defaultExpirationDays the raw value of {@code security.pat.default-expiration-days}
+     * @param maxExpirationDays     the raw value of {@code security.pat.max-expiration-days}
+     * @throws IllegalArgumentException if a value is empty, not a whole number, or outside the {@code int} range
+     */
+    public PatSecurityConfiguration(@Value("${security.pat.default-expiration-days}") String defaultExpirationDays,
+                                    @Value("${security.pat.max-expiration-days}") String maxExpirationDays) {
+        // V8: a lifetime that is not a whole number of days fails startup with its property named
+        requireWholeDays("security.pat.default-expiration-days", defaultExpirationDays);
+        requireWholeDays("security.pat.max-expiration-days", maxExpirationDays);
+    }
+
+    /**
+     * Checks that a PAT lifetime value can be bound to an {@code int} number of days.
+     * <p>
+     * The value is parsed by Spring's default {@code String} to {@code int} conversion, the one that binds the
+     * {@code int} parameters of {@code patGeneratorService}, so this check accepts every value that binding accepts
+     * and rejects every value it rejects. The message names the property and never repeats the value.
+     * </p>
+     *
+     * @param property the property name reported in the error
+     * @param value    the raw property value
+     * @throws IllegalArgumentException if the value cannot be parsed as an {@code int}
+     */
+    private static void requireWholeDays(String property, String value) {
+        try {
+            NumberUtils.parseNumber(value, Integer.class);
+        } catch (IllegalArgumentException e) {
+            throw new IllegalArgumentException(
+                    property + " must be a positive whole number of days, at most " + Integer.MAX_VALUE, e);
+        }
+    }
 
     /**
      * Creates the PAT authentication service bean.

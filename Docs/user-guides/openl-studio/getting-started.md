@@ -175,7 +175,10 @@ To create a personal access token, proceed as follows:
     -   **No expiration** creates a token that expires after the default period set by the administrator in
         `security.pat.default-expiration-days`, 90 days by default. The option keeps its name in the drawer.
     -   A custom date beyond the maximum period set in `security.pat.max-expiration-days`, 365 days by default, is
-        refused with an error message.
+        refused with an error message. A custom date expires at the end of the selected day in the browser's time
+        zone, while the maximum is counted from the moment the token is created. The latest custom date accepted is
+        therefore one day less than the maximum ahead, 364 days ahead by default. The date picker still offers later
+        dates, but they are refused with the same error message.
     -   Tokens created without an expiration date before the upgrade still never expire and are listed with **Never** in
         the **Expires** column.
 
