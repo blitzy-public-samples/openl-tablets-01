@@ -49,9 +49,9 @@ class WebStudioTest {
     void repos() throws Exception {
         // V1: runtime credentials, then scans of captured console output and saved responses for generated secrets
         Map<String, String> generated = new HashMap<>();
-        Throwable failure = null;
         var capture = OutputCapture.start(); // V1: the console output is copied from before the server starts
-        try (var client = JettyServer.get().start()) {
+        // V1: the capture is the first resource, so it is restored only after the server has stopped
+        try (capture; var client = JettyServer.get().start()) {
             putAdminCredentials(client, generated); // V1: the derived administrator header is scanned for too
             putPasswordPolicyValues(client, generated); // V7: generated local-user passwords
             putLockoutValues(client, generated); // V9: generated lockout-scenario credentials
@@ -72,21 +72,15 @@ class WebStudioTest {
             }
             assertHttpJsonNeedsOnlySession(client, generated);
         } catch (Throwable t) {
-            failure = t;
-            throw t;
-        } finally {
-            capture.close(); // V1: the server has stopped, so the copy is complete; the console is restored
-            // V1: a scan error of any kind is suppressed onto the suite failure instead of replacing it
+            // V1: a scan error of any kind is attached to the suite failure instead of replacing it
             try {
                 assertNoSecretsLeaked(generated, capture);
             } catch (AssertionError | RuntimeException scan) {
-                if (failure != null) {
-                    failure.addSuppressed(scan);
-                } else {
-                    throw scan;
-                }
+                t.addSuppressed(scan);
             }
+            throw t;
         }
+        assertNoSecretsLeaked(generated, capture); // V1: the suite passed, so a scan failure is the reported one
     }
 
     // V1: the administrator password and Basic header, derived at runtime from the first configured administrator

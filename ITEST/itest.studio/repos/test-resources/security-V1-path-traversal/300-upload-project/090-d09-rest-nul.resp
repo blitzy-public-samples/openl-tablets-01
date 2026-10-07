@@ -3,5 +3,5 @@ Content-Type: application/json
 
 {
   "code": "openl.error.400.default.message",
-  "message": "Path: nul character not allowed: evil.xlsx\u0000.txt"
+  "message": "*"
 }
