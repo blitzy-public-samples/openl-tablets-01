@@ -34,6 +34,9 @@ import java.util.stream.Stream;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.jspecify.annotations.Nullable;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
 import org.openl.itest.core.HttpClient;
@@ -56,6 +59,43 @@ class WebStudioTest {
     private static final String HTTP_JSON = "/rest/public/info/http.json";
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final Pattern BCRYPT_PREFIX = Pattern.compile("\\$2[aby]\\$");
+
+    // V1: 2000+ requests can meet a busy host's stall longer than the shared 10 s perf limit, so this suite allows 30 s
+    private static final String READ_TIMEOUT_PROPERTY = "http.timeout.read";
+    private static final int READ_TIMEOUT_FLOOR_MS = 30_000;
+
+    // V1: the read timeout set before this suite started, or null when none was set
+    private static @Nullable String readTimeoutBefore;
+
+    // V1: before the client is built, raises a positive read timeout below 30 s to 30 s; a longer one (-DnoPerf) stays
+    @BeforeAll
+    static void raiseReadTimeout() {
+        String configured = System.getProperty(READ_TIMEOUT_PROPERTY);
+        readTimeoutBefore = configured;
+        if (configured == null) {
+            return;
+        }
+        int millis;
+        try {
+            millis = Integer.parseInt(configured);
+        } catch (NumberFormatException e) {
+            return;
+        }
+        if (millis > 0 && millis < READ_TIMEOUT_FLOOR_MS) {
+            System.setProperty(READ_TIMEOUT_PROPERTY, String.valueOf(READ_TIMEOUT_FLOOR_MS));
+        }
+    }
+
+    // V1: puts back the read timeout found before this suite started, clearing it when none was set
+    @AfterAll
+    static void restoreReadTimeout() {
+        String before = readTimeoutBefore;
+        if (before == null) {
+            System.clearProperty(READ_TIMEOUT_PROPERTY);
+        } else {
+            System.setProperty(READ_TIMEOUT_PROPERTY, before);
+        }
+    }
 
     @Test
     void repos() throws Exception {
