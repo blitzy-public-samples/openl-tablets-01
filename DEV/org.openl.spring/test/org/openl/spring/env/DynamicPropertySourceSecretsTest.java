@@ -858,7 +858,8 @@ class DynamicPropertySourceSecretsTest {
         assertSecret(expected, failure.getMessage(), "The failure must name the property and the cause");
         assertTrue(before.equals(source.getProperties()), "The settings must stay as they were");
         assertNull(source.getProperty("unrelated.name"), "Nothing of a failed save may be published");
-        assertSecret(plain, source.getProperty("security.oauth2.client-secret"), "The stored secret must read as before");
+        assertSecret(plain, source.getProperty("security.oauth2.client-secret"),
+                "The stored secret must read as before");
         assertEquals(version, source.version(), "A failed save must keep the version of the settings");
         assertTrue(Arrays.equals(file, Files.readAllBytes(settingsFile(home))), "The file must stay as it was");
         assertEquals(modified, Files.getLastModifiedTime(settingsFile(home)), "A failed save must not write the file");
@@ -1257,7 +1258,8 @@ class DynamicPropertySourceSecretsTest {
             assertTrue(stored.startsWith(V2_STORED), "A blank secret must be stored as ENC(v2:...): " + name);
             assertTrue(stored.equals(stored(reopened, name)), "The file must hold the ciphertext: " + name);
             assertSecret(read.getValue(), source.getProperty(name), "A blank secret must read as before: " + name);
-            assertSecret(read.getValue(), reopened.getProperty(name), "A blank secret must read from the file: " + name);
+            assertSecret(read.getValue(), reopened.getProperty(name),
+                    "A blank secret must read from the file: " + name);
             generated.add(stored.substring(V2_STORED.length(), stored.length() - 1));
         }
 
@@ -1267,7 +1269,8 @@ class DynamicPropertySourceSecretsTest {
         reopened.save(Map.of("given.password", "", "given.secret", " ", "stored.password", ""));
         assertTrue(kept.equals(reopened.getProperties()), "An unchanged save must keep every ciphertext");
         assertTrue(Arrays.equals(file, Files.readAllBytes(settingsFile(home))), "An unchanged save must keep the file");
-        assertEquals(modified, Files.getLastModifiedTime(settingsFile(home)), "An unchanged save must not write the file");
+        assertEquals(modified, Files.getLastModifiedTime(settingsFile(home)),
+                "An unchanged save must not write the file");
 
         var log = err.capturedString();
         assertFalse(log.contains("Cannot re-encrypt"), "A legacy ENC() must be re-encrypted");
@@ -1337,7 +1340,8 @@ class DynamicPropertySourceSecretsTest {
             var failure = readerFailure.get();
             assertTrue(reads.get() > 0,
                     failure == null ? "The reader must read before the save runs"
-                                    : "The reader must not fail before its first read: " + failure.getClass().getName());
+                                    : "The reader must not fail before its first read: "
+                                            + failure.getClass().getName());
             var readsBefore = reads.get();
             save.run();
             readsDuring = reads.get() - readsBefore;

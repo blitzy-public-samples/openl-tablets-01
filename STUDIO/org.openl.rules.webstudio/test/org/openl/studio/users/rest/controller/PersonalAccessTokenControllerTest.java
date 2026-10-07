@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -23,6 +24,7 @@ import org.junitpioneer.jupiter.StdIo;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import org.openl.studio.common.exception.BadRequestException;
 import org.openl.studio.common.exception.NotFoundException;
 import org.openl.studio.security.CurrentUserInfo;
 import org.openl.studio.security.audit.SecurityAuditLog;
@@ -35,7 +37,8 @@ import org.openl.studio.users.service.pat.PersonalAccessTokenService;
 
 /**
  * Unit tests for {@link PersonalAccessTokenController}.
- * Tests the V11 audit lines of PAT creation and revocation using mocked dependencies.
+ * Tests the V11 audit lines of PAT creation and revocation, the duplicate-name rejection and the read endpoints using
+ * mocked dependencies.
  *
  * <p>The unit-test classpath binds slf4j to slf4j-simple, which writes every line to the current
  * {@code System.err}; JUnit Pioneer's {@link StdIo} captures it per test. Every public ID, secret and token name used
@@ -97,6 +100,80 @@ class PersonalAccessTokenControllerTest {
         var line = singleAuditLine(err);
         assertTrue(line.contains("event=pat.create outcome=success "), "pat.create must carry outcome=success");
         assertTrue(line.endsWith(" pat=" + publicId), "pat.create must end with the generated public ID");
+    }
+
+    @Test
+    @StdIo
+    void testCreateToken_DuplicateName_ThrowsBadRequestWithoutGeneratingOrAuditing(StdErr err) {
+        // Arrange
+        var tokenName = credentialLookingName();
+        var request = new CreatePersonalAccessTokenRequest(tokenName, null);
+        when(crudService.existsByLoginNameAndName(LOGIN_NAME, tokenName)).thenReturn(true);
+
+        // Act & Assert
+        var ex = assertThrows(BadRequestException.class, () -> controller.createToken(request));
+
+        // The token name first, so no later failure can stop that check
+        var output = err.capturedString();
+        assertFalse(output.contains(tokenName), "The token name reached the log output.");
+        assertEquals("openl.error.400.pat.duplicate.name.message", ex.getErrorCode());
+        verify(generatorService, never()).generateToken(any(), any(), any());
+        assertTrue(auditLines(err).isEmpty(), "A duplicate name must write no audit line");
+        assertFalse(output.contains("event=pat.create"), "A duplicate name must write no pat.create");
+    }
+
+    @Test
+    @StdIo
+    void testListTokens_ReturnsTheStoredTokensWithoutAuditLine(StdErr err) {
+        // Arrange
+        var firstName = credentialLookingName();
+        var secondName = credentialLookingName();
+        var stored = List.of(storedToken(randomPublicId(), firstName), storedToken(randomPublicId(), secondName));
+        when(crudService.getTokensByUser(LOGIN_NAME)).thenReturn(stored);
+
+        // Act
+        var response = controller.listTokens();
+
+        // Assert - the token names first, so no later failure can stop that check
+        var output = err.capturedString();
+        assertFalse(output.contains(firstName), "A token name reached the log output.");
+        assertFalse(output.contains(secondName), "A token name reached the log output.");
+        // An identity check that never formats the tokens, whose names have the shape of a credential
+        assertTrue(stored == response, "The stored tokens must be returned as they are");
+        assertTrue(auditLines(err).isEmpty(), "Listing tokens must write no audit line");
+    }
+
+    @Test
+    @StdIo
+    void testGetToken_KnownPublicId_ReturnsTheStoredTokenWithoutAuditLine(StdErr err) {
+        // Arrange
+        var publicId = randomPublicId();
+        var tokenName = credentialLookingName();
+        var stored = storedToken(publicId, tokenName);
+        when(crudService.getTokenForUser(publicId, LOGIN_NAME)).thenReturn(stored);
+
+        // Act
+        var response = controller.getToken(publicId);
+
+        // Assert - the token name first, so no later failure can stop that check
+        assertFalse(err.capturedString().contains(tokenName), "The token name reached the log output.");
+        // An identity check that never formats the token, whose name has the shape of a credential
+        assertTrue(stored == response, "The stored token must be returned as it is");
+        assertTrue(auditLines(err).isEmpty(), "Reading a token must write no audit line");
+    }
+
+    @Test
+    @StdIo
+    void testGetToken_UnknownPublicId_ThrowsNotFoundWithoutAuditLine(StdErr err) {
+        // Arrange
+        var pathValue = randomPublicId();
+        when(crudService.getTokenForUser(pathValue, LOGIN_NAME)).thenReturn(null);
+
+        // Act & Assert
+        var ex = assertThrows(NotFoundException.class, () -> controller.getToken(pathValue));
+
+        assertEquals("openl.error.404.pat.not.found.message", ex.getErrorCode());
+        assertTrue(auditLines(err).isEmpty(), "An unknown public ID must write no audit line");
     }
 
     @Test

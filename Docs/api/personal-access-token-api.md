@@ -545,14 +545,18 @@ Content-Type: application/json
     "expiresAt": "2026-12-22T23:59:59Z"
   },
   {
-    "publicId": "m1N2o3P4q5R6s7T8",
-    "name": "Development Token",
+    "publicId": "q1R2s3T4u5V6w7X8",
+    "name": "Legacy Token",
     "loginName": "jenkins",
-    "createdAt": "2025-12-23T11:00:00Z",
+    "createdAt": "2025-11-20T11:00:00Z",
     "expiresAt": null
   }
 ]
 ```
+
+The second token was created before 6.5.0 without an expiration date, so its `expiresAt` is `null` and it never expires.
+
+<!-- V8: the second listed token predates 6.5.0, so its expiresAt is null and it never expires -->
 
 ---
 

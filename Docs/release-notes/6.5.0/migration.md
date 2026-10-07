@@ -140,13 +140,12 @@ browser.
   `repo-git` design repository, such an archive also answers that `400` whenever the existing project folder holds a
   link to a folder outside it; a link to a file or to nothing stops the upload only when an entry would be written
   through that link. Links that stay inside the project folder do not stop an upload. A `repo-git` design repository
-  writes uploads through that working tree, so
-  uploading files, a template or an archive to it also answers that `400` when the project folder would be reached
-  through a link there. The files API on its closed projects and on the repository itself, and a project copied into
-  it, get the name checks only; opening its projects, and reading the source when one of its closed projects is
-  copied, are unchanged. JDBC, S3 and Azure Blob repositories keep no local folder, so no link check applies to them:
-  they get the name checks only. Before upgrading, replace such links with regular folders or with copies of their
-  content inside the project, or remove them.
+  writes uploads through that working tree, so uploading files, a template or an archive to it also answers that `400`
+  when the project folder would be reached through a link there. The files API on its closed projects and on the
+  repository itself, and a project copied into it, get the name checks only; opening its projects, and reading the
+  source when one of its closed projects is copied, are unchanged. JDBC, S3 and Azure Blob repositories keep no local
+  folder, so no link check applies to them: they get the name checks only. Before upgrading, replace such links with
+  regular folders or with copies of their content inside the project, or remove them.
 
   The repository files API, `/rest/repos/{repo-name}/files/...` with its `file-copy`, `file-move` and `file-search`
   routes, now checks the permission on every entry an operation reads, writes or removes. Deleting a folder needs Delete
@@ -183,8 +182,8 @@ browser.
   25-character maximum and applies when a local user is created, when an administrator changes a user's password and
   when users change their own password in their profile. A violation answers `400` with a field error whose `code`
   is `openl.constraints.password.min-length.message` or `openl.constraints.password.max-bytes.message` and whose
-  `message` is that key's text. Existing
-  passwords and their hashes are untouched, so a shorter password keeps working until it is next changed.
+  `message` is that key's text. Existing passwords and their hashes are untouched, so a shorter password keeps working
+  until it is next changed.
   <!-- V7: local password length policy -->
 
 * **New personal access tokens always expire.** A token created without `expiresAt`, including through the "No

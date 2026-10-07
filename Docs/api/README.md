@@ -267,12 +267,14 @@ The Personal Access Token (PAT) API enables users to generate and manage authent
 **Key Features:**
 - Create, list, retrieve, and delete personal access tokens
 - Cryptographically secure token generation (Base62 encoding, 285 bits entropy)
-- Mandatory expiration for every new token: the requested `expiresAt` is optional, but an omitted one defaults to `security.pat.default-expiration-days` (default 90) days, and a date more than `security.pat.max-expiration-days` (default 365) days ahead is rejected; tokens created before 6.5.0 without an expiration keep working and never expire
+- Mandatory expiration for every new token: the requested `expiresAt` is optional, but an omitted one defaults to
+  `security.pat.default-expiration-days` (default 90) days, and a date more than `security.pat.max-expiration-days`
+  (default 365) days ahead is rejected; tokens created before 6.5.0 without an expiration keep working and never expire
 - User isolation (users manage only their own tokens)
 - An authenticated user mode required for management operations (not available in single-user mode)
 - PAT authentication cannot be used to manage PATs
 
-<!-- V8: new tokens always expire, after the configured default or by a requested date within the configured maximum. -->
+<!-- V8: new tokens always expire, after the configured default or by a requested date within the configured maximum -->
 
 **Use Cases:**
 - Service-to-service authentication
