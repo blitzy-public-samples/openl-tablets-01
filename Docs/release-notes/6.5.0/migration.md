@@ -166,8 +166,11 @@ browser.
 * **The OpenL Studio session cookie is now `SameSite=Lax`.** SAML login keeps working, but the identity provider's
   response must reach OpenL Studio within 5 minutes of the login request, and after a cross-site SAML callback the
   user lands on `/` instead of the page first requested. An IdP-initiated SAML logout that the browser delivers as a
-  cross-site HTTP-POST arrives without the Studio session cookie, which `SameSite=Lax` withholds, so it can no longer
-  end the Studio session. Configure the HTTP-Redirect binding for front-channel logout. CSRF tokens stay disabled.
+  cross-site HTTP-POST now arrives without the Studio session cookie, which `SameSite=Lax` withholds. OpenL Studio does
+  not complete IdP-initiated SAML single logout in either the HTTP-Redirect or the HTTP-POST binding, and did not before
+  this release: a `LogoutRequest` sent to `/logout` is rejected and one sent to `/logout/saml2/slo` is ignored, so the
+  Studio session stays active until the user signs out or it times out. Users end their session with Sign Out in OpenL
+  Studio, which also ends the identity provider session. CSRF tokens stay disabled.
   <!-- V3: SameSite=Lax session cookie -->
 
 * **SAML, OIDC and static-resource responses now carry the default security headers.** They send what the `multi`,
