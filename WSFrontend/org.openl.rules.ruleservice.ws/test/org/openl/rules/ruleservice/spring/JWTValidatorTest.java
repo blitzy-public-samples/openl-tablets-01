@@ -239,7 +239,8 @@ class JWTValidatorTest {
     @Test
     @StdIo
     void validToken_withInfoDisabled_isAllowedWithoutAuthorizedLine(StdErr stdErr) throws Throwable {
-        // The control character would be escaped if the authorized line were formatted while INFO is disabled.
+        // A valid token with a control character in its JWT ID is accepted, and with INFO disabled no authorized line,
+        // JWT ID or token material is logged. The isInfoEnabled guard only skips escaping, invisible to this test.
         var head = UUID.randomUUID().toString();
         var jwtId = head + '\u0007' + UUID.randomUUID();
         var token = sign(trusted, ISSUER, AUDIENCE, inSeconds(300), jwtId);
