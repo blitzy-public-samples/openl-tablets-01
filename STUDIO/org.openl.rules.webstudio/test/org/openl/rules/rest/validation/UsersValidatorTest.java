@@ -53,6 +53,8 @@ class UsersValidatorTest extends AbstractConstraintValidatorTest {
     // V7: messages of LocalPasswordPolicy
     private static final String PASSWORD_MIN_LENGTH = "The password must contain at least 12 characters.";
     private static final String PASSWORD_MAX_BYTES = "The password must not exceed 72 bytes in UTF-8.";
+    // V7: message of a password that holds an unpaired surrogate
+    private static final String PASSWORD_INVALID = "The password is not valid.";
     private static final String MUST_NOT_CONTAIN_FOLLOWING_CHARS = "The name cannot contain spaces and any of the following characters: / \\ : * ? \" < > | { } ~ ^ ; %";
 
     @Autowired
@@ -421,6 +423,20 @@ class UsersValidatorTest extends AbstractConstraintValidatorTest {
         }, "an oversized password must be rejected without being scanned or encoded");
     }
 
+    // V7: a password within both limits that holds unpaired surrogates gets exactly one violation, the invalid one
+    @Test
+    void testPasswordPolicy_unpairedSurrogate_singleInvalidViolation() {
+        var malformed = "\uDC00".repeat(LocalPasswordPolicy.MIN_CHARACTERS);
+
+        var context = mock(HibernateConstraintValidatorContext.class);
+        var builder = mock(HibernateConstraintViolationBuilder.class);
+        stubViolationChain(context, builder);
+        assertFalse(LocalPasswordPolicy.check(malformed, context));
+        verify(context).buildConstraintViolationWithTemplate("{" + LocalPasswordPolicy.INVALID_KEY + "}");
+        verify(builder).addConstraintViolation();
+        verifyNoMoreInteractions(context, builder);
+    }
+
     @Test
     void testEditUserProfile_requiredFields() {
         var userProfileEditModel = getValidUserProfileEditModel()
@@ -512,7 +528,8 @@ class UsersValidatorTest extends AbstractConstraintValidatorTest {
     static Stream<Arguments> passwordPolicyCases() {
         var euro = "\u20AC"; // 3 UTF-8 bytes, 1 UTF-16 unit
         var emoji = Character.toString(0x1F600); // 4 UTF-8 bytes, 2 UTF-16 units
-        var loneSurrogate = "\uD800"; // 1 UTF-8 byte ('?'), 1 UTF-16 unit
+        var highSurrogate = "\uD83D"; // V7: the high half of U+1F600, unpaired where it is used alone
+        var lowSurrogate = "\uDE00"; // V7: the low half of U+1F600, unpaired where it is used alone
         return Stream.of(
                 Arguments.of("11 code points", RandomStringUtils.secure().nextAlphanumeric(11), PASSWORD_MIN_LENGTH),
                 Arguments.of("12 code points", RandomStringUtils.secure().nextAlphanumeric(12), null),
@@ -527,8 +544,31 @@ class UsersValidatorTest extends AbstractConstraintValidatorTest {
                         PASSWORD_MAX_BYTES),
                 Arguments.of("36 x U+1F600 (72 UTF-16 units, 144 bytes)", emoji.repeat(36), PASSWORD_MAX_BYTES),
                 Arguments.of("12 x U+1F600 (12 code points, 48 bytes)", emoji.repeat(12), null),
-                Arguments.of("71 ASCII + lone surrogate (72 bytes)",
-                        RandomStringUtils.secure().nextAlphanumeric(71) + loneSurrogate, null));
+                // V7: an unpaired surrogate makes a password invalid, since UTF-8 would hash it as '?'
+                Arguments.of("11 ASCII + U+1F600 (well-formed pair, 12 code points)",
+                        RandomStringUtils.secure().nextAlphanumeric(11) + emoji, null),
+                Arguments.of("71 ASCII + lone high surrogate (72 UTF-16 units)",
+                        RandomStringUtils.secure().nextAlphanumeric(71) + "\uD800", PASSWORD_INVALID),
+                Arguments.of("12 lone high surrogates", "\uD800".repeat(12), PASSWORD_INVALID),
+                Arguments.of("lone low surrogate inside 16 ASCII",
+                        RandomStringUtils.secure().nextAlphanumeric(8) + lowSurrogate
+                                + RandomStringUtils.secure().nextAlphanumeric(8),
+                        PASSWORD_INVALID),
+                Arguments.of("reversed pair (low, then high) after 12 ASCII",
+                        RandomStringUtils.secure().nextAlphanumeric(12) + lowSurrogate + highSurrogate,
+                        PASSWORD_INVALID),
+                Arguments.of("trailing high surrogate after 12 ASCII",
+                        RandomStringUtils.secure().nextAlphanumeric(12) + highSurrogate, PASSWORD_INVALID),
+                // V7: the length violations take precedence over the malformed one; a lone surrogate counts as one
+                // code point and, encoded as '?', as one byte
+                Arguments.of("5 ASCII + lone low surrogate (too short before malformed)",
+                        RandomStringUtils.secure().nextAlphanumeric(5) + lowSurrogate, PASSWORD_MIN_LENGTH),
+                Arguments.of("24 x U+20AC + lone high surrogate (73 bytes)", euro.repeat(24) + highSurrogate,
+                        PASSWORD_MAX_BYTES),
+                Arguments.of("11 ASCII + lone surrogate (12 code points)",
+                        RandomStringUtils.secure().nextAlphanumeric(11) + lowSurrogate, PASSWORD_INVALID),
+                Arguments.of("73 lone high surrogates (oversized before malformed)", "\uD800".repeat(73),
+                        PASSWORD_MAX_BYTES));
     }
 
     // V7: asserts the policy outcome without putting the submitted password into any failure message

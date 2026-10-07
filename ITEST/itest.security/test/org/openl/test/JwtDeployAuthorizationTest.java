@@ -61,6 +61,9 @@ class JwtDeployAuthorizationTest {
             "060-info-sys",
             "070-config",
             "080-service-openapi",
+            // V2: dot-segment paths that resolve into a public path still need a token.
+            "081-deploy-dot-segment-no-token",
+            "082-info-dot-segment-no-token",
             "900-delete");
 
     private static String token;

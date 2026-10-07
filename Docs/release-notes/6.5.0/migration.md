@@ -102,7 +102,9 @@ browser.
   `/admin/healthcheck/`, `/admin/info/` and `/admin/config/` stay open. `/admin/deploy`, `/admin/services`,
   `/admin/ui/info`, `/admin/swagger-ui.json` and any OpenAPI document under `/admin/` answer `401` without an
   `Authorization` header and `403` with an invalid token, so scripts must send `Authorization: Bearer ${JWT_TOKEN}`.
-  Service OpenAPI documents outside `/admin/` stay public. The built-in Rule Services web page cannot attach a token,
+  Service OpenAPI documents outside `/admin/` stay public. An `/admin/` request whose path holds a `.` or `..`
+  segment, also as `%2e`, is not exempt even when it resolves under one of the three open prefixes, and needs a valid
+  JWT. The built-in Rule Services web page cannot attach a token,
   so its service list, service errors, `MANIFEST.MF` and deployment upload, download and delete stop working while
   authentication is on, and its Swagger UI page cannot list the services. Nothing changes with authentication off,
   the default.
@@ -195,7 +197,11 @@ browser.
   when users change their own password in their profile. A violation answers `400` with a field error whose `code`
   is `openl.constraints.password.min-length.message` or `openl.constraints.password.max-bytes.message` and whose
   `message` is that key's text. Existing passwords and their hashes are untouched, so a shorter password keeps working
-  until it is next changed.
+  until it is next changed. A password within both limits that holds an unpaired UTF-16 surrogate, malformed text
+  that would be stored as `?`, answers `400` with a field error whose `code` is `openl.constraints.password.default`
+  and whose `message` is "The password is not valid."; the length errors take precedence over it. When a create
+  request carries the same password in `password` and `internalPassword.password`, a violation is reported once, on
+  `internalPassword`.
   <!-- V7: local password length policy -->
 
 * **New personal access tokens always expire.** A token created without `expiresAt`, including through the "No
@@ -216,12 +222,9 @@ browser.
   accent-insensitive default collation `utf8mb4_0900_ai_ci`, the login fails with the ordinary failed-login response
   even with the correct password, and counts as a failed login of the typed name. Active Directory logins are not
   affected by this check. The counters live in the memory of each OpenL Studio instance and are cleared on restart.
-  SSO, Bearer and personal access token logins are not counted. At most five logins of one name are checked at once.
-  Further logins of that name wait for one of them to finish, in arrival order, for at most 10 seconds; a login still
-  waiting then fails with the ordinary failed-login response and is not counted. Anyone who knows an account name can
-  lock it on purpose, and Active Directory name variants such as `user`, `DOMAIN\user` and `user@domain` are counted
-  separately. A flood of logins of one name can also delay or refuse that name's logins, and API clients that send
-  many concurrent HTTP Basic requests as one user see them queue.
+  SSO, Bearer and personal access token logins are not counted. Logins of a name that are already being checked when
+  the lock engages finish with their own result. Anyone who knows an account name can lock it on purpose, and Active
+  Directory name variants such as `user`, `DOMAIN\user` and `user@domain` are counted separately.
   <!-- V9: failed-login lockout -->
 
 * **Stored secrets are encrypted with AES-256-GCM.** When the settings are saved, each setting whose name ends in
@@ -238,7 +241,8 @@ browser.
 * **`/rest/public/info/sys.json` and `/rest/public/info/http.json` now require authentication.** In the `multi`,
   `ad`, `saml` and `oauth2` modes they answer `401` to a request that is not authenticated, as the rest of `/rest`
   does; in `single` mode they are unchanged. `openl.json`, `build.json` and `/rest/settings` stay public. Monitoring
-  that polls the two endpoints must authenticate.
+  that polls the two endpoints must authenticate. Their responses keep their previous content: `http.json` does not
+  show the authenticated user.
   <!-- V10: sys.json and http.json require authentication in every mode with a login -->
 
 * **Security events are logged to `org.openl.security.audit`.** The logger writes one line per authentication

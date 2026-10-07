@@ -1,6 +1,8 @@
 package org.openl.itest;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
 import java.io.ByteArrayOutputStream;
@@ -9,6 +11,8 @@ import java.io.OutputStream;
 import java.io.PrintStream;
 import java.io.Reader;
 import java.io.UncheckedIOException;
+import java.net.URI;
+import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
@@ -20,12 +24,16 @@ import java.time.Instant;
 import java.util.Base64;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Properties;
 import java.util.Set;
 import java.util.TreeSet;
+import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 
 import org.openl.itest.core.HttpClient;
@@ -44,6 +52,10 @@ class WebStudioTest {
     private static final Path V10_HTTP_JSON_REQUEST = Path.of("test-resources-security-V10-sysinfo",
             "031-http-json-session.req");
     private static final String SESSION_COOKIE = "JSESSIONID";
+    // V10: http.json is read in memory to check that it shows no authentication, as before V10
+    private static final String HTTP_JSON = "/rest/public/info/http.json";
+    private static final ObjectMapper MAPPER = new ObjectMapper();
+    private static final Pattern BCRYPT_PREFIX = Pattern.compile("\\$2[aby]\\$");
 
     @Test
     void repos() throws Exception {
@@ -232,9 +244,10 @@ class WebStudioTest {
         generated.put("V9_RESET_WRONG_PASSWORD", resetWrongPassword);
     }
 
-    // V10: asserts that the session cookie of a form login alone gets 200 from http.json.
-    // http.json echoes the request's headers and cookies, so it is sent through a JDK client that discards both
-    // answers, never through the generic runner, which prints and saves a mismatching one.
+    // V10: asserts that the session cookie of a form login alone gets 200 from http.json, and that neither that
+    // answer nor the one to the administrator's Basic header shows the authentication.
+    // http.json echoes the request's headers and cookies, so it is sent through a JDK client that keeps the answers
+    // in memory only, never through the generic runner, which prints and saves a mismatching one.
     // The session ID joins the generated secrets before it is sent anywhere.
     static void assertHttpJsonNeedsOnlySession(HttpClient client, Map<String, String> generated)
             throws IOException, InterruptedException {
@@ -249,10 +262,59 @@ class WebStudioTest {
             generated.put("V10_SESSION_COOKIE", sessionId);
             Map<String, String> env = new HashMap<>(client.localEnv);
             env.put("V10_SESSION_COOKIE", SESSION_COOKIE + "=" + sessionId);
-            int status = http.send(PatExpiryITest.readRequest(V10_HTTP_JSON_REQUEST, client.getBaseURL(), env),
-                    HttpResponse.BodyHandlers.discarding()).statusCode();
-            assertEquals(200, status, "V10 http.json with only the session cookie: status");
+            var session = http.send(PatExpiryITest.readRequest(V10_HTTP_JSON_REQUEST, client.getBaseURL(), env),
+                    HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+            assertEquals(200, session.statusCode(), "V10 http.json with only the session cookie: status");
+            assertNoAuthenticationShown(session.body(), "V10 http.json with only the session cookie");
+            var basic = http.send(HttpRequest.newBuilder(URI.create(client.getBaseURL().toString() + HTTP_JSON))
+                            .header("Authorization", client.localEnv.get("ADMIN_AUTH_TOCKEN"))
+                            .GET()
+                            .build(),
+                    HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+            assertEquals(200, basic.statusCode(), "V10 http.json with the administrator's Basic header: status");
+            assertNoAuthenticationShown(basic.body(), "V10 http.json with the administrator's Basic header");
         }
+    }
+
+    // V10: http.json keeps the shape it had before V10: UserPrincipal and RemoteUser absent or null, and no password
+    // field or bcrypt hash anywhere. The body is never printed or saved, and a failure message names only the check.
+    private static void assertNoAuthenticationShown(String body, String step) {
+        JsonNode json;
+        try {
+            json = MAPPER.readTree(body);
+        } catch (IOException unparsable) {
+            // The parser's message quotes the body, so neither it nor the exception is passed on.
+            json = null;
+        }
+        if (json == null || !json.isObject()) {
+            fail(step + ": the body is not a JSON object");
+            return;
+        }
+        assertTrue(json.path("UserPrincipal").isNull() || json.path("UserPrincipal").isMissingNode(),
+                step + ": UserPrincipal is absent or null");
+        assertTrue(json.path("RemoteUser").isNull() || json.path("RemoteUser").isMissingNode(),
+                step + ": RemoteUser is absent or null");
+        assertFalse(hasPasswordField(json), step + ": no password field");
+        assertFalse(BCRYPT_PREFIX.matcher(body).find(), step + ": no bcrypt hash");
+    }
+
+    // V10: whether any object in the tree has a field whose name contains "password", in any case
+    private static boolean hasPasswordField(JsonNode node) {
+        if (node.isObject()) {
+            for (Map.Entry<String, JsonNode> field : node.properties()) {
+                if (field.getKey().toLowerCase(Locale.ROOT).contains("password")
+                        || hasPasswordField(field.getValue())) {
+                    return true;
+                }
+            }
+        } else if (node.isArray()) {
+            for (JsonNode element : node) {
+                if (hasPasswordField(element)) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     // V10: the value of the last JSESSIONID pair the headers set; the failure message never quotes a header

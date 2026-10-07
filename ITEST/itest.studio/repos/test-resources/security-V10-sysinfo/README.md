@@ -2,7 +2,9 @@
 
 `sys.json` and `http.json` describe the host, the JVM and the request, so they require authentication in every mode
 that has a login. `SecurityConfig.staticResourcesFilterChain`'s matcher excludes them, which leaves them to each
-mode's `/rest/**` chain: it answers `401` without an authentication and serves them to an authenticated session. In
+mode's `/rest/**` chain: it answers `401` without an authentication and serves them to an authenticated session.
+`SysInfoServletApiChainDecorator` hands the two endpoints the request without Spring Security's servlet-API view of
+the authentication, as the static chain did, so `http.json` shows no user principal or remote user. In
 this `repos` suite, which runs `multi` mode, `010` and `011` answer `401` without credentials or a cookie,
 `020` signs in through the login form, and `030` answers `200` with nothing but the session cookie that sign-in set.
 `http.json` gets the same session-only check from `WebStudioTest`, not from a fixture of this folder (see below).
@@ -24,9 +26,13 @@ request header or cookie. `051` asks for `http.json` only after `040` has ended 
 the `401`, which echoes nothing. `http.json` echoes the request's headers and cookies, so its session-only check is
 not a fixture of this folder: `WebStudioTest` signs in with `020`'s form itself and sends
 `test-resources-security-V10-sysinfo/031-http-json-session.req` with only that session cookie, through a Java client
-that discards the body and asserts `200`, naming only the status. The session ID joins the generated secrets that
-the captured-output and saved-response scans search for. The password in `020` is `${ADMIN_PASSWORD}`, which
-`WebStudioTest` supplies at runtime; no credential is written in this folder.
+that keeps the body in memory only. It asserts `200`, and that the body keeps the shape it had before V10: no
+`UserPrincipal` or `RemoteUser` other than `null`, no field whose name contains `password`, and no bcrypt hash
+(`$2a$`, `$2b$` or `$2y$`). It then sends `http.json` with the administrator's Basic header `${ADMIN_AUTH_TOCKEN}`
+and makes the same checks. The body is never printed or saved, and a failure message names only the check that
+failed. The session ID joins the generated secrets that the captured-output and saved-response scans search for.
+The password in `020` is `${ADMIN_PASSWORD}`, which `WebStudioTest` supplies at runtime; no credential is written in
+this folder.
 
 In `single` mode there is no login and every visitor holds `ADMIN`, so both endpoints stay `200` there, as the
 `simple` suite's `info/sys.json` and `info/http.json` fixtures keep asserting.

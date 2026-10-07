@@ -7,17 +7,20 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.UnaryOperator;
 import jakarta.servlet.Filter;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
 
 import org.apache.commons.lang3.RandomStringUtils;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
-import org.mockito.Mockito;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Import;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.mock.web.MockHttpSession;
 import org.springframework.security.authentication.AuthenticationProvider;
@@ -36,6 +39,7 @@ import org.springframework.test.context.web.WebAppConfiguration;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
 import org.springframework.test.web.servlet.RequestBuilder;
+import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RestController;
@@ -43,7 +47,8 @@ import org.springframework.web.context.WebApplicationContext;
 import org.springframework.web.servlet.config.annotation.EnableWebMvc;
 
 import org.openl.studio.security.pat.filter.PatAuthenticationFilter;
-import org.openl.studio.security.pat.service.PatAuthService;
+import org.openl.studio.security.pat.model.PatAuthResolution;
+import org.openl.studio.security.pat.model.PatToken;
 
 /**
  * V10: {@code /rest/public/info/sys.json} and {@code /rest/public/info/http.json} require authentication in the
@@ -58,7 +63,14 @@ import org.openl.studio.security.pat.service.PatAuthService;
  * Both run the identical checks of {@link ModeChecks}.
  * </p>
  * <p>
- * The passwords are generated per run and never appear in an assertion message.
+ * V10 also keeps what the servlet sees of the request: before V10 the static chain served both endpoints without
+ * Spring Security's servlet-API integration, so {@code getUserPrincipal()} and {@code getRemoteUser()} gave
+ * {@code null}. The stub controller reports both in response headers, and the checks assert that they stay absent for
+ * a form-login session, HTTP Basic and a personal access token, while another {@code /rest/**} endpoint still sees
+ * them.
+ * </p>
+ * <p>
+ * The passwords and the token are generated per run and never appear in an assertion message.
  * </p>
  */
 class SysInfoAuthenticationChainTest {
@@ -70,6 +82,12 @@ class SysInfoAuthenticationChainTest {
     static final String SYS_JSON = "/rest/public/info/sys.json";
     static final String HTTP_JSON = "/rest/public/info/http.json";
     static final String OPENL_JSON = "/rest/public/info/openl.json";
+    /** Another endpoint of the {@code /rest/**} chain, which keeps the servlet-API integration. */
+    static final String OTHER_REST = "/rest/stub/servlet-api";
+
+    /** A valid personal access token of {@link #USER}, generated per run. */
+    static final PatToken TOKEN = new PatToken(RandomStringUtils.secure().nextAlphanumeric(PatToken.PUBLIC_ID_LENGTH),
+            RandomStringUtils.secure().nextAlphanumeric(PatToken.SECRET_LENGTH));
 
     /**
      * Generates a password that is guaranteed to differ from the given one, for the failed-login check.
@@ -193,6 +211,32 @@ class SysInfoAuthenticationChainTest {
                     message("authenticated-context GET " + SYS_JSON + " and " + HTTP_JSON + " reach no provider"));
         }
 
+        /**
+         * V10: with the session of a form login, the servlet sees neither the principal nor the remote user at the
+         * two endpoints, as on the static chain before V10, while another {@code /rest/**} endpoint sees both.
+         */
+        @Test
+        void sessionUserIsHiddenFromSysInfoServletApi() throws Exception {
+            MockHttpSession session = formLogin(PASSWORD, "/", "form login at /login");
+
+            assertServletApiView(request -> request.session(session), "session");
+        }
+
+        /** V10: the same with HTTP Basic credentials on every request. */
+        @Test
+        void basicUserIsHiddenFromSysInfoServletApi() throws Exception {
+            assertServletApiView(
+                    request -> request.with(SecurityMockMvcRequestPostProcessors.httpBasic(USER, PASSWORD)),
+                    "Basic");
+        }
+
+        /** V10: the same with a personal access token on every request. */
+        @Test
+        void tokenUserIsHiddenFromSysInfoServletApi() throws Exception {
+            assertServletApiView(request -> request.header(HttpHeaders.AUTHORIZATION, "Token " + TOKEN.asTokenValue()),
+                    "PAT");
+        }
+
         @Test
         void openlJsonStaysPublic() throws Exception {
             MvcResult result = perform(get(OPENL_JSON), HttpStatus.OK, "anonymous GET " + OPENL_JSON);
@@ -211,6 +255,35 @@ class SysInfoAuthenticationChainTest {
 
             perform(get(SYS_JSON).session(session), HttpStatus.UNAUTHORIZED, "failed-login session GET " + SYS_JSON);
             perform(get(HTTP_JSON).session(session), HttpStatus.UNAUTHORIZED, "failed-login session GET " + HTTP_JSON);
+        }
+
+        /**
+         * Asserts that the servlet sees no principal and no remote user at {@link #SYS_JSON} and {@link #HTTP_JSON},
+         * and sees both at {@link #OTHER_REST}, all answered with {@code 200} under the given credentials.
+         *
+         * @param credentials adds the credentials to a request
+         * @param how the kind of credentials, used in assertion messages; it never contains a credential
+         */
+        private void assertServletApiView(UnaryOperator<MockHttpServletRequestBuilder> credentials,
+                                          String how) throws Exception {
+            for (String endpoint : List.of(SYS_JSON, HTTP_JSON)) {
+                String step = how + " GET " + endpoint;
+                MvcResult result = perform(credentials.apply(get(endpoint)), HttpStatus.OK, step);
+                assertEquals(StubInfoController.ABSENT,
+                        result.getResponse().getHeader(StubInfoController.PRINCIPAL),
+                        message(step + ": servlet principal"));
+                assertEquals(StubInfoController.ABSENT,
+                        result.getResponse().getHeader(StubInfoController.REMOTE_USER),
+                        message(step + ": servlet remote user"));
+            }
+            String step = how + " GET " + OTHER_REST;
+            MvcResult other = perform(credentials.apply(get(OTHER_REST)), HttpStatus.OK, step);
+            assertEquals(StubInfoController.PRESENT,
+                    other.getResponse().getHeader(StubInfoController.PRINCIPAL),
+                    message(step + ": servlet principal"));
+            assertEquals(StubInfoController.PRESENT,
+                    other.getResponse().getHeader(StubInfoController.REMOTE_USER),
+                    message(step + ": servlet remote user"));
         }
 
         /**
@@ -253,12 +326,15 @@ class SysInfoAuthenticationChainTest {
         }
 
         /**
-         * No request carries an {@code Authorization} header with the {@code Token} scheme, so the filter passes
-         * every request on.
+         * Accepts {@link #TOKEN} as {@link #USER} and rejects every other token. A request without an
+         * {@code Authorization} header of the {@code Token} scheme passes on to the other filters.
          */
         @Bean
         PatAuthenticationFilter patAuthenticationFilter() {
-            return new PatAuthenticationFilter(Mockito.mock(PatAuthService.class));
+            return new PatAuthenticationFilter(pat -> TOKEN.equals(pat)
+                    ? PatAuthResolution.valid(UsernamePasswordAuthenticationToken
+                            .authenticated(USER, null, List.of(new SimpleGrantedAuthority("USER"))))
+                    : PatAuthResolution.invalid());
         }
 
         /**
@@ -300,16 +376,23 @@ class SysInfoAuthenticationChainTest {
     }
 
     /**
-     * Stands in for {@code SysInfoController} at the three endpoints. MockMvc runs with an empty servlet path, so
-     * the full request paths are mapped as they are.
+     * Stands in for {@code SysInfoController} at the three endpoints, and for any other {@code /rest/**} endpoint at
+     * {@link #OTHER_REST}. MockMvc runs with an empty servlet path, so the full request paths are mapped as they are.
+     * Its response headers tell whether the servlet saw a principal and a remote user, never who they are.
      */
     @RestController
     static class StubInfoController {
 
         static final String BODY = "ok";
+        static final String PRINCIPAL = "X-Test-Servlet-Principal";
+        static final String REMOTE_USER = "X-Test-Servlet-Remote-User";
+        static final String PRESENT = "present";
+        static final String ABSENT = "absent";
 
-        @GetMapping({SYS_JSON, HTTP_JSON, OPENL_JSON})
-        String info() {
+        @GetMapping({SYS_JSON, HTTP_JSON, OPENL_JSON, OTHER_REST})
+        String info(HttpServletRequest request, HttpServletResponse response) {
+            response.setHeader(PRINCIPAL, request.getUserPrincipal() == null ? ABSENT : PRESENT);
+            response.setHeader(REMOTE_USER, request.getRemoteUser() == null ? ABSENT : PRESENT);
             return BODY;
         }
     }

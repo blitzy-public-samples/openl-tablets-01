@@ -1,9 +1,13 @@
 package org.openl.studio.common;
 
+import java.util.Arrays;
 import java.util.Comparator;
+import java.util.HashSet;
+import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
 import java.util.Set;
+import java.util.function.Predicate;
 import jakarta.validation.ConstraintViolation;
 import jakarta.validation.ConstraintViolationException;
 import jakarta.validation.Path;
@@ -130,6 +134,8 @@ public class ExceptionMappingService {
                                 .rejectedValue(rejectedValueOf(fieldError.getField(), fieldError.getRejectedValue()))
                                 .message(resolveLocalMessage(fieldError))
                                 .build())
+                        // V7: each local password policy violation is reported once per response
+                        .filter(passwordPolicyViolationReportedOnce())
                         .forEach(builder::addField);
             }
             if (bindingResult.hasGlobalErrors()) {
@@ -165,6 +171,8 @@ public class ExceptionMappingService {
                                 violation.getInvalidValue()))
                         .message(violation.getMessage())
                         .build())
+                // V7: each local password policy violation is reported once per response
+                .filter(passwordPolicyViolationReportedOnce())
                 .forEach(builder::addField);
 
         // Handle global errors
@@ -188,7 +196,7 @@ public class ExceptionMappingService {
         return rejectedValue;
     }
 
-    // V7: the two local password policy violations use their message key as the code; any other code is unchanged
+    // V7: the three local password policy violations use their message key as the code; any other code is unchanged
     private static String fieldErrorCode(@Nullable String messageTemplate, String code) {
         if (("{" + LocalPasswordPolicy.MIN_LENGTH_KEY + "}").equals(messageTemplate)) {
             return LocalPasswordPolicy.MIN_LENGTH_KEY;
@@ -196,7 +204,26 @@ public class ExceptionMappingService {
         if (("{" + LocalPasswordPolicy.MAX_BYTES_KEY + "}").equals(messageTemplate)) {
             return LocalPasswordPolicy.MAX_BYTES_KEY;
         }
+        if (("{" + LocalPasswordPolicy.INVALID_KEY + "}").equals(messageTemplate)) {
+            return LocalPasswordPolicy.INVALID_KEY;
+        }
         return code;
+    }
+
+    // V7: a policy violation describes the submitted value, so the create form's two copies of one value, password
+    // and internalPassword, are reported once: a field error with a policy code is dropped when an earlier one of the
+    // same response has the same code and message. Every other field error is kept, even when it repeats another.
+    private static Predicate<org.openl.studio.common.model.FieldError> passwordPolicyViolationReportedOnce() {
+        Set<List<String>> reported = new HashSet<>();
+        return fieldError -> !isPasswordPolicyCode(fieldError.code)
+                || reported.add(Arrays.asList(fieldError.code, fieldError.message));
+    }
+
+    // V7: whether a field error code is the message key of a local password policy violation
+    private static boolean isPasswordPolicyCode(@Nullable String code) {
+        return LocalPasswordPolicy.MIN_LENGTH_KEY.equals(code)
+                || LocalPasswordPolicy.MAX_BYTES_KEY.equals(code)
+                || LocalPasswordPolicy.INVALID_KEY.equals(code);
     }
 
     // V7: the message template of the constraint violation behind a field error, if a Bean Validation one made it

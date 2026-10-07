@@ -25,6 +25,7 @@ import org.springframework.core.env.Environment;
 import org.springframework.stereotype.Component;
 
 import org.openl.rules.ruleservice.api.AuthorizationChecker;
+import org.openl.rules.ruleservice.servlet.NormalizedRequestUri;
 import org.openl.spring.config.ConditionalOnEnable;
 import org.openl.util.CollectionUtils;
 import org.openl.util.StringUtils;
@@ -87,8 +88,10 @@ public class JWTValidator implements AuthorizationChecker {
     public boolean authorize(HttpServletRequest httpRequest) {
         var pathInfo = httpRequest.getPathInfo();
         // V2: only /admin/healthcheck/, info/ and config/ are public; other /admin/ paths, OpenAPI too, need a JWT.
+        // V2: admin exemption needs a URI without dot segments; CXF selects /admin by resolved path, routes as sent.
         if (pathInfo.startsWith("/admin/")) {
-            if (PUBLIC_ADMIN_PREFIXES.stream().anyMatch(pathInfo::startsWith)) {
+            if (PUBLIC_ADMIN_PREFIXES.stream().anyMatch(pathInfo::startsWith)
+                    && NormalizedRequestUri.isNormalized(httpRequest.getRequestURI())) {
                 return true;
             }
         } else if (pathInfo.endsWith("openapi.json") || pathInfo.endsWith("openapi.yaml")) {

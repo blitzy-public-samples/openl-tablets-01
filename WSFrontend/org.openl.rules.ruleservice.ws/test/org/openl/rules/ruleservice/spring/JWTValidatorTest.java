@@ -47,6 +47,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.function.Executable;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.junitpioneer.jupiter.StdErr;
 import org.junitpioneer.jupiter.StdIo;
@@ -60,7 +61,8 @@ import org.springframework.mock.web.MockHttpServletRequest;
 /**
  * Covers V2: once JWT authentication is enabled, only {@code /admin/healthcheck/}, {@code /admin/info/} and
  * {@code /admin/config/} bypass the token check among the {@code /admin/} paths, while service OpenAPI documents
- * outside {@code /admin/} stay public.
+ * outside {@code /admin/} stay public. An {@code /admin/} request URI with a dot segment is never exempt, whatever
+ * public prefix it resolves to.
  * <p>
  * Every key and token is generated at run time. The only file written is a JWKS holding the trusted public key.
  * Methods that present a token capture {@code System.err}, where the test logger writes, and every one of them asserts
@@ -142,6 +144,46 @@ class JWTValidatorTest {
     void validBearerToken_isAllowed(String path, StdErr stdErr) throws JoseException {
         var token = sign(trusted, AUDIENCE, inSeconds(300));
         assertTrue(validator.authorize(request(path, "Bearer " + token)));
+        assertSingleAuthorizedLine(stdErr.capturedString());
+        assertNoTokenMaterialInLog(stdErr.capturedString(), token);
+    }
+
+    // V2: CXF routes inside /admin by the URI as sent, so a dot-segment URI never gets the public prefix exemption.
+    @ParameterizedTest
+    @CsvSource({"/admin/info/a, /admin/deploy/x/../../info/a",
+            "/admin/info/, /admin/deploy/../info/",
+            "/admin/info/x.zip, /admin/deploy/../info/x.zip",
+            "/admin/info/sys.json, /webservice/admin/deploy/../info/sys.json",
+            "/admin/healthcheck/readiness, /admin/deploy/%2e%2e/healthcheck/readiness",
+            "/admin/config/application.properties, /admin/deploy/..;x/config/application.properties"})
+    void publicPathOfDotSegmentRequestUri_withoutToken_isRejected(String pathInfo, String requestUri) {
+        assertFalse(validator.authorize(request(pathInfo, requestUri, null)));
+    }
+
+    @ParameterizedTest
+    @CsvSource({"/admin/info/sys.json, /webservice/admin/info/sys.json",
+            "/admin/healthcheck/readiness, /admin/healthcheck/readiness",
+            "/simple/openapi.json, /webservice/simple/openapi.json"})
+    void publicPathOfNormalizedRequestUri_withoutToken_isAllowed(String pathInfo, String requestUri) {
+        assertTrue(validator.authorize(request(pathInfo, requestUri, null)));
+    }
+
+    // V2: the service OpenAPI exemption outside /admin/ is unchanged; CXF selects the service by the resolved path.
+    @ParameterizedTest
+    @CsvSource({"/deployed-rules/openapi.json, /deployed-rules/x/../openapi.json",
+            "/deployed-rules/openapi.yaml, /deployed-rules/./openapi.yaml",
+            "/deployed-rules/openapi.json, /admin/deploy/../../deployed-rules/openapi.json"})
+    void serviceOpenApiOfDotSegmentRequestUri_withoutToken_isAllowed(String pathInfo, String requestUri) {
+        assertTrue(validator.authorize(request(pathInfo, requestUri, null)));
+    }
+
+    @ParameterizedTest
+    @CsvSource({"/admin/info/a, /admin/deploy/x/../../info/a"})
+    @StdIo
+    void validBearerToken_onDotSegmentRequestUri_isAllowed(String pathInfo, String requestUri, StdErr stdErr)
+            throws JoseException {
+        var token = sign(trusted, AUDIENCE, inSeconds(300));
+        assertTrue(validator.authorize(request(pathInfo, requestUri, "Bearer " + token)));
         assertSingleAuthorizedLine(stdErr.capturedString());
         assertNoTokenMaterialInLog(stdErr.capturedString(), token);
     }
@@ -637,6 +679,20 @@ class JWTValidatorTest {
         if (authorization != null) {
             request.addHeader("Authorization", authorization);
         }
+        return request;
+    }
+
+    /**
+     * Builds a request for the given path that also carries the request URI as sent. The other overload leaves the
+     * request URI empty, which holds no dot segment.
+     *
+     * @param pathInfo the servlet path info, the resolved form of the request URI, never {@code null}
+     * @param requestUri the request URI as sent by the client
+     * @param authorization the {@code Authorization} header value, or {@code null} for a request without it
+     */
+    private static HttpServletRequest request(String pathInfo, String requestUri, @Nullable String authorization) {
+        var request = (MockHttpServletRequest) request(pathInfo, authorization);
+        request.setRequestURI(requestUri);
         return request;
     }
 }

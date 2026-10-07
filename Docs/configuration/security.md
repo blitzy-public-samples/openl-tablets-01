@@ -24,7 +24,9 @@ allowed), issued by the configured `ruleservice.authentication.iss` and addresse
 `ruleservice.authentication.aud` values. This includes `/admin/deploy` (available when
 `ruleservice.deployer.enabled = true`), `/admin/services`, `/admin/ui/info`, `/admin/swagger-ui.json`, and any
 `openapi.json` or `openapi.yaml` document under `/admin/`. Service OpenAPI documents outside `/admin/`, such as
-`/<service>/openapi.json`, remain public.
+`/<service>/openapi.json`, remain public. An `/admin/` request whose path holds a `.` or `..` segment, also
+percent-encoded as `%2e`, is not exempt even when it resolves under one of the three prefixes above, and requires a
+valid JWT.
 
 Send the token in the `Authorization` header:
 

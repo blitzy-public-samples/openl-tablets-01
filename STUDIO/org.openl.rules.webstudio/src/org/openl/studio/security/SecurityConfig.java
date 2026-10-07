@@ -21,7 +21,9 @@ public class SecurityConfig {
     public FilterChainProxy filterChainProxy(List<SecurityFilterChain> securityFilterChains) {
         var filterChainProxy = new FilterChainProxy(securityFilterChains);
         // V4: every chain also writes the default security headers, cache ones unless already set, before first output
-        filterChainProxy.setFilterChainDecorator(new EagerSecurityHeadersChainDecorator());
+        // V10: sys.json and http.json reach the servlet beneath the servlet-API wrapper, as on the static chain
+        filterChainProxy.setFilterChainDecorator(
+                new SysInfoServletApiChainDecorator(new EagerSecurityHeadersChainDecorator()));
         return filterChainProxy;
     }
 

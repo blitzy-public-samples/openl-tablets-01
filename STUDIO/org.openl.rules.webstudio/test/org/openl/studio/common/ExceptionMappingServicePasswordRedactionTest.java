@@ -46,8 +46,9 @@ import org.openl.studio.security.CurrentUserInfo;
 /**
  * V7: a rejected password, or a model carrying one, never reaches the serialized 400 body, while the field and message
  * of the error stay as they are. A local password policy violation carries its message key as its code, and every
- * other error keeps its code. Every password is generated per run, and no assertion message carries a password or a
- * serialized body.
+ * other error keeps its code. A policy violation is reported once per response, so the create form's two copies of
+ * one password give one entry, while other repeated errors are all kept. Every password is generated per run, and no
+ * assertion message carries a password or a serialized body.
  */
 @SpringJUnitConfig(classes = MockConfiguration.class)
 class ExceptionMappingServicePasswordRedactionTest {
@@ -57,6 +58,9 @@ class ExceptionMappingServicePasswordRedactionTest {
     /** A local password policy violation carries its message key, as is, as the field error code. */
     private static final String PASSWORD_MIN_LENGTH_CODE = "openl.constraints.password.min-length.message";
     private static final String PASSWORD_MAX_BYTES_CODE = "openl.constraints.password.max-bytes.message";
+    // V7: the message and code of a password that holds an unpaired surrogate
+    private static final String PASSWORD_INVALID = "The password is not valid.";
+    private static final String PASSWORD_INVALID_CODE = "openl.constraints.password.default";
     private static final String INVALID_EMAIL = "wrongEmail";
 
     /** Serializes as plain Jackson does, so a redacted value shows as {@code "rejectedValue":null}. */
@@ -264,6 +268,125 @@ class ExceptionMappingServicePasswordRedactionTest {
 
         assertEquals("openl.error.custom.email", fieldError.code);
         assertEquals("Custom message.", fieldError.message);
+    }
+
+    // V7: the create form sends one password as both password and internalPassword.password; it is reported once
+    @Test
+    void create_sameTooShortPasswordOnBothFields_isReportedOnce() throws Exception {
+        when(userManagementService.getUser(anyString())).thenReturn(null);
+        var password = RandomStringUtils.secure().nextAlphanumeric(11);
+
+        var fieldError = mapAndAssertRedacted(validateWithProvider(createModel(password, password)),
+                "internalPassword",
+                List.of(password));
+
+        assertEquals(PASSWORD_MIN_LENGTH_CODE, fieldError.code);
+        assertEquals(PASSWORD_MIN_LENGTH, fieldError.message);
+    }
+
+    @Test
+    void create_sameTooLongPasswordOnBothFields_isReportedOnce() throws Exception {
+        when(userManagementService.getUser(anyString())).thenReturn(null);
+        var password = RandomStringUtils.secure().nextAlphanumeric(73);
+
+        var fieldError = mapAndAssertRedacted(validateWithProvider(createModel(password, password)),
+                "internalPassword",
+                List.of(password));
+
+        assertEquals(PASSWORD_MAX_BYTES_CODE, fieldError.code);
+        assertEquals(PASSWORD_MAX_BYTES, fieldError.message);
+    }
+
+    @Test
+    void create_sameTooShortPasswordOnBothFields_constraintViolations_isReportedOnce() throws Exception {
+        when(userManagementService.getUser(anyString())).thenReturn(null);
+        var password = RandomStringUtils.secure().nextAlphanumeric(11);
+
+        var fieldError = mapAndAssertRedacted(validateWithValidator(createModel(password, password)),
+                "internalPassword",
+                List.of(password));
+
+        assertEquals(PASSWORD_MIN_LENGTH_CODE, fieldError.code);
+        assertEquals(PASSWORD_MIN_LENGTH, fieldError.message);
+    }
+
+    @Test
+    void create_differentPolicyViolationsOnTheTwoFields_areBothKept() throws Exception {
+        when(userManagementService.getUser(anyString())).thenReturn(null);
+        var shortPassword = RandomStringUtils.secure().nextAlphanumeric(11);
+        var longPassword = RandomStringUtils.secure().nextAlphanumeric(73);
+
+        var fields = mapAndAssertNoSecret(validateWithProvider(createModel(shortPassword, longPassword)),
+                List.of(shortPassword, longPassword));
+
+        assertEquals(List.of("internalPassword", "password"), fields.stream().map(FieldError::getField).toList());
+        assertEquals(List.of(PASSWORD_MAX_BYTES_CODE, PASSWORD_MIN_LENGTH_CODE),
+                fields.stream().map(field -> field.code).toList());
+        assertEquals(List.of(PASSWORD_MAX_BYTES, PASSWORD_MIN_LENGTH),
+                fields.stream().map(field -> field.message).toList());
+        assertTrue(fields.stream().allMatch(field -> field.getRejectedValue() == null),
+                "a password field still carries a rejected value");
+    }
+
+    @Test
+    void identicalNonPolicyErrorsOnTwoFields_areBothKept() throws Exception {
+        var model = validUserEditModel().setPassword(null).setEmail("").setDisplayName("");
+
+        for (var ex : List.of(validateWithProvider(model), validateWithValidator(model))) {
+            var fields = mapAndAssertNoSecret(ex, List.of());
+
+            assertEquals(List.of("displayName", "email"), fields.stream().map(FieldError::getField).toList());
+            assertEquals(1, fields.stream().map(field -> field.code).distinct().count());
+            assertEquals(List.of("Cannot be empty.", "Cannot be empty."),
+                    fields.stream().map(field -> field.message).toList());
+        }
+    }
+
+    // V7: a password with an unpaired surrogate would be hashed as '?', so it is rejected, and reported once
+    @Test
+    void create_malformedPasswordOnBothFields_isReportedOnceAsInvalid() throws Exception {
+        when(userManagementService.getUser(anyString())).thenReturn(null);
+        var prefix = RandomStringUtils.secure().nextAlphanumeric(12);
+        var password = prefix + "\uD800";
+
+        var fieldError = mapAndAssertRedacted(validateWithProvider(createModel(password, password)),
+                "internalPassword",
+                List.of(password, prefix));
+
+        assertEquals(PASSWORD_INVALID_CODE, fieldError.code);
+        assertEquals(PASSWORD_INVALID, fieldError.message);
+    }
+
+    @Test
+    void localPasswordConstraint_constraintViolations_malformed_isNotEchoed() throws Exception {
+        var prefix = RandomStringUtils.secure().nextAlphanumeric(12);
+        var password = prefix + "\uDC00";
+
+        var fieldError = mapAndAssertRedacted(validateWithValidator(new LocalPasswordBean(password)),
+                "password",
+                List.of(password, prefix));
+
+        assertEquals(PASSWORD_INVALID_CODE, fieldError.code);
+        assertEquals(PASSWORD_INVALID, fieldError.message);
+    }
+
+    /** Maps the exception and checks that no secret appears in either serialization; returns its field errors. */
+    private List<FieldError> mapAndAssertNoSecret(Exception ex, List<String> secrets) throws JsonProcessingException {
+        var error = assertInstanceOf(ValidationError.class, exceptionMappingService.processException(ex));
+        for (var mapper : List.of(PLAIN_MAPPER, PRODUCTION_INCLUSION_MAPPER)) {
+            var json = mapper.writeValueAsString(error);
+            for (var secret : secrets) {
+                assertFalse(json.contains(secret), "a password is present in a serialization");
+            }
+        }
+        return error.getFields();
+    }
+
+    /** A create request shaped as the Add User form sends it, with both password and internalPassword.password. */
+    private static UserCreateModel createModel(String password, String internalPassword) {
+        var model = validUserCreateModel().setInternalPassword(new InternalPasswordModel().setPassword(internalPassword));
+        model.setPassword(password);
+        return model;
     }
 
     /**

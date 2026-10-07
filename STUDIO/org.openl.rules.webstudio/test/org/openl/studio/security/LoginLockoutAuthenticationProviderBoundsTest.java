@@ -27,7 +27,6 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
@@ -44,8 +43,9 @@ import org.springframework.security.authentication.UsernamePasswordAuthenticatio
 import org.springframework.security.core.Authentication;
 
 /**
- * Tests of {@link LoginLockoutAuthenticationProvider} (V9) for parallel attempts of one name and the permits that bound
- * them, attempts that end after their name was evicted, the entry bound under concurrent insertions and the key size.
+ * Tests of {@link LoginLockoutAuthenticationProvider} (V9) for parallel attempts of one name, which all reach the
+ * delegate at once until a lock engages, attempts that end after their name was evicted, the entry bound under
+ * concurrent insertions and the key size.
  *
  * <p>The expected policy values are this class's own constants, the specified V9 values, never the constants of the
  * provider, so a change of the provider's policy fails these tests. The delegate is a hand-written thread-safe
@@ -73,14 +73,14 @@ class LoginLockoutAuthenticationProviderBoundsTest {
     /** How many attempts of one name are released together. */
     private static final int PARALLEL_ATTEMPTS = 64;
 
-    /** How many attempts of one name may be in flight at once: as many as the failures that lock. */
-    private static final int PERMITS = FAILURES_TO_LOCK;
+    /** How many correct logins of one name a test holds at the delegate at once. */
+    private static final int LOGINS_IN_FLIGHT = 20;
 
-    /** How many correct logins of one name a test starts at once: more than the permits of the name. */
-    private static final int LOGINS_IN_FLIGHT = PERMITS + 3;
+    /** How many correct logins of one name the test of an unlocked name holds at the delegate at once. */
+    private static final int MANY_LOGINS = 1_000;
 
-    /** How long the attempts of a test's impatient provider wait for a permit. */
-    private static final Duration SHORT_WAIT = Duration.ofMillis(100);
+    /** How many attempts of a name are in flight when a burst evicts its entry. */
+    private static final int LATE_ATTEMPTS = FAILURES_TO_LOCK - 1;
 
     /** How many times the concurrent-cleaning case runs, each time with a fresh provider and a fresh delegate. */
     private static final int CLEANING_ROUNDS = 30;
@@ -113,172 +113,112 @@ class LoginLockoutAuthenticationProviderBoundsTest {
     }
 
     /**
-     * However the parallel wrong passwords of one name interleave, at most {@value #PERMITS} of them are with the
-     * delegate at once, and at most {@value #FAILURES_TO_LOCK} + {@value #PERMITS} - 1 reach it before the lock: the
-     * failure that locks completes while at most {@value #PERMITS} - 1 others are still with the delegate, and every
-     * attempt that takes a permit after it is refused by the lock.
+     * However the parallel wrong passwords of one name interleave, all of them are with the delegate at once, none
+     * waiting for another, and the {@value #FAILURES_TO_LOCK}th to complete engages the lock. The attempts still in
+     * flight at that moment end with their own result, a failure that neither counts nor extends the lock, and every
+     * later attempt is refused by the lock without reaching the delegate.
      */
     @RepeatedTest(20)
-    void parallelWrongAttemptsReachTheDelegateWithinThePermitsAndTheBoundBeforeTheLock() throws Exception {
+    void parallelWrongAttemptsAllReachTheDelegateAtOnceAndTheLockRefusesTheNextOnes() throws Exception {
         CountDownLatch wrongGate = delegate.gate(wrongPassword);
         List<Future<@Nullable Authentication>> attempts = startTogether("target", wrongPassword);
 
-        // The permits let as many attempts reach the delegate as the failures that lock; every other one waits.
-        awaitUntil(() -> provider.attemptsAtGate(keyOf("target")) == PARALLEL_ATTEMPTS
-                && delegate.calls() == PERMITS);
-        assertEquals(0, countDone(attempts), "An attempt ended while the permits were held");
+        awaitCalls(PARALLEL_ATTEMPTS);
+        assertEquals(0, countDone(attempts), "An attempt ended before the delegate answered");
 
         wrongGate.countDown();
         for (var attempt : attempts) {
             assertBadCredentials(attempt);
         }
-        int calls = delegate.calls();
-        assertTrue(calls >= FAILURES_TO_LOCK && calls <= FAILURES_TO_LOCK + PERMITS - 1,
-                () -> "Wrong passwords that reached the delegate: " + calls);
-        int mostAtOnce = delegate.mostAtOnce();
-        assertEquals(PERMITS, mostAtOnce, "Most attempts of the name with the delegate at once");
-        assertEquals(0, provider.attemptsAtGate(keyOf("target")), "The gate of the name outlived its attempts");
+        assertEquals(PARALLEL_ATTEMPTS, delegate.calls(), "Wrong passwords that reached the delegate");
+        assertEquals(PARALLEL_ATTEMPTS, delegate.mostAtOnce(), "Most attempts of the name with the delegate at once");
 
         assertRejectedWithoutDelegate("target", password);
         clock.advance(LOCK_LENGTH.minusMillis(1));
         assertRejectedWithoutDelegate("target", password);
         clock.advance(Duration.ofMillis(1));
         assertAuthenticated("target", provider.authenticate(attempt("target", password)));
-        assertEquals(calls + 1, delegate.calls(), "The login after the lock did not reach the delegate");
+        assertEquals(PARALLEL_ATTEMPTS + 1, delegate.calls(), "The login after the lock did not reach the delegate");
     }
 
     /**
-     * Four completed failures and a flood of wrong passwords reach the bound exactly: the permits let
-     * {@value #PERMITS} of the flood through, the first of them to fail locks the name before it gives its permit
-     * back, and every other attempt of the flood is then refused by the lock.
+     * Concurrent correct logins of one name do not queue: all {@value #LOGINS_IN_FLIGHT} are with the delegate at
+     * the same time, and all of them succeed.
      */
-    @RepeatedTest(20)
-    void floodAfterFourFailuresReachesTheDelegateExactlyTheBound() throws Exception {
-        failLogins("target", FAILURES_TO_LOCK - 1);
-        CountDownLatch wrongGate = delegate.gate(wrongPassword);
-        List<Future<@Nullable Authentication>> attempts = startTogether("target", wrongPassword);
-
-        awaitUntil(() -> provider.attemptsAtGate(keyOf("target")) == PARALLEL_ATTEMPTS
-                && delegate.calls() == FAILURES_TO_LOCK - 1 + PERMITS);
-        assertEquals(0, countDone(attempts), "An attempt ended while the permits were held");
-
-        wrongGate.countDown();
-        for (var attempt : attempts) {
-            assertBadCredentials(attempt);
-        }
-        assertEquals(FAILURES_TO_LOCK + PERMITS - 1, delegate.calls(), "Wrong passwords that reached the delegate");
-        assertRejectedWithoutDelegate("target", password);
-    }
-
     @Test
-    void correctLoginsBeyondThePermitsWaitForOneAndAllSucceed() throws Exception {
+    void concurrentCorrectLoginsOfOneNameAllReachTheDelegateAtOnceAndSucceed() throws Exception {
         CountDownLatch successGate = delegate.gate(password);
-        var successes = new ArrayList<Future<@Nullable Authentication>>();
+        var successes = new ArrayList<Future<@Nullable Authentication>>(LOGINS_IN_FLIGHT);
         for (int i = 0; i < LOGINS_IN_FLIGHT; i++) {
             successes.add(submit("alice", password));
         }
 
-        // As many logins as the permits reach the delegate; the others wait for a permit and are not rejected.
-        awaitUntil(() -> provider.attemptsAtGate(keyOf("alice")) == LOGINS_IN_FLIGHT && delegate.calls() == PERMITS);
-        assertEquals(0, countDone(successes), "A login ended while the permits were held");
+        awaitCalls(LOGINS_IN_FLIGHT);
+        assertEquals(0, countDone(successes), "A login ended before the delegate answered");
 
         successGate.countDown();
         for (var success : successes) {
             assertAuthenticated("alice", success.get(TIMEOUT.toSeconds(), TimeUnit.SECONDS));
         }
         assertEquals(LOGINS_IN_FLIGHT, delegate.calls(), "Logins that reached the delegate");
-        assertEquals(PERMITS, delegate.mostAtOnce(), "Most logins of the name with the delegate at once");
+        assertEquals(LOGINS_IN_FLIGHT, delegate.mostAtOnce(), "Most logins of the name with the delegate at once");
         assertEquals(0, provider.size(), "The successes left an entry");
-        assertEquals(0, provider.attemptsAtGate(keyOf("alice")), "The gate of the name outlived its logins");
         assertLocksAfterMaxFailures("alice");
     }
 
+    /**
+     * Correct logins of an unlocked name never fail, however many are in flight and however long the delegate takes:
+     * {@value #MANY_LOGINS} correct logins of a name that holds four failures are with the delegate at once while the
+     * clock passes a whole window, and every one of them succeeds. None is counted as a failure, and their successes
+     * clear the four earlier failures, which are still inside the window: the counter starts again from zero.
+     */
     @Test
-    void attemptThatFindsNoPermitInTimeFailsUncountedWithoutTheDelegate() throws Exception {
-        var impatient = new LoginLockoutAuthenticationProvider(delegate, clock, SHORT_WAIT);
-        for (int i = 0; i < FAILURES_TO_LOCK - 1; i++) {
-            assertThrowsExactly(BadCredentialsException.class,
-                    () -> impatient.authenticate(attempt("grace", wrongPassword)));
-        }
-        String outage = delegate.answer(newPassword(), Outcome.OUTAGE);
-        CountDownLatch outageGate = delegate.gate(outage);
-        var held = new ArrayList<Future<@Nullable Authentication>>();
-        for (int i = 0; i < PERMITS; i++) {
-            held.add(executor.submit(() -> impatient.authenticate(attempt("grace", outage))));
-        }
-        awaitUntil(() -> delegate.calls() == FAILURES_TO_LOCK - 1 + PERMITS);
+    void correctLoginsOfAnUnlockedNameNeverFailHoweverManyAndHoweverLong() throws Exception {
+        failLogins("grace", FAILURES_TO_LOCK - 1);
+        CountDownLatch successGate = delegate.gate(password);
+        ExecutorService logins = Executors.newVirtualThreadPerTaskExecutor();
+        try {
+            var successes = new ArrayList<Future<@Nullable Authentication>>(MANY_LOGINS);
+            for (int i = 0; i < MANY_LOGINS; i++) {
+                successes.add(logins.submit(() -> provider.authenticate(attempt("grace", password))));
+            }
+            awaitCalls(FAILURES_TO_LOCK - 1 + MANY_LOGINS);
+            assertEquals(0, countDone(successes), "A login ended before the delegate answered");
 
-        // Every permit is held: the next attempt waits for one, then fails like a wrong password.
-        long started = System.nanoTime();
-        var thrown = assertThrowsExactly(BadCredentialsException.class,
-                () -> impatient.authenticate(attempt("grace", password)));
-        long waited = System.nanoTime() - started;
-        assertEquals(BAD_CREDENTIALS, thrown.getMessage());
-        assertNull(thrown.getCause(), "An attempt without a permit must not wrap another exception");
-        assertTrue(waited >= SHORT_WAIT.toNanos(), "The attempt did not wait for a permit");
-        assertEquals(FAILURES_TO_LOCK - 1 + PERMITS, delegate.calls(), "An attempt without a permit reached it");
-        assertEquals(PERMITS, impatient.attemptsAtGate(keyOf("grace")), "The attempt without a permit stayed");
-
-        // It was not counted: after the held attempts end, the counter still holds four failures.
-        outageGate.countDown();
-        for (var attempt : held) {
-            assertOutage(attempt);
+            clock.advance(WINDOW_LENGTH);
+            successGate.countDown();
+            for (var success : successes) {
+                assertAuthenticated("grace", success.get(TIMEOUT.toSeconds(), TimeUnit.SECONDS));
+            }
+        } finally {
+            successGate.countDown();
+            logins.shutdownNow();
+            assertTrue(logins.awaitTermination(TIMEOUT.toSeconds(), TimeUnit.SECONDS), "A login did not end.");
         }
-        int calls = delegate.calls();
-        assertThrowsExactly(InternalAuthenticationServiceException.class,
-                () -> impatient.authenticate(attempt("grace", outage)));
-        assertThrowsExactly(BadCredentialsException.class,
-                () -> impatient.authenticate(attempt("grace", wrongPassword)));
-        assertEquals(calls + 2, delegate.calls(), "The attempts after the wait did not reach the delegate");
-        assertThrowsExactly(BadCredentialsException.class,
-                () -> impatient.authenticate(attempt("grace", password)));
-        assertEquals(calls + 2, delegate.calls(), "The fifth failure did not lock the name");
-        assertEquals(0, impatient.attemptsAtGate(keyOf("grace")), "The gate of the name outlived its attempts");
+        assertEquals(MANY_LOGINS, delegate.mostAtOnce(), "Most logins of the name with the delegate at once");
+        assertEquals(0, provider.size(), "The successes left an entry");
+
+        failLogins("grace", FAILURES_TO_LOCK - 1);
+        assertReachesTheDelegateUncounted("grace");
+        failLogins("grace", 1);
+        assertRejectedWithoutDelegate("grace", password);
     }
 
+    /**
+     * The decorator never waits, so an interrupted thread neither delays nor refuses its attempt: the attempt reaches
+     * the delegate and succeeds, and the interrupt status is left to the caller.
+     */
     @Test
-    void interruptedWaitForAPermitFailsUncountedAndKeepsTheInterrupt() throws Exception {
-        String outage = delegate.answer(newPassword(), Outcome.OUTAGE);
-        CountDownLatch outageGate = delegate.gate(outage);
-        var held = new ArrayList<Future<@Nullable Authentication>>();
-        for (int i = 0; i < PERMITS; i++) {
-            held.add(submit("heidi", outage));
+    void loginOnAnInterruptedThreadReachesTheDelegateAndKeepsTheInterrupt() {
+        Thread.currentThread().interrupt();
+        try {
+            assertAuthenticated("heidi", provider.authenticate(attempt("heidi", password)));
+            assertTrue(Thread.currentThread().isInterrupted(), "The interrupt status of the attempt was cleared");
+        } finally {
+            Thread.interrupted();
         }
-        awaitCalls(PERMITS);
-
-        var failure = new AtomicReference<@Nullable Throwable>();
-        var interrupted = new AtomicBoolean();
-        Thread waiter = new Thread(() -> {
-            try {
-                provider.authenticate(attempt("heidi", wrongPassword));
-            } catch (RuntimeException e) {
-                failure.set(e);
-            }
-            interrupted.set(Thread.currentThread().isInterrupted());
-        });
-        waiter.start();
-        awaitUntil(() -> provider.attemptsAtGate(keyOf("heidi")) == PERMITS + 1);
-        waiter.interrupt();
-        waiter.join(TIMEOUT.toMillis());
-        assertFalse(waiter.isAlive(), "The interrupted attempt did not end");
-
-        var thrown = assertInstanceOf(BadCredentialsException.class, failure.get());
-        assertSame(BadCredentialsException.class, thrown.getClass());
-        assertEquals(BAD_CREDENTIALS, thrown.getMessage());
-        assertNull(thrown.getCause(), "An interrupted attempt must not wrap another exception");
-        assertTrue(interrupted.get(), "The interrupt status of the attempt was not restored");
-        assertEquals(PERMITS, delegate.calls(), "The interrupted attempt reached the delegate");
-        assertEquals(PERMITS, provider.attemptsAtGate(keyOf("heidi")), "The interrupted attempt stayed at the gate");
-
-        // It was not counted: four failures after the held attempts end do not lock, the fifth does.
-        outageGate.countDown();
-        for (var attempt : held) {
-            assertOutage(attempt);
-        }
-        failLogins("heidi", FAILURES_TO_LOCK - 1);
-        assertReachesTheDelegateUncounted("heidi");
-        failLogins("heidi", 1);
-        assertRejectedWithoutDelegate("heidi", password);
+        assertEquals(1, delegate.calls(), "The login did not reach the delegate");
+        assertEquals(0, provider.size(), "The success left an entry");
     }
 
     @Test
@@ -331,12 +271,11 @@ class LoginLockoutAuthenticationProviderBoundsTest {
     void lateUncountedOutcomesOfAnEvictedEntryKeepTheInFlightCountOfItsSuccessor() throws Exception {
         String lateOutage = delegate.answer(newPassword(), Outcome.OUTAGE);
         CountDownLatch lateGate = delegate.gate(lateOutage);
-        var late = new ArrayList<Future<@Nullable Authentication>>();
-        // Every permit of the name but one, which the successor's attempt takes.
-        for (int i = 0; i < PERMITS - 1; i++) {
+        var late = new ArrayList<Future<@Nullable Authentication>>(LATE_ATTEMPTS);
+        for (int i = 0; i < LATE_ATTEMPTS; i++) {
             late.add(submit("victim", lateOutage));
         }
-        awaitCalls(PERMITS - 1);
+        awaitCalls(LATE_ATTEMPTS);
         evictOlderEntriesWithABurst();
 
         // The successor: a new entry of the name with one attempt in flight, and no failure or lock.
@@ -344,7 +283,7 @@ class LoginLockoutAuthenticationProviderBoundsTest {
         String currentOutage = delegate.answer(newPassword(), Outcome.OUTAGE);
         CountDownLatch currentGate = delegate.gate(currentOutage);
         var current = submit("victim", currentOutage);
-        awaitAtTheGate(current, PERMITS + ENTRY_BOUND);
+        awaitAtTheGate(current, LATE_ATTEMPTS + ENTRY_BOUND + 1);
         assertEquals(ENTRY_BOUND, provider.size());
 
         // The late attempts end in the successor's generation, which never counted them in flight.
