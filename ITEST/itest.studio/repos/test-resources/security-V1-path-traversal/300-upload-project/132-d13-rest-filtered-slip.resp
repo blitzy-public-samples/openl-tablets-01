@@ -2,15 +2,6 @@ HTTP/1.1 400
 Content-Type: application/json
 
 {
-  "message": "Bad Request",
-  "errors": [
-    {
-      "code": "openl.error.zip-archive.unknown.archive.path.message",
-      "message": "*"
-    },
-    {
-      "code": "openl.error.zip-archive.unknown.archive.path.message",
-      "message": "*"
-    }
-  ]
+  "code": "openl.error.zip-archive.unknown.archive.path.message",
+  "message": "*"
 }

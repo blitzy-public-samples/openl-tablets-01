@@ -1,8 +1,10 @@
 package org.openl.studio.repositories.validator;
 
 // V1-D: imports of the upload-project path matrix
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
@@ -24,6 +26,7 @@ import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Set;
+import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import java.util.zip.ZipException;
 
@@ -39,6 +42,7 @@ import org.springframework.test.context.junit.jupiter.SpringJUnitConfig;
 import org.springframework.validation.BindingResult;
 import org.springframework.validation.ObjectError;
 
+import org.openl.rules.webstudio.util.NameChecker;
 import org.openl.rules.webstudio.web.repository.upload.zip.ZipCharsetDetector;
 import org.openl.rules.workspace.filter.AndPathFilter;
 import org.openl.rules.workspace.filter.FileNamePathFilter;
@@ -53,6 +57,9 @@ class ZipArchiveValidatorTest extends AbstractConstraintValidatorTest {
 
     // V1-D: the descriptor at the root of every crafted archive, so it is recognized as a rules project.
     private static final String RULES_XML = "<project><name>P</name></project>";
+
+    // V1-D: the NameChecker reason a raw-name rejection gives, without its final dot.
+    private static final String BAD_NAME = NameChecker.BAD_NAME_MSG.substring(0, NameChecker.BAD_NAME_MSG.length() - 1);
 
     @Autowired
     private ZipArchiveValidator validator;
@@ -111,7 +118,12 @@ class ZipArchiveValidatorTest extends AbstractConstraintValidatorTest {
     @ParameterizedTest(name = "{0}")
     @MethodSource("rejectedEntryNames")
     void testArchives_RejectedEntryName(String rowId, String rawName) throws IOException {
-        assertEntryRejected(rowId, validate(rowId, archive(rawName)), UNKNOWN_ARCHIVE_PATH);
+        var result = validate(rowId, archive(rawName));
+        assertEntryRejected(rowId, result, UNKNOWN_ARCHIVE_PATH);
+        // V1-D: no rejection repeats the JDK message's '.:' separator
+        for (ObjectError error : result.getGlobalErrors()) {
+            assertFalse(String.valueOf(error.getDefaultMessage()).contains(".:"), rowId + ": unexpected '.:'");
+        }
     }
 
     // V1-D: the rejected rows of the upload-project matrix, as (row id, raw entry name).
@@ -188,18 +200,16 @@ class ZipArchiveValidatorTest extends AbstractConstraintValidatorTest {
     }
 
     // V1-D: an archive the zipfs view cannot open ('.' segment) is rejected by its raw names.
-    // There is one error for each distinct violation: the Repository.validatePath one and the NameChecker one.
+    // One error names both violations: the Repository.validatePath one and the NameChecker one.
     @Test
     void testArchives_UnopenableArchiveRejectedByRawNames() throws IOException {
         var result = validate("zipfs cannot open", archive("./a.xlsx", "b%c.xlsx"));
-        assertEntryRejected("zipfs cannot open", result, UNKNOWN_ARCHIVE_PATH);
-        assertEquals(2, result.getGlobalErrorCount(), "zipfs cannot open: one error for each raw violation");
-        for (ObjectError error : result.getGlobalErrors()) {
-            assertEquals(UNKNOWN_ARCHIVE_PATH, error.getCode(), "zipfs cannot open: raw violations use the path key");
-        }
+        assertRawRejection("zipfs cannot open", result,
+                "Invalid paths inside archive: './a.xlsx' (The path must be normalized), 'b%c.xlsx' (" + BAD_NAME
+                        + ").");
     }
 
-    // V1-D: 15 distinct traversal names reject the archive with at most 10 raw-name errors.
+    // V1-D: 15 distinct traversal names reject the archive with one error naming the first 10 of them.
     // The cap is the validator's MAX_RAW_VIOLATIONS, so the entry count cannot grow the 400 body.
     @Test
     void testArchives_RawViolationsCapped() throws IOException {
@@ -207,11 +217,64 @@ class ZipArchiveValidatorTest extends AbstractConstraintValidatorTest {
         for (var i = 0; i < names.length; i++) {
             names[i] = "../a%02d.xlsx".formatted(i);
         }
-        var result = validate("raw violations capped", archive(names));
-        assertEntryRejected("raw violations capped", result, UNKNOWN_ARCHIVE_PATH);
-        assertEquals(10, result.getGlobalErrorCount(), "raw violations capped: at most 10 errors are reported");
-        for (ObjectError error : result.getGlobalErrors()) {
-            assertEquals(UNKNOWN_ARCHIVE_PATH, error.getCode(), "raw violations capped: errors use the path key");
+        var expected = Stream.of(names)
+                .limit(10)
+                .map(name -> "'" + name + "' (The path must be normalized)")
+                .collect(Collectors.joining(", ", "Invalid paths inside archive: ", "."));
+        assertRawRejection("raw violations capped", validate("raw violations capped", archive(names)), expected);
+    }
+
+    // V1-D: a raw-name rejection names each entry as stored in the archive with its bare reason, never the JDK
+    // message with its '.:'; a single violation reads 'path', several read 'paths'.
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("rawRejectionMessages")
+    void testArchives_RawRejectionMessage(String rowId, List<String> rawNames, String expectedMessage)
+            throws IOException {
+        assertRawRejection(rowId, validate(rowId, archive(rawNames.toArray(String[]::new))), expectedMessage);
+    }
+
+    // V1-D: the rows the raw-name check rejects, as (row id, raw entry names, expected message).
+    static Stream<Arguments> rawRejectionMessages() {
+        return Stream.of(Arguments.of("D1 dot-dot segment", List.of("../evil.xlsx"),
+                        "Invalid path inside archive: '../evil.xlsx' (The path must be normalized)."),
+                Arguments.of("D2 dot segments", List.of("./x.xlsx", "a/./x.xlsx"),
+                        "Invalid paths inside archive: './x.xlsx' (The path must be normalized),"
+                                + " 'a/./x.xlsx' (The path must be normalized)."),
+                Arguments.of("D3 absolute POSIX path", List.of("/etc/cron.d/evil"),
+                        "Invalid path inside archive: '/etc/cron.d/evil' (The path cannot be absolute)."),
+                Arguments.of("D6 double slash", List.of("a//evil.xlsx"),
+                        "Invalid path inside archive: 'a//evil.xlsx' (The path must be normalized)."),
+                Arguments.of("D13 nested zip-slip", List.of("a/../../evil.xlsx"),
+                        "Invalid path inside archive: 'a/../../evil.xlsx' (The path must be normalized)."),
+                Arguments.of("folder entry named with its trailing slash", List.of("../d/"),
+                        "Invalid path inside archive: '../d/' (The path must be normalized)."),
+                Arguments.of("backslash named as stored", List.of("./a.xlsx", "..\\b.xlsx"),
+                        "Invalid paths inside archive: './a.xlsx' (The path must be normalized),"
+                                + " '..\\b.xlsx' (The path must be normalized)."),
+                Arguments.of("reserved word without its final dot", List.of("./a.xlsx", "NUL"),
+                        "Invalid paths inside archive: './a.xlsx' (The path must be normalized),"
+                                + " 'NUL' ('NUL' is a reserved word)."));
+    }
+
+    // V1-D: control characters of a raw name, a NUL byte included, are shown escaped and never reach the message.
+    // The reason of the NUL byte is the platform's own, read here without its final dot.
+    @Test
+    void testArchives_RawRejectionEscapesControlCharacters() throws IOException {
+        var nulReason = assertThrows(InvalidPathException.class, () -> Path.of("x\u0000")).getReason();
+        var result = validate("control characters", archive("./a.xlsx", "ev\u0007il.xlsx", "evil.xlsx\u0000.txt"));
+        assertRawRejection("control characters", result,
+                "Invalid paths inside archive: './a.xlsx' (The path must be normalized), 'ev\\u0007il.xlsx' ("
+                        + BAD_NAME + "), 'evil.xlsx\\u0000.txt' (" + nulReason.replaceFirst("\\.$", "") + ").");
+    }
+
+    // V1-D: a violation whose exception carries no message names its entry only.
+    @Test
+    void testArchives_RawRejectionWithoutReasonNamesTheEntry() throws IOException {
+        var file = archive("./a.xlsx", "b.xlsx");
+        try (var nameChecker = mockStatic(NameChecker.class, CALLS_REAL_METHODS)) {
+            nameChecker.when(() -> NameChecker.validatePath("b.xlsx")).thenThrow(new IOException());
+            assertRawRejection("no reason", validate("no reason", file),
+                    "Invalid paths inside archive: './a.xlsx' (The path must be normalized), 'b.xlsx'.");
         }
     }
 
@@ -368,6 +431,21 @@ class ZipArchiveValidatorTest extends AbstractConstraintValidatorTest {
             assertTrue(result.getGlobalErrors().stream().anyMatch(e -> expectedCode.equals(e.getCode())),
                     rowId + ": no global error has the code " + expectedCode);
         }
+    }
+
+    // V1-D: the raw names reject the archive with exactly one error under the path key, whose message, also its
+    // argument, is the expected one. A message holding a control character fails before it is printed.
+    private static void assertRawRejection(String rowId, BindingResult result, String expectedMessage) {
+        assertEntryRejected(rowId, result, UNKNOWN_ARCHIVE_PATH);
+        assertEquals(1, result.getGlobalErrorCount(), rowId + ": one error names every raw violation");
+        var error = result.getGlobalError();
+        assertNotNull(error, rowId + ": the error is expected");
+        var message = error.getDefaultMessage();
+        assertNotNull(message, rowId + ": the error must carry a message");
+        assertTrue(message.chars().noneMatch(Character::isISOControl), rowId + ": no control character is expected");
+        assertFalse(message.contains(".:"), rowId + ": the JDK message's '.:' must not reach the message");
+        assertEquals(expectedMessage, message, rowId + ": unexpected message");
+        assertArrayEquals(new Object[]{expectedMessage}, error.getArguments(), rowId + ": the message is its argument");
     }
 
     // V1-D: an archive with a root rules.xml and one empty entry for each raw name.

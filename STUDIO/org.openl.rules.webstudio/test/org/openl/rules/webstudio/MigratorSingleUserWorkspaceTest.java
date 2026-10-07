@@ -8,6 +8,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.abort;
 
 import java.io.IOException;
+import java.net.StandardProtocolFamily;
+import java.net.UnixDomainSocketAddress;
+import java.nio.channels.ServerSocketChannel;
 import java.nio.file.FileVisitOption;
 import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
@@ -25,6 +28,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.StringJoiner;
 import java.util.TreeMap;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Stream;
 
 import org.apache.commons.lang3.RandomStringUtils;
@@ -806,6 +810,131 @@ class MigratorSingleUserWorkspaceTest {
                 "V1 containment: the link keeps its target.");
         assertSkipLogged(err, projectOutsideMessage(loggedName, "alice"));
         assertLogPrintable(err);
+    }
+
+    // V1: the workspace root may be configured through a link, whose own path is trusted and followed.
+    // The root is resolved once and each user folder is checked under the real root, so a regular user folder still
+    // converts and a user folder that links out of the real root is still skipped with the escape WARN.
+    @Test
+    @DisabledOnOs(OS.WINDOWS)
+    @StdIo
+    void conversionThroughLinkedWorkspaceRootConvertsItsUserFolders(StdErr err) throws IOException {
+        var ws = Files.createDirectories(root.resolve("ws"));
+        var linkedRoot = Files.createSymbolicLink(root.resolve("ws-link"), ws);
+        var outsideTarget = Files.createDirectories(root.resolve("outside"));
+        legacyProject(outsideTarget.resolve("Proj"));
+        var victim = Files.createSymbolicLink(ws.resolve("victim"), outsideTarget);
+        var jdoe = Files.createDirectories(ws.resolve("jdoe"));
+        var repositoryId = legacyProject(jdoe.resolve("Proj"));
+        var before = snapshot(outsideTarget);
+
+        Migrator.migrateUserWorkspacesToMetainfoRegistry(linkedRoot);
+
+        assertEquals(before, snapshot(outsideTarget), "V1 containment: the outside directory is unchanged.");
+        assertLegacyProjectKept(outsideTarget, "Proj");
+        assertEquals(outsideTarget, Files.readSymbolicLink(victim), "V1 containment: the link keeps its target.");
+        assertSkipLogged(err, conversionOutsideRootMessage("victim"));
+        assertEquals(1, countConversionSkips(err), "V1 rejection: only the linked user folder is skipped.");
+        assertConverted(jdoe, "Proj", repositoryId);
+    }
+
+    // V1: a metadata entry of another kind than a file, a folder or a link, here a Unix domain socket as .history, is
+    // resolved like a link, because it is not a plain entry. Its real path is its own place, so the project converts.
+    @Test
+    @DisabledOnOs(OS.WINDOWS)
+    @StdIo
+    void conversionAcceptsMetadataEntryOfAnotherKind(StdErr err) throws IOException {
+        var ws = Files.createDirectories(root.resolve("ws"));
+        var alice = Files.createDirectories(ws.resolve("alice"));
+        var project = alice.resolve("Proj");
+        var repositoryId = legacyProject(project);
+        var history = project.resolve(".history");
+        Files.move(history, root.resolve("removed"));
+        // A socket path is limited to about 100 bytes, so the socket is bound through its path relative to the
+        // working directory.
+        var socketPath = Path.of("").toAbsolutePath().relativize(history.toAbsolutePath());
+        try (var server = ServerSocketChannel.open(StandardProtocolFamily.UNIX)) {
+            try {
+                server.bind(UnixDomainSocketAddress.of(socketPath));
+            } catch (IOException e) {
+                abort("V1: the platform cannot bind a Unix domain socket at the path of the project's .history.");
+            }
+            assertTrue(Files.readAttributes(history, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS).isOther(),
+                    "The .history entry is neither a file, a folder nor a link.");
+
+            Migrator.migrateUserWorkspacesToMetainfoRegistry(ws);
+        }
+
+        assertEquals(0, countConversionSkips(err), "V1 rejection: an entry of another kind skips no project.");
+        assertConverted(alice, "Proj", repositoryId);
+    }
+
+    // V1: a user folder and a project folder whose name the platform charset cannot decode are listed under a lossy
+    // name, which designates another, absent place. Each is a link out of the workspace root, so the conversion skips
+    // both instead of accepting the absent place and then following the listed link; a regular project converts.
+    @Test
+    @DisabledOnOs(OS.WINDOWS)
+    @StdIo
+    void conversionSkipsLinkedFoldersWhoseNameDoesNotDecode(StdErr err) throws IOException {
+        var ws = Files.createDirectories(root.resolve("ws"));
+        var outsideUser = Files.createDirectories(root.resolve("outside-user"));
+        legacyProject(outsideUser.resolve("Proj"));
+        var outsideProject = Files.createDirectories(root.resolve("outside-project"));
+        legacyProject(outsideProject.resolve("Proj"));
+        var alice = Files.createDirectories(ws.resolve("alice"));
+        var repositoryId = legacyProject(alice.resolve("Plain"));
+        var userLink = undecodableLink(ws, outsideUser);
+        var projectLink = undecodableLink(alice, outsideProject.resolve("Proj"));
+        var before = outside(root, ws);
+
+        Migrator.migrateUserWorkspacesToMetainfoRegistry(ws);
+
+        assertEquals(before, outside(root, ws), "V1 containment: nothing outside the workspace root changes.");
+        assertLegacyProjectKept(outsideUser, "Proj");
+        assertLegacyProjectKept(outsideProject, "Proj");
+        assertEquals(outsideUser, Files.readSymbolicLink(userLink), "V1 containment: the user link keeps its target.");
+        assertEquals(outsideProject.resolve("Proj"), Files.readSymbolicLink(projectLink),
+                "V1 containment: the project link keeps its target.");
+        assertEquals(2, countConversionSkips(err), "V1 rejection: both links with an undecodable name are skipped.");
+        assertConverted(alice, "Plain", repositoryId);
+    }
+
+    // V1: helpers of the undecodable name check, private to this class.
+    /**
+     * Creates in the folder a link to the target named {@code x}, the byte {@code 0xE9} and {@code y}: not valid UTF-8,
+     * so the platform charset decodes it lossily. Java cannot encode such a name, so the shell creates the link; the
+     * test is aborted where the shell or the file system refuses the name.
+     *
+     * @return the link as the folder lists it
+     */
+    private static Path undecodableLink(Path folder, Path target) throws IOException {
+        var process = new ProcessBuilder("sh", "-c", "ln -s \"$1\" \"$(printf 'x\\351y')\"", "sh", target.toString())
+                .directory(folder.toFile())
+                .redirectOutput(ProcessBuilder.Redirect.DISCARD)
+                .redirectError(ProcessBuilder.Redirect.DISCARD)
+                .start();
+        try {
+            if (!process.waitFor(30, TimeUnit.SECONDS) || process.exitValue() != 0) {
+                process.destroyForcibly();
+                abort("V1: the platform cannot create a link whose name is not valid UTF-8.");
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IOException("Interrupted while creating the link.", e);
+        }
+        try (var entries = Files.list(folder)) {
+            var link = entries.filter(Files::isSymbolicLink).filter(entry -> isLinkTo(entry, target)).findFirst();
+            return link.orElseGet(() -> abort("V1: the link whose name is not valid UTF-8 is not listed."));
+        }
+    }
+
+    /** Whether the link points to the target; an unreadable link points nowhere. */
+    private static boolean isLinkTo(Path link, Path target) {
+        try {
+            return target.equals(Files.readSymbolicLink(link));
+        } catch (IOException e) {
+            return false;
+        }
     }
 
     // V1: helpers of the startup conversion checks, private to this class.

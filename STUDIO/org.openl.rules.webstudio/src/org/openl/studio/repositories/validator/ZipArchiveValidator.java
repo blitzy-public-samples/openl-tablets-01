@@ -6,6 +6,7 @@ import java.nio.charset.Charset;
 import java.nio.file.FileSystem;
 import java.nio.file.FileSystems;
 import java.nio.file.Files;
+import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
@@ -150,7 +151,9 @@ public class ZipArchiveValidator implements Validator {
      * <p>Private to this validator: V1 allows no path component shared between surfaces, so the upload-project
      * surface keeps its own path guard.
      *
-     * @return the distinct violation messages, in the order of the entries, at most {@value #MAX_RAW_VIOLATIONS}
+     * @return the distinct violations, each the offending entry as stored in the archive with the reason it is
+     *         rejected for (see {@link #rawEntryNameViolation(String, Exception)}), in the order of the entries, at
+     *         most {@value #MAX_RAW_VIOLATIONS}
      */
     private Set<String> rawEntryNameViolations(Path archive, Charset charset) {
         var violations = new LinkedHashSet<String>();
@@ -161,7 +164,8 @@ public class ZipArchiveValidator implements Validator {
                 .get()) {
             var entries = zip.getEntries();
             while (entries.hasMoreElements() && violations.size() < MAX_RAW_VIOLATIONS) {
-                var name = entries.nextElement().getName().replace('\\', '/');
+                var entryName = entries.nextElement().getName(); // V1: kept as stored, to name it in a rejection
+                var name = entryName.replace('\\', '/');
                 // The filter sees the raw name, trailing '/' of a folder entry included, as the other uploaders do.
                 // V1: a dropped entry is never written, yet a '.' or '..' segment in it still breaks the zipfs view
                 var written = zipFilter.accept(name);
@@ -180,7 +184,8 @@ public class ZipArchiveValidator implements Validator {
                     }
                 } catch (IOException | IllegalArgumentException e) {
                     // InvalidPathException, thrown for a traversal or a NUL byte, is an IllegalArgumentException.
-                    violations.add(e.getMessage());
+                    // V1: the entry with the bare reason, as the JDK message appends the input after a stray ':'
+                    violations.add(rawEntryNameViolation(entryName, e));
                 }
             }
         } catch (IOException e) {
@@ -190,12 +195,55 @@ public class ZipArchiveValidator implements Validator {
     }
 
     /**
-     * V1: rejects every raw entry name violation with the key the zipfs view check uses for a name failure.
+     * V1: one raw entry name violation, for example {@code '../x.xlsx' (The path must be normalized)}.
+     *
+     * <p>The entry is named as stored in the archive, before {@code \} is read as {@code /} or the trailing {@code /}
+     * of a folder entry is dropped, so it reads as the user's own archive lists it. Each control character, a NUL byte
+     * included, is shown escaped, as a backslash, {@code u} and four hexadecimal digits, so no invisible or
+     * terminal-control character reaches the message. The reason is the bare reason of an {@link InvalidPathException},
+     * whose message would repeat the input after a {@code :}, or else the exception message, without its final dot. A
+     * violation without a reason names the entry only.
+     *
+     * @param entryName the entry name as stored in the archive
+     * @param e the exception the name was rejected with
+     * @return the quoted entry name, followed by the reason in parentheses when there is one
+     */
+    private static String rawEntryNameViolation(String entryName, Exception e) {
+        var violation = new StringBuilder(entryName.length() + 2).append('\'');
+        for (var i = 0; i < entryName.length(); i++) {
+            var c = entryName.charAt(i);
+            if (Character.isISOControl(c)) {
+                violation.append("\\u%04X".formatted((int) c));
+            } else {
+                violation.append(c);
+            }
+        }
+        violation.append('\'');
+        var reason = e instanceof InvalidPathException invalidPath ? invalidPath.getReason() : e.getMessage();
+        if (StringUtils.isNotBlank(reason)) {
+            if (reason.endsWith(".")) {
+                reason = reason.substring(0, reason.length() - 1);
+            }
+            violation.append(" (").append(reason).append(')');
+        }
+        return violation.toString();
+    }
+
+    /**
+     * V1: rejects the raw entry name violations with one error, under the key the zipfs view check uses for a name
+     * failure, whose message names every violation: {@code Invalid path inside archive: <violation>.} for one, and
+     * {@code Invalid paths inside archive: <violation>, <violation>.} for several. A single error is answered with its
+     * code and message, which the create-project dialog shows; several errors would only be answered as a list it
+     * does not show.
      *
      * @return {@code true} when at least one violation was rejected
      */
     private static boolean rejectRawEntryNames(Set<String> violations, Errors errors) {
-        for (var message : violations) {
+        // V1: one error for all violations, so the response keeps the single-error shape the UI renders
+        if (!violations.isEmpty()) {
+            var message = violations.size() == 1
+                    ? "Invalid path inside archive: " + violations.iterator().next() + "."
+                    : "Invalid paths inside archive: " + String.join(", ", violations) + ".";
             errors.reject("zip-archive.unknown.archive.path.message", new String[]{message}, message);
         }
         return !violations.isEmpty();

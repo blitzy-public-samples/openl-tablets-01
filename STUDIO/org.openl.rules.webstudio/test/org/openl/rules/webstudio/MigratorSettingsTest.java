@@ -10,6 +10,7 @@ import static org.mockito.Mockito.mockStatic;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.security.GeneralSecurityException;
 import java.security.KeyFactory;
@@ -31,6 +32,8 @@ import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.DisabledOnOs;
+import org.junit.jupiter.api.condition.OS;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
@@ -759,6 +762,171 @@ class MigratorSettingsTest {
         // each of their subfolders a project, and every such project would be logged.
         assertEquals(0, linesWith(err, "repository link"), "No folder of the working directory is a project.");
         assertEquals(0, linesWith(err, "metainfo"), "No folder of the working directory is converted.");
+    }
+
+    // V1: the start-up migration skips the single-user move when the user's folder links outside the workspace root
+    // (row A12). The legacy workspace stays, nothing behind the link is created or changed, and the move and the
+    // metainfo conversion that follows each log their skip once at WARN.
+    @Test
+    @DisabledOnOs(OS.WINDOWS)
+    @StdIo
+    void theSingleUserMoveSkipsAFolderThatLinksOutsideTheWorkspace(StdErr err) throws IOException {
+        var username = "user" + RandomStringUtils.secure().nextNumeric(8);
+        System.setProperty("user.mode", "single");
+        System.setProperty("security.single.username", username);
+        var legacyWork = writeLegacyWorkspace();
+        var outside = Files.createDirectories(home.resolve("outside"));
+        var marker = randomValue();
+        Files.writeString(outside.resolve("marker.txt"), marker);
+        var link = Files.createSymbolicLink(workspace().resolve(username), outside);
+
+        migrate();
+
+        assertLegacyWorkspaceKept(legacyWork);
+        assertEquals(List.of("marker.txt"), entries(outside), "Nothing is created behind the link.");
+        assertEquals(marker, Files.readString(outside.resolve("marker.txt")), "Nothing behind the link is changed.");
+        assertEquals(outside, Files.readSymbolicLink(link), "The link keeps its target.");
+        assertWarnedOnce(err, "The single-user name '" + username + "' resolves outside the workspace root; the move "
+                + "is skipped.");
+        assertWarnedOnce(err, conversionOutsideMessage(username));
+    }
+
+    // V1: the start-up migration skips the single-user move when the user's folder links to another user's folder
+    // (row A16). The legacy workspace stays and nothing of the other user's workspace is read or written.
+    @Test
+    @DisabledOnOs(OS.WINDOWS)
+    @StdIo
+    void theSingleUserMoveSkipsAFolderThatLinksToAnotherUser(StdErr err) throws IOException {
+        var username = "user" + RandomStringUtils.secure().nextNumeric(8);
+        var otherUser = "other" + RandomStringUtils.secure().nextNumeric(8);
+        System.setProperty("user.mode", "single");
+        System.setProperty("security.single.username", username);
+        var legacyWork = writeLegacyWorkspace();
+        var other = Files.createDirectories(workspace().resolve(otherUser));
+        var marker = randomValue();
+        Files.writeString(other.resolve("marker.txt"), marker);
+        var link = Files.createSymbolicLink(workspace().resolve(username), other);
+
+        migrate();
+
+        assertLegacyWorkspaceKept(legacyWork);
+        assertEquals(List.of("marker.txt"), entries(other), "Nothing is written into the other user's workspace.");
+        assertEquals(marker, Files.readString(other.resolve("marker.txt")), "The other user's workspace is unchanged.");
+        assertEquals(other, Files.readSymbolicLink(link), "The link keeps its target.");
+        assertWarnedOnce(err, "The single-user name '" + username + "' resolves outside the workspace root; the move "
+                + "is skipped.");
+        assertWarnedOnce(err, conversionOutsideMessage(username));
+    }
+
+    // V1: the start-up migration skips the single-user move for a reserved name (row A11), which NameChecker rejects.
+    // The legacy workspace stays, no folder is created for the name and the skip is logged once at WARN.
+    @Test
+    @StdIo
+    void theSingleUserMoveSkipsAReservedName(StdErr err) throws IOException {
+        System.setProperty("user.mode", "single");
+        System.setProperty("security.single.username", "CON");
+        var legacyWork = writeLegacyWorkspace();
+
+        migrate();
+
+        assertLegacyWorkspaceKept(legacyWork);
+        assertEquals(List.of("DEFAULT"), entries(workspace()), "No folder is created for the reserved name.");
+        assertWarnedOnce(err, "The single-user name 'CON' is not a valid workspace folder name; the move is skipped.");
+    }
+
+    // V1: the start-up metainfo conversion skips a user folder that links outside the workspace root, so the legacy
+    // project behind the link keeps its files and gets no record, while the legacy project of a regular user folder
+    // is converted into its metainfo record.
+    @Test
+    @DisabledOnOs(OS.WINDOWS)
+    @StdIo
+    void theStartupConversionSkipsAUserFolderThatLinksOutsideTheWorkspace(StdErr err) throws IOException {
+        var linkedUser = "user" + RandomStringUtils.secure().nextNumeric(8);
+        var regularUser = "regular" + RandomStringUtils.secure().nextNumeric(8);
+        var outside = Files.createDirectories(home.resolve("outside"));
+        writeLinkedLegacyProject(outside.resolve("Proj"));
+        var outsideVersion = outside.resolve("Proj/.studioProps/.version");
+        var outsideVersionContent = Files.readString(outsideVersion);
+        var link = Files.createSymbolicLink(workspace().resolve(linkedUser), outside);
+        var userDir = Files.createDirectories(workspace().resolve(regularUser));
+        var repositoryId = writeLinkedLegacyProject(userDir.resolve("Proj"));
+
+        migrate();
+
+        assertEquals(outsideVersionContent,
+                Files.readString(outsideVersion),
+                "The legacy metainfo behind the link is kept.");
+        assertTrue(Files.isDirectory(outside.resolve("Proj/.history"), LinkOption.NOFOLLOW_LINKS),
+                "The edit history behind the link is kept.");
+        assertFalse(Files.exists(outside.resolve(MetainfoRegistry.METAINFO_FOLDER), LinkOption.NOFOLLOW_LINKS),
+                "No metainfo record is written behind the link.");
+        assertEquals(outside, Files.readSymbolicLink(link), "The link keeps its target.");
+        assertWarnedOnce(err, conversionOutsideMessage(linkedUser));
+        assertEquals(1,
+                linesWith(err, "its metainfo migration is skipped."),
+                "Only the linked user folder is skipped.");
+        assertFalse(Files.exists(userDir.resolve("Proj/.studioProps"), LinkOption.NOFOLLOW_LINKS),
+                "The legacy .studioProps folder of the converted project is deleted.");
+        assertFalse(Files.exists(userDir.resolve("Proj/.history"), LinkOption.NOFOLLOW_LINKS),
+                "The in-project edit history of the converted project is deleted.");
+        assertEquals(repositoryId, metainfo(userDir, "Proj").repositoryId(),
+                "The record keeps the repository of the converted project.");
+    }
+
+    // V1: helpers of the start-up guard tests, private to this class.
+    /** The WARN of the metainfo conversion for a user folder that leads outside its own place. */
+    private static String conversionOutsideMessage(String userName) {
+        return "The user workspace folder '" + userName + "' resolves outside the workspace root; its metainfo "
+                + "migration is skipped.";
+    }
+
+    /**
+     * Writes generated uncommitted work into {@code DEFAULT/SoloProj}, the legacy single-user workspace.
+     *
+     * @return the work written
+     */
+    private String writeLegacyWorkspace() throws IOException {
+        var project = Files.createDirectories(workspace().resolve("DEFAULT").resolve("SoloProj"));
+        var work = randomValue();
+        Files.writeString(project.resolve("solo-wip.txt"), work);
+        return work;
+    }
+
+    /** Asserts that the legacy single-user workspace keeps its uncommitted work in place. */
+    private void assertLegacyWorkspaceKept(String work) throws IOException {
+        assertEquals(work,
+                Files.readString(workspace().resolve("DEFAULT").resolve("SoloProj").resolve("solo-wip.txt")),
+                "The legacy DEFAULT workspace stays in place.");
+    }
+
+    /**
+     * Writes a legacy project whose {@code .studioProps/.version} links it to a generated repository, with one edit in
+     * its {@code .history}.
+     *
+     * @return the generated repository id
+     */
+    private static String writeLinkedLegacyProject(Path project) throws IOException {
+        var repositoryId = randomValue();
+        var studioProps = Files.createDirectories(project.resolve(".studioProps"));
+        Files.writeString(studioProps.resolve(".version"),
+                "repository-id=" + repositoryId + "\nversion=" + randomValue() + "\n");
+        var history = Files.createDirectories(project.resolve(".history").resolve("Main.xlsx"));
+        Files.writeString(history.resolve(RandomStringUtils.secure().nextNumeric(13)), randomValue());
+        return repositoryId;
+    }
+
+    /** The sorted names of the entries of a folder, links included and not followed. */
+    private static List<String> entries(Path folder) throws IOException {
+        try (var listed = Files.list(folder)) {
+            return listed.map(entry -> entry.getFileName().toString()).sorted().toList();
+        }
+    }
+
+    /** Asserts that exactly one captured line holds the message and that it is logged at WARN. */
+    private static void assertWarnedOnce(StdErr err, String message) {
+        var lines = Arrays.stream(err.capturedLines()).filter(line -> line.contains(message)).toList();
+        assertEquals(1, lines.size(), () -> "Exactly one line logs \"" + message + "\".");
+        assertTrue(lines.get(0).contains("WARN"), () -> "\"" + message + "\" is logged at WARN.");
     }
 
     /**
