@@ -157,9 +157,9 @@ browser.
   `repo-git` design repository, such an archive also answers that `400` whenever the existing project folder holds a
   link to a folder outside it; a link to a file or to nothing stops the upload only when an entry would be written
   through that link. Links that stay inside the project folder do not stop an upload. A `repo-git` design repository
-  writes uploads through that working tree, so uploading files, a template or an archive to it also answers that `400`
-  when the project folder would be reached through a link there. The files API on its closed projects and on the
-  repository itself, and a project copied into it, get the name checks only; opening its projects, and reading the
+  writes uploads and copies through that working tree, so uploading files, a template or an archive to it, or copying a
+  project into it, also answers that `400` when the project folder would be reached through a link there. The files API
+  on its closed projects and on the repository itself gets the name checks only; opening its projects, and reading the
   source when one of its closed projects is copied, are unchanged. JDBC, S3 and Azure Blob repositories keep no local
   folder, so no link check applies to them: they get the name checks only. Before upgrading, replace such links with
   regular folders or with copies of their content inside the project, or remove them.

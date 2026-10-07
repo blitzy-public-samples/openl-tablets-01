@@ -229,11 +229,11 @@ public class ProjectCreationService {
     }
 
     /**
-     * V1: the repository an upload writes through, with every change it saves checked against the new project
-     * folder.
+     * V1: the repository an upload or a copy writes through, with every change it saves checked against the new
+     * project folder.
      *
      * <p>The upload writes the project content, the descriptor it may generate included, with one changeset save,
-     * so only that call is checked. Every other call is passed on as it is, and
+     * and so does the copy, so only that call is checked. Every other call is passed on as it is, and
      * {@link RepositoryDelegate#getOriginal()} answers the repository itself, so a caller that unwraps it reaches
      * what it reached before. The branch and folder-mapping views of the repository are kept.
      *
@@ -258,7 +258,7 @@ public class ProjectCreationService {
                 new ContainedWrites(repository, destination));
     }
 
-    // V1: checks each change an upload saves against the new project folder, and passes every other call on
+    // V1: checks each change an upload or a copy saves against the new project folder, and passes every other call on
     @RequiredArgsConstructor
     private static final class ContainedWrites implements InvocationHandler {
         private final Repository repository;
@@ -371,7 +371,7 @@ public class ProjectCreationService {
         }
     }
 
-    // V1: a write refused while the repository takes an upload, told apart from a failure of the repository's own
+    // V1: a write refused while the repository takes an upload or a copy, told apart from a failure of its own
     private static final class WriteRefused extends RuntimeException {
         private final BadRequestException refusal;
 
@@ -771,7 +771,8 @@ public class ProjectCreationService {
             var designTimeRepository = workspace.getDesignTimeRepository();
             var designPath = designTimeRepository.getRulesLocation() + newName;
             // V1: contain the copy's folder inside the target repository root; the 400 is never mapped to a conflict
-            requireContainedProjectFolder(targetRepository, newName, path);
+            // V1: the resolved folder is kept, so the write of the copy is checked against it as an upload is
+            var destination = requireContainedProjectFolder(targetRepository, newName, path);
             // V1: contain the source project and every file the copy reads; the 400 is never mapped to a conflict
             requireContainedSource(sourceCopy);
             var designData = new FileData();
@@ -781,7 +782,9 @@ public class ProjectCreationService {
                 designData.addAdditionalData(FileMappingData.forProject(designPath, path, newName));
             }
             var user = workspace.getUser();
-            var targetProject = new AProject(targetRepository, designData);
+            // V1: the copy is written through the write check of its folder; what follows the write uses the target
+            var targetProject = new AProject(destination == null ? targetRepository
+                    : containedWrites(targetRepository, destination), designData);
             targetProject.setResourceTransformer(new CopyProjectTransformer(newName, Map.of()));
             targetProject.update(sourceCopy, user);
             targetProject.setResourceTransformer(null);
@@ -792,7 +795,16 @@ public class ProjectCreationService {
             awaitProjectVisibility(targetRepository);
             refreshWorkspaceAfterDesignChange();
             return copied.getFileData();
+        } catch (WriteRefused refused) {
+            // V1: a write the check refuses is a 400, never a copy conflict, also when no repository wrapped it
+            throw refused.refusal;
         } catch (ProjectException e) {
+            // V1: the copy reports a refused write as the cause of its own failure, however deep the repository put it
+            for (Throwable cause = e.getCause(); cause != null; cause = cause.getCause()) {
+                if (cause instanceof WriteRefused refused) {
+                    throw refused.refusal;
+                }
+            }
             // The answer carries a code only, so without this the failure leaves no trace anywhere.
             log.error("Failed to copy project '{}' into repository '{}'.", newName, targetRepositoryId, e);
             throw new ConflictException("project.copy.failed.message");

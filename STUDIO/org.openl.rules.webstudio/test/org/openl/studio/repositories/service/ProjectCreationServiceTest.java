@@ -1661,6 +1661,18 @@ class ProjectCreationServiceTest {
                 .flatMap(link -> Stream.of(Upload.values()).map(upload -> Arguments.of(link, upload)));
     }
 
+    // V1-C: every link a Git working tree could redirect the folder of a copy through, flat and mapped
+    private static Stream<Arguments> gitLinkedCopyFolders() {
+        return Stream.of(LinkTarget.values())
+                .flatMap(link -> Stream.of(false, true).map(mapped -> Arguments.of(link, mapped)));
+    }
+
+    // V1-C: valid copy targets of a Git repository, flat and mapped, with and without a path
+    private static Stream<Arguments> validGitCopyTargets() {
+        return Stream.of(false, true)
+                .flatMap(mapped -> Stream.of(null, "a/b").map(path -> Arguments.of(mapped, path)));
+    }
+
     // V1-C: a real overwrite runs when its folder holds a link to an outside file it neither writes through nor reads.
     // The outside file stays as it was.
     @ParameterizedTest
@@ -1816,6 +1828,131 @@ class ProjectCreationServiceTest {
 
         assertEquals(outsideBefore, snapshot(outside), "Nothing outside the project is touched");
         assertWrittenInside(project);
+    }
+
+    // V1-C: a copy into a Git repository never writes through a link its working tree holds (C12, C16, dangling).
+    // The link is untracked, as one planted in the working tree by hand is.
+    // Flat, the copy is named after the link in the rules location.
+    // Mapped as Studio maps its design repository, the link is the parent path of copy 'p'.
+    // The save refuses the copy in the tree it checks out: nothing outside or in the sibling changes, nothing is
+    // committed.
+    @ParameterizedTest(name = "{0} mapped: {1}")
+    @MethodSource("gitLinkedCopyFolders")
+    @DisabledOnOs(OS.WINDOWS)
+    void refuses_a_git_copy_whose_folder_a_working_tree_link_redirects(LinkTarget link, boolean mapped)
+            throws Exception {
+        realUploads();
+        var root = tmp.resolve("repo");
+        var git = seededGit(root);
+        var target = mapped ? mappedGit(git) : secured(git);
+        var outside = outsideFolder();
+        var sibling = root.resolve(mapped ? "projects/Sibling" : "DESIGN/rules/Sibling");
+        write(sibling.resolve("rules.xml"), descriptor("Sibling"));
+        var linkName = link == LinkTarget.DANGLING ? "ghost" : "link";
+        var linkFolder = Files.createDirectories(mapped ? root : root.resolve("DESIGN/rules"));
+        Files.createSymbolicLink(linkFolder.resolve(linkName), switch (link) {
+            case OUTSIDE -> outside;
+            case SIBLING -> sibling;
+            case DANGLING -> outside.resolve("missing");
+        });
+        var name = mapped ? "p" : linkName;
+        var path = mapped ? linkName : null;
+        var source = sourceInFlatFileRepository();
+        var outsideBefore = snapshot(outside);
+        var siblingBefore = snapshot(sibling);
+
+        assertPathRejected(() -> service.copyProject(target, name, path, source, "comment", null));
+
+        assertEquals(outsideBefore, snapshot(outside), "Nothing is written through the link");
+        assertEquals(siblingBefore, snapshot(sibling), "The sibling project is unchanged");
+        var folder = mapped ? FileMappingData.internalPath(path, name) : "DESIGN/rules/" + name;
+        assertNull(git.check(folder + "/rules.xml"), "Nothing of the copy is committed");
+        assertNothingOutside("repo", "design", "outside");
+    }
+
+    // V1-C: a copy through a link only the target branch holds is refused while another branch is checked out.
+    // A Git save checks out its target branch only when it writes, so the link is found in the tree the write goes
+    // through, and nothing of the copy is written through it or committed.
+    @ParameterizedTest
+    @EnumSource(value = TargetLink.class, names = {"PROJECT_FOLDER", "ANCESTOR"})
+    @DisabledOnOs(OS.WINDOWS)
+    void refuses_a_copy_through_a_link_only_the_target_branch_holds(TargetLink link) throws Exception {
+        realUploads();
+        var root = tmp.resolve("repo");
+        var repository = gitWithTargetBranch(root);
+        var outside = outsideFolder();
+        commitLink(root, TARGET_BRANCH, link.path, outside);
+        assertCheckedOut(root, BASE_BRANCH);
+        assertFalse(Files.exists(root.resolve(link.path), LinkOption.NOFOLLOW_LINKS),
+                "Fixture: the checked-out tree holds no link");
+        var onTarget = repository.forBranch(TARGET_BRANCH);
+        var source = sourceInFlatFileRepository();
+        var outsideBefore = snapshot(outside);
+
+        assertPathRejected(() -> service.copyProject(onTarget, "Fresh", null, source, "comment", null));
+
+        assertEquals(outsideBefore, snapshot(outside), "Nothing is written through the link of the target branch");
+        assertNull(onTarget.check("DESIGN/rules/Fresh/rules.xml"), "Nothing of the copy is committed");
+    }
+
+    // V1-C: a copy into a file repository is refused when its folder becomes a link after the path check passed.
+    // The whole changeset is checked before the repository takes any of it, so the refusal reaches the copy
+    // unwrapped: still the 400, never a copy conflict, and nothing is written through the link.
+    @Test
+    @DisabledOnOs(OS.WINDOWS)
+    void refuses_a_file_copy_whose_folder_a_link_redirects_after_the_path_check() throws IOException {
+        creatingUser();
+        var target = target(Backend.FLAT);
+        var outside = outsideFolder();
+        layOutSource(SourceLayout.FLAT);
+        var copySource = source(SourceLayout.FLAT);
+        var folder = tmp.resolve("repo/DESIGN/rules/NewProject");
+        // The source is listed only after the folder of the copy was checked; the folder becomes a link right then.
+        doAnswer(invocation -> {
+            if (!Files.exists(folder, LinkOption.NOFOLLOW_LINKS)) {
+                Files.createDirectories(folder.getParent());
+                Files.createSymbolicLink(folder, outside);
+            }
+            return invocation.callRealMethod();
+        }).when(copySource.files()).list(copySource.listing());
+        var source = mock(RulesProject.class);
+        when(source.getRepository()).thenReturn(copySource.repository());
+        when(source.getFolderPath()).thenReturn(copySource.folderPath());
+        var outsideBefore = snapshot(outside);
+
+        assertPathRejected(() -> service.copyProject(target, "NewProject", null, source, "comment", null));
+
+        assertEquals(outsideBefore, snapshot(outside), "Nothing is written through the link");
+        // The source was read for the write, so the refusal came from the write check, not from the path check.
+        verify(copySource.files()).read("DESIGN/rules/Src/src.txt");
+    }
+
+    // V1-C: a valid copy into a Git repository is committed in its own folder of the working tree.
+    // Mapped as Studio maps its design repository, it lands at the repository root or in the nested path; flat, at
+    // the root of the rules location. It holds the source content, and nothing is written outside the repositories.
+    @ParameterizedTest(name = "mapped: {0} with path {1}")
+    @MethodSource("validGitCopyTargets")
+    void copy_project_commits_a_valid_copy_into_its_own_folder_of_a_git_working_tree(boolean mapped, String path)
+            throws Exception {
+        realUploads();
+        var root = tmp.resolve("repo");
+        var git = seededGit(root);
+        var target = mapped ? mappedGit(git) : secured(git);
+        var source = sourceInFlatFileRepository();
+
+        assertNotNull(service.copyProject(target, "NewProject", path, source, "comment", null));
+
+        var copied = assertCopiedInside(mapped ? Backend.MAPPED : Backend.FLAT, "NewProject", path);
+        var original = tmp.resolve("design/DESIGN/rules/Src");
+        for (var file : List.of("src.txt", "sub/inside.txt")) {
+            assertEquals(Files.readString(original.resolve(file)), Files.readString(copied.resolve(file)),
+                    file + " holds the source content");
+        }
+        var folder = root.relativize(copied).toString();
+        for (var file : List.of("rules.xml", "src.txt", "sub/inside.txt")) {
+            assertNotNull(git.check(folder + "/" + file), file + " is committed");
+        }
+        assertNothingOutside("repo", "design");
     }
 
     // V1-C: the template route resolves the new project folder once, so the rules location is read once.
@@ -2233,6 +2370,23 @@ class ProjectCreationServiceTest {
         repository.createRepositoryBranch(TARGET_BRANCH, null);
         assertCheckedOut(root, BASE_BRANCH);
         return repository;
+    }
+
+    // V1-C: a configured Git repository in the folder whose checked-out base branch holds one seed commit.
+    // A save to a branch without commits cleans the working tree first, which would remove a link planted there.
+    private Repository seededGit(Path root) throws IOException {
+        var git = configuredRepository("repo-git", root);
+        assertNotNull(git.save(folderData("seed.txt"),
+                new ByteArrayInputStream(marker().getBytes(StandardCharsets.UTF_8))), "Fixture: the base is seeded");
+        assertCheckedOut(root, BASE_BRANCH);
+        return git;
+    }
+
+    // V1-C: the Git repository mapped onto DESIGN/rules/ and secured, as Studio builds its design repository
+    private Repository mappedGit(Repository git) throws IOException {
+        var mapped = MappedRepository.create(git, "DESIGN/rules/");
+        closeables.add((Closeable) mapped);
+        return secured(mapped);
     }
 
     // V1-C: a configured, secured Git repository in tmp/repo that reports no unique file ids.
