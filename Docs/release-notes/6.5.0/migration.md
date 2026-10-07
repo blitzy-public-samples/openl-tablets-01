@@ -127,7 +127,10 @@ browser.
   `openl.error.400.file.path.invalid.message`. In a `repo-file` design repository, creating or copying a project answers
   the same `400` when the new project folder would be reached through such a link. Creating a project from uploaded
   files and copying a project also answer that `400` for a project name or path holding a control character, which was
-  previously removed silently. A project archive with an entry name that is not a valid relative path, such as one with
+  previously removed silently. Creating a project from a template or from uploaded files also answers that `400` for a
+  project name that starts with a dot, such as `.hidden`, which OpenL Studio reserves for its workspace service folders;
+  such a project was previously reported as created although nothing was saved. A project archive with an entry name
+  that is not a valid relative path, such as one with
   a `..` segment or a leading `/`, is refused before anything is written. Copying a project answers that `400` as well
   when a file of the project being copied leads out of its folder through a link, in a `repo-file` design repository or,
   for an opened project, in the user's workspace.

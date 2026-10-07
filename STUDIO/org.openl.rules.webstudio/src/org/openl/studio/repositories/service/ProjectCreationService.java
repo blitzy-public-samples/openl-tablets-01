@@ -594,10 +594,21 @@ public class ProjectCreationService {
                                                          List<ProjectFile> files) {
         try {
             requireNoControlCharacters(path, projectName);
-            return requireContainedProjectFolder(repository, projectName, path);
+            var destination = requireContainedProjectFolder(repository, projectName, path);
+            // V1: checked after the existing rejections, so a name rejected today keeps its rejection
+            requireStageableProjectName(projectName);
+            return destination;
         } catch (BadRequestException e) {
             files.forEach(ProjectFile::destroy);
             throw e;
+        }
+    }
+
+    // V1: the upload stages the project in a workspace folder named after it, and the workspace hides every
+    // dot-leading folder as its own service folder, so such a project would be reported created with nothing saved
+    private static void requireStageableProjectName(@Nullable String projectName) {
+        if (projectName != null && projectName.startsWith(".")) {
+            throw new BadRequestException("file.path.invalid.message");
         }
     }
 

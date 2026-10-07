@@ -292,6 +292,22 @@ class ProjectCreationServiceTest {
         assertEquals("openl.error.400.file.path.invalid.message", e.getErrorCode());
     }
 
+    // V1-C: a dot-leading name never reaches the upload, so the rejection releases the files the upload would have
+    @Test
+    void create_from_files_rejects_a_dot_leading_project_name_and_releases_its_files() {
+        when(aclProjectsHelper.hasCreateProjectPermission("design")).thenReturn(true);
+        var repository = mock(Repository.class);
+        when(repository.getId()).thenReturn("design");
+        var file = mock(ProjectFile.class);
+        List<ProjectFile> files = List.of(file);
+
+        var e = assertThrows(BadRequestException.class, () -> service.createFromFiles(repository, ".hidden", null,
+                files, "comment", "rules/Models.xlsx", "rules/Algorithms.xlsx", "Models", "Algorithms", Map.of()));
+
+        assertEquals("openl.error.400.file.path.invalid.message", e.getErrorCode());
+        verify(file).destroy();
+    }
+
     @Test
     void create_from_template_rejects_a_path_with_a_control_character() {
         when(aclProjectsHelper.hasCreateProjectPermission("design")).thenReturn(true);
@@ -1090,6 +1106,16 @@ class ProjectCreationServiceTest {
                 .filter(ProjectCreationServiceTest::isWritable);
     }
 
+    // V1-C: dot-leading names, a look-alike (C14) among them, on the template and file routes of every backend,
+    // with and without a path; the upload stages each in a workspace folder the workspace hides as a service folder
+    private static Stream<Arguments> dotLeadingNewProjects() {
+        return Stream.of(".hidden", "..x", "..\u2215p")
+                .flatMap(name -> Stream.of(Route.TEMPLATE, Route.FILES)
+                        .flatMap(route -> Stream.of(Backend.values())
+                                .flatMap(backend -> Stream.of(null, "a/b")
+                                        .map(path -> Arguments.of(name, route, backend, path)))));
+    }
+
     // V1-C: a '.git' segment stays inside the repository root, so its outcome is recorded only (0.6.2.3 C15, 0.6.5)
     private static Stream<Arguments> gitMetadataPayloads() {
         return onEveryRoute(Backend.values(), new String[]{"C15", "NewProject", ".git/hooks"})
@@ -1225,6 +1251,43 @@ class ProjectCreationServiceTest {
             }
         }
         assertNothingOutside("repo", "design");
+    }
+
+    // V1-C: a dot-leading name is rejected before the upload stages it, so no project is reported created while
+    // nothing is saved and no access entry is granted for it (C14)
+    @ParameterizedTest(name = "{0} {1} on {2} with path {3}")
+    @MethodSource("dotLeadingNewProjects")
+    void rejects_a_dot_leading_project_name_before_the_upload_stages_it(String name, Route route, Backend backend,
+                                                                         String path) throws IOException {
+        creatingUser();
+        var target = target(backend);
+        var before = snapshot(tmp);
+
+        try (var uploaders = uploaders()) {
+            assertPathRejected(() -> attempt(route, target, name, path, null));
+            assertTrue(uploaders.constructed().isEmpty(), name + ": the upload never runs");
+        }
+
+        assertEquals(before, snapshot(tmp), name + ": nothing is created in the temporary directory");
+        if (backend == Backend.MOCK) {
+            verifyNothingSaved(target);
+        }
+    }
+
+    // V1-C: a dot inside a name is an ordinary character, so such a new project reaches the upload unchanged
+    @ParameterizedTest(name = "{0} on {1} with path {2}")
+    @MethodSource("validNewProjects")
+    void hands_a_project_name_with_an_inner_dot_to_the_upload(Route route, Backend backend, String path)
+            throws IOException {
+        creatingUser();
+        var target = target(backend);
+        var created = new FileData();
+
+        try (var ignored = uploaders(created)) {
+            assertSame(created, attempt(route, target, "My.Project", path, null));
+        }
+
+        assertUploaded(target, "My.Project", path);
     }
 
     // V1-C: a '.git' path is recorded only: no failure but a 400, and nothing outside the repositories (C15)
