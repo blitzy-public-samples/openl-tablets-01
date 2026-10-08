@@ -11,6 +11,7 @@ import org.springframework.security.config.annotation.web.configurers.AbstractHt
 import org.springframework.security.config.web.PathPatternRequestMatcherBuilderFactoryBean;
 import org.springframework.security.web.FilterChainProxy;
 import org.springframework.security.web.SecurityFilterChain;
+import org.springframework.security.web.util.matcher.AndRequestMatcher;
 
 @Configuration
 @EnableWebSecurity
@@ -18,7 +19,12 @@ public class SecurityConfig {
 
     @Bean(initMethod = "afterPropertiesSet", destroyMethod = "destroy")
     public FilterChainProxy filterChainProxy(List<SecurityFilterChain> securityFilterChains) {
-        return new FilterChainProxy(securityFilterChains);
+        var filterChainProxy = new FilterChainProxy(securityFilterChains);
+        // V4: every chain also writes the default security headers, cache ones unless already set, before first output
+        // V10: sys.json and http.json reach the servlet beneath the servlet-API wrapper, as on the static chain
+        filterChainProxy.setFilterChainDecorator(
+                new SysInfoServletApiChainDecorator(new EagerSecurityHeadersChainDecorator()));
+        return filterChainProxy;
     }
 
     @Bean
@@ -26,26 +32,31 @@ public class SecurityConfig {
         return new PathPatternRequestMatcherBuilderFactoryBean();
     }
 
-    // Static resource patterns with no filters
+    // Static resource patterns: no authentication, default security headers only
     @Bean
     @Order(0)
     public SecurityFilterChain staticResourcesFilterChain(HttpSecurity http) throws Exception {
 
         return http
-                .securityMatcher(
-                        "/favicon.ico",
-                        "/favicon.svg",
-                        "/application.properties",
-                        "/api-docs",
-                        "/icons/**",
-                        "/assets/**",
-                        "/.well-known/**",
-                        "/rest/public/**",
-                        "/rest/settings",
-                        "/rest/api-docs",
-                        "/rest/openapi.json"
-                )
-                // Disable any configurers and authentications for the static-like resources.
+                // V10: sys.json and http.json leave the public chain, so each mode's /rest/** chain authenticates them
+                .securityMatcher(new AndRequestMatcher(
+                        RequestMatchers.anyOf(
+                                "/favicon.ico",
+                                "/favicon.svg",
+                                "/application.properties",
+                                "/api-docs",
+                                "/icons/**",
+                                "/assets/**",
+                                "/.well-known/**",
+                                "/rest/public/**",
+                                "/rest/settings",
+                                "/rest/api-docs",
+                                "/rest/openapi.json"),
+                        RequestMatchers.not(RequestMatchers.anyOf(
+                                "/rest/public/info/sys.json",
+                                "/rest/public/info/http.json"))))
+                // Disable every configurer and authentication except the default security headers.
+                // V4: security headers stay enabled (HttpSecurity defaults) on the static chain.
                 .csrf(AbstractHttpConfigurer::disable)
                 .sessionManagement(AbstractHttpConfigurer::disable)
                 .logout(AbstractHttpConfigurer::disable)
@@ -53,7 +64,6 @@ public class SecurityConfig {
                 .anonymous(AbstractHttpConfigurer::disable)
                 .exceptionHandling(AbstractHttpConfigurer::disable)
                 .requestCache(AbstractHttpConfigurer::disable)
-                .headers(AbstractHttpConfigurer::disable)
                 .servletApi(AbstractHttpConfigurer::disable)
                 .build();
     }

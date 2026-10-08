@@ -9,6 +9,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.IOException;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.attribute.FileTime;
 import java.util.List;
@@ -16,8 +17,11 @@ import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
+import org.apache.commons.lang3.RandomStringUtils;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.DisabledOnOs;
+import org.junit.jupiter.api.condition.OS;
 import org.junit.jupiter.api.io.TempDir;
 
 import org.openl.rules.project.impl.local.ProjectMetainfo.FileBaseline;
@@ -97,6 +101,27 @@ class MetainfoRegistryTest {
 
         assertFalse(Files.exists(leftover));
         assertNotNull(reloaded.get(PROJECT));
+    }
+
+    // V1: a link planted as the temporary record entry is removed, never written through, by store and by save.
+    @Test
+    @DisabledOnOs(OS.WINDOWS)
+    void recordWriteNeverFollowsLinkPlantedAsTemporaryEntry(@TempDir Path outsideDir) throws IOException {
+        var content = RandomStringUtils.secure().nextAlphanumeric(16);
+        var outsideFile = Files.writeString(outsideDir.resolve("outside.properties"), content);
+        var tmp = Files.createDirectories(userDir.resolve(MetainfoRegistry.METAINFO_FOLDER))
+                .resolve(PROJECT + ".properties.tmp");
+        createProjectFolder();
+
+        Files.createSymbolicLink(tmp, outsideFile);
+        var stored = randomMetainfo();
+        MetainfoRegistry.store(userDir, PROJECT, stored);
+        assertWrittenInPlace(tmp, outsideFile, content, stored);
+
+        Files.createSymbolicLink(tmp, outsideFile);
+        var saved = randomMetainfo();
+        registry.save(PROJECT, saved);
+        assertWrittenInPlace(tmp, outsideFile, content, saved);
     }
 
     @Test
@@ -500,6 +525,29 @@ class MetainfoRegistryTest {
 
     private static ProjectMetainfo localMetainfo() {
         return new ProjectMetainfo("local", null, null, null, null, null, null, null, Map.of());
+    }
+
+    // V1: helpers of the planted temporary entry check, private to this class.
+    private static ProjectMetainfo randomMetainfo() {
+        return new ProjectMetainfo(RandomStringUtils.secure().nextAlphanumeric(12), null, null,
+                RandomStringUtils.secure().nextAlphanumeric(8), null, null, null, null, Map.of());
+    }
+
+    /**
+     * Asserts that the file behind the planted link keeps its content and is alone in its folder, that no temporary
+     * entry is left, and that the record is a regular file holding the metainfo. The registry is opened last, because
+     * the open reconciles the disk state.
+     */
+    private void assertWrittenInPlace(Path tmp, Path outsideFile, String content, ProjectMetainfo metainfo)
+            throws IOException {
+        assertEquals(content, Files.readString(outsideFile), "V1 containment: the file behind the link is unchanged.");
+        try (var entries = Files.list(outsideFile.getParent())) {
+            assertEquals(List.of(outsideFile), entries.toList(), "V1 containment: nothing is created outside.");
+        }
+        assertFalse(Files.exists(tmp, LinkOption.NOFOLLOW_LINKS), "V1 containment: no temporary entry is left.");
+        assertTrue(Files.isRegularFile(recordFile(), LinkOption.NOFOLLOW_LINKS),
+                "V1 containment: the record is a regular file, not a link.");
+        assertEquals(metainfo, MetainfoRegistry.open(userDir).get(PROJECT), "The record holds the stored metainfo.");
     }
 
     private void createProjectFolder() throws IOException {

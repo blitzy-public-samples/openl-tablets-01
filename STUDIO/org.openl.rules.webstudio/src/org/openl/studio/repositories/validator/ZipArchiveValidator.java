@@ -2,15 +2,19 @@ package org.openl.studio.repositories.validator;
 
 import java.io.IOException;
 import java.io.RandomAccessFile;
+import java.nio.charset.Charset;
 import java.nio.file.FileSystem;
 import java.nio.file.FileSystems;
 import java.nio.file.Files;
+import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.Map;
 import java.util.Set;
 
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.compress.archivers.zip.ZipFile;
 import org.eclipse.jgit.errors.CorruptObjectException;
 import org.eclipse.jgit.util.SystemReader;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -19,6 +23,7 @@ import org.springframework.validation.Errors;
 import org.springframework.validation.Validator;
 
 import org.openl.rules.project.resolving.ProjectResolver;
+import org.openl.rules.repository.api.Repository;
 import org.openl.rules.webstudio.util.NameChecker;
 import org.openl.rules.webstudio.web.repository.upload.zip.ZipCharsetDetector;
 import org.openl.rules.workspace.filter.PathFilter;
@@ -31,6 +36,9 @@ import org.openl.util.ZipUtils;
 @Slf4j
 @Component
 public class ZipArchiveValidator implements Validator {
+
+    // V1: one violation already refuses the archive, so the cap bounds memory and the 400 body whatever the entry count
+    private static final int MAX_RAW_VIOLATIONS = 10;
 
     private final PathFilter zipFilter;
     private final ZipCharsetDetector zipCharsetDetector;
@@ -56,6 +64,9 @@ public class ZipArchiveValidator implements Validator {
             errors.reject("zip-archive.unknown.charset.message");
             return;
         }
+        // V1: raw entry names, validated before the zipfs view below normalizes them or fails on them
+        var rawViolations = rawEntryNameViolations(archive, charset);
+        var errorsBefore = errors.getErrorCount(); // V1: the count before the zipfs checks, to tell if they reject
 
         try (FileSystem fs = FileSystems.newFileSystem(ZipUtils.toJarURI(archive),
                 Map.of("encoding", charset.name()))) {
@@ -74,7 +85,16 @@ public class ZipArchiveValidator implements Validator {
                 stream.forEach(path -> validateEntryPath(path, rejectedPaths, errors));
             }
         } catch (IOException e) {
+            // V1: a crafted name that breaks the zipfs view (e.g. a '..' segment) is a path rejection, not a 500.
+            // Unchecked failures are left to propagate: the InvalidPathException of a NUL byte keeps its existing 400
+            if (rejectRawEntryNames(rawViolations, errors)) {
+                return;
+            }
             throw RuntimeExceptionWrapper.wrap(e);
+        }
+        // V1: reported only when the zipfs checks found nothing, so their errors take precedence
+        if (errors.getErrorCount() == errorsBefore) {
+            rejectRawEntryNames(rawViolations, errors);
         }
     }
 
@@ -111,6 +131,122 @@ public class ZipArchiveValidator implements Validator {
                 rejectedPaths.add(path);
             }
         }
+    }
+
+    // V1: not in a dedicated component as the Minimal Change Rule prefers, because surfaces share no path component
+    /**
+     * V1: collects the violations of the raw entry names, read before the zipfs view normalizes them, with
+     * {@code \} read as {@code /} and the trailing {@code /} of a folder entry dropped.
+     *
+     * <p>The zipfs view the other checks walk normalizes a name such as {@code a//x.xlsx} or {@code /etc/x}, and
+     * refuses to open an archive with a {@code .} or {@code ..} segment at all, so a crafted name is never checked
+     * there. Each raw name is therefore run through {@link Repository#validatePath(String)} (absolute paths,
+     * {@code .} and {@code ..} segments, {@code //}), which catches a backslash traversal such as {@code ..\x} as a
+     * {@code ..} segment, and {@link NameChecker#validatePath(String)} (forbidden and control characters, reserved
+     * names, trailing dots and spaces). Names decode with the charset the archive was detected with, as in the zipfs
+     * view. Entries the upload filter drops get the {@link Repository#validatePath(String)} check only: they are never
+     * written, but a {@code .} or {@code ..} segment in one still stops the zipfs view from opening. Reading stops once
+     * {@value #MAX_RAW_VIOLATIONS} distinct violations are collected, because any one of them refuses the archive.
+     *
+     * <p>Private to this validator: V1 allows no path component shared between surfaces, so the upload-project
+     * surface keeps its own path guard.
+     *
+     * @return the distinct violations, each the offending entry as stored in the archive with the reason it is
+     *         rejected for (see {@link #rawEntryNameViolation(String, Exception)}), in the order of the entries, at
+     *         most {@value #MAX_RAW_VIOLATIONS}
+     */
+    private Set<String> rawEntryNameViolations(Path archive, Charset charset) {
+        var violations = new LinkedHashSet<String>();
+        try (var zip = ZipFile.builder()
+                .setPath(archive)
+                .setCharset(charset)
+                .setUseUnicodeExtraFields(false)
+                .get()) {
+            var entries = zip.getEntries();
+            while (entries.hasMoreElements() && violations.size() < MAX_RAW_VIOLATIONS) {
+                var entryName = entries.nextElement().getName(); // V1: kept as stored, to name it in a rejection
+                var name = entryName.replace('\\', '/');
+                // The filter sees the raw name, trailing '/' of a folder entry included, as the other uploaders do.
+                // V1: a dropped entry is never written, yet a '.' or '..' segment in it still breaks the zipfs view
+                var written = zipFilter.accept(name);
+                // Only the '/' that marks a folder entry is dropped: a leading '/' is an absolute name.
+                if (name.endsWith("/")) {
+                    name = name.substring(0, name.length() - 1);
+                }
+                if (name.isEmpty()) {
+                    continue;
+                }
+                try {
+                    Repository.validatePath(name);
+                    // V1: content rules only for a written name, so dropped SVN/CVS metadata is not newly refused
+                    if (written) {
+                        NameChecker.validatePath(name);
+                    }
+                } catch (IOException | IllegalArgumentException e) {
+                    // InvalidPathException, thrown for a traversal or a NUL byte, is an IllegalArgumentException.
+                    // V1: the entry with the bare reason, as the JDK message appends the input after a stray ':'
+                    violations.add(rawEntryNameViolation(entryName, e));
+                }
+            }
+        } catch (IOException e) {
+            throw RuntimeExceptionWrapper.wrap(e);
+        }
+        return violations;
+    }
+
+    /**
+     * V1: one raw entry name violation, for example {@code '../x.xlsx' (The path must be normalized)}.
+     *
+     * <p>The entry is named as stored in the archive, before {@code \} is read as {@code /} or the trailing {@code /}
+     * of a folder entry is dropped, so it reads as the user's own archive lists it. Each control character, a NUL byte
+     * included, is shown escaped, as a backslash, {@code u} and four hexadecimal digits, so no invisible or
+     * terminal-control character reaches the message. The reason is the bare reason of an {@link InvalidPathException},
+     * whose message would repeat the input after a {@code :}, or else the exception message, without its final dot. A
+     * violation without a reason names the entry only.
+     *
+     * @param entryName the entry name as stored in the archive
+     * @param e the exception the name was rejected with
+     * @return the quoted entry name, followed by the reason in parentheses when there is one
+     */
+    private static String rawEntryNameViolation(String entryName, Exception e) {
+        var violation = new StringBuilder(entryName.length() + 2).append('\'');
+        for (var i = 0; i < entryName.length(); i++) {
+            var c = entryName.charAt(i);
+            if (Character.isISOControl(c)) {
+                violation.append("\\u%04X".formatted((int) c));
+            } else {
+                violation.append(c);
+            }
+        }
+        violation.append('\'');
+        var reason = e instanceof InvalidPathException invalidPath ? invalidPath.getReason() : e.getMessage();
+        if (StringUtils.isNotBlank(reason)) {
+            if (reason.endsWith(".")) {
+                reason = reason.substring(0, reason.length() - 1);
+            }
+            violation.append(" (").append(reason).append(')');
+        }
+        return violation.toString();
+    }
+
+    /**
+     * V1: rejects the raw entry name violations with one error, under the key the zipfs view check uses for a name
+     * failure, whose message names every violation: {@code Invalid path inside archive: <violation>.} for one, and
+     * {@code Invalid paths inside archive: <violation>, <violation>.} for several. A single error is answered with its
+     * code and message, which the create-project dialog shows; several errors would only be answered as a list it
+     * does not show.
+     *
+     * @return {@code true} when at least one violation was rejected
+     */
+    private static boolean rejectRawEntryNames(Set<String> violations, Errors errors) {
+        // V1: one error for all violations, so the response keeps the single-error shape the UI renders
+        if (!violations.isEmpty()) {
+            var message = violations.size() == 1
+                    ? "Invalid path inside archive: " + violations.iterator().next() + "."
+                    : "Invalid paths inside archive: " + String.join(", ", violations) + ".";
+            errors.reject("zip-archive.unknown.archive.path.message", new String[]{message}, message);
+        }
+        return !violations.isEmpty();
     }
 
     private boolean validateSignature(Path archive, Errors errors) {

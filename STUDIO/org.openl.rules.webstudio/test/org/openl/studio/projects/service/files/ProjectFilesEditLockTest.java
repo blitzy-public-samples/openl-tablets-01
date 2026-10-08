@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
@@ -246,6 +247,8 @@ class ProjectFilesEditLockTest {
         var tree = new AProjectFolder(new HashMap<>(), mock(AProject.class), null, "");
         when(repoMount.writeFolder()).thenReturn(tree);
         when(repoMount.readFolder(null)).thenReturn(tree);
+        // V1: a mock answers false for the default contains(); this mount holds every path.
+        when(repoMount.contains(anyString())).thenReturn(true);
 
         assertDoesNotThrow(() -> service.createFolder(repoMount, "folder", true));
     }

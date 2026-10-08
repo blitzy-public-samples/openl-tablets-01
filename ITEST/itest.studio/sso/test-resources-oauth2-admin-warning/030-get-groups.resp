@@ -1,0 +1,41 @@
+HTTP/1.1 200
+Content-Type: application/json
+
+{
+  "Administrators": {
+    "id": "*",
+    "privileges": ["ADMIN"],
+    "numberOfMembers": "*"
+  },
+  "Analysts": {
+    "id": "*",
+    "numberOfMembers": "*"
+  },
+  "Deployers": {
+    "id": "*",
+    "numberOfMembers": "*"
+  },
+  "Developers": {
+    "id": "*",
+    "numberOfMembers": "*"
+  },
+  "openl-admin": {
+    "id": "*",
+    "description": "External Group",
+    "privileges": ["ADMIN"],
+    "numberOfMembers": "*"
+  },
+  "openl-ba": {
+    "id": "*",
+    "description": "External Group",
+    "numberOfMembers": "*"
+  },
+  "Testers": {
+    "id": "*",
+    "numberOfMembers": "*"
+  },
+  "Viewers": {
+    "id": "*",
+    "numberOfMembers": "*"
+  }
+}

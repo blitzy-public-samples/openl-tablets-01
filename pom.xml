@@ -95,6 +95,18 @@
              is a required (compile-scope) dependency of spring-ldap-core, not an optional add-on.
              Remove once spring-ldap-core 4.x (requires Spring Framework 7.x) manages a fixed version by default. -->
         <micrometer.version>1.17.1</micrometer.version>
+        <!-- Newer Tomcat than Spring Boot 3.5.16 manages by default (10.1.55), fixing the 14 CVSS >= 7.0 findings
+             dependency-check reports for tomcat-embed-core 10.1.55: CVE-2026-53404, CVE-2026-53434 and
+             CVE-2026-55276 (fixed in 10.1.56); CVE-2026-59083 and CVE-2026-59084 (fixed in 10.1.57); CVE-2026-65182,
+             CVE-2026-65183, CVE-2026-65637, CVE-2026-65905, CVE-2026-65927, CVE-2026-66422, CVE-2026-68525,
+             CVE-2026-68569 and CVE-2026-68763 (fixed in 10.1.58, whose release vote failed, so Maven Central has no
+             10.1.58). 10.1.59 is the lowest release on Maven Central that fixes all fourteen.
+             10.1.59 is itself affected by ten CVSS >= 7.0 advisories that Apache's Tomcat 10 security page lists as
+             fixed in 10.1.60: CVE-2026-75973, CVE-2026-76183, CVE-2026-77762, CVE-2026-77791, CVE-2026-78383,
+             CVE-2026-78437, CVE-2026-79677, CVE-2026-86248, CVE-2026-86350 and CVE-2026-87022. 10.1.60 is the lowest
+             release that fixes all twenty-four.
+             Remove once Spring Boot manages a fixed version by default. -->
+        <tomcat.version>10.1.60</tomcat.version>
 
         <!-- Security -->
         <spring.security.version>6.5.11</spring.security.version>
@@ -128,6 +140,13 @@
         <jackson.version>2.22.3</jackson.version>
         <json-path.version>3.0.0</json-path.version>
         <cxf.version>4.1.8</cxf.version>
+        <!-- Newer than the xmlschema-core 2.3.2 that Apache CXF 4.1.8 manages by default, fixing CVE-2026-102495
+             (unbounded recursion through nested schema imports and includes, CVSS 7.5) and CVE-2026-102496
+             (unbounded recursion through deeply nested schema structures, CVSS 7.5), plus CVE-2026-102497
+             (missing cycle detection in xmlschema-walker, CVSS 7.5), which dependency-check maps onto
+             xmlschema-core. 2.3.3 is the lowest release that fixes all three.
+             Remove once Apache CXF manages xmlschema-core 2.3.3 or later. -->
+        <xmlschema.version>2.3.3</xmlschema.version>
 
         <!-- OpenAPI -->
         <swagger.core.version>2.2.55</swagger.core.version>
@@ -458,6 +477,24 @@
                 <type>pom</type>
                 <scope>import</scope>
             </dependency>
+            <!-- Override the tomcat-embed-* jars that spring-boot-starter-tomcat 3.5.16 requires with a newer release
+                 fixing the Tomcat CVEs above, keeping all three on one version. Remove once Spring Boot manages a
+                 fixed version by default. -->
+            <dependency>
+                <groupId>org.apache.tomcat.embed</groupId>
+                <artifactId>tomcat-embed-core</artifactId>
+                <version>${tomcat.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.tomcat.embed</groupId>
+                <artifactId>tomcat-embed-el</artifactId>
+                <version>${tomcat.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.tomcat.embed</groupId>
+                <artifactId>tomcat-embed-websocket</artifactId>
+                <version>${tomcat.version}</version>
+            </dependency>
             <!-- Spring Security -->
             <dependency>
                 <groupId>org.springframework.security</groupId>
@@ -655,6 +692,13 @@
                 <version>${cxf.version}</version>
                 <type>pom</type>
                 <scope>import</scope>
+            </dependency>
+            <!-- Override the xmlschema-core that cxf-core requires with a newer release fixing CVE-2026-102495,
+                 CVE-2026-102496 and CVE-2026-102497. Remove once Apache CXF manages a fixed version by default. -->
+            <dependency>
+                <groupId>org.apache.ws.xmlschema</groupId>
+                <artifactId>xmlschema-core</artifactId>
+                <version>${xmlschema.version}</version>
             </dependency>
             <dependency>
                 <groupId>jakarta.ws.rs</groupId>
@@ -1993,6 +2037,10 @@
                     <plugin>
                         <groupId>org.owasp</groupId>
                         <artifactId>dependency-check-maven</artifactId>
+                        <!-- V13: fail the build for any dependency finding with CVSS >= 7.0 -->
+                        <configuration>
+                            <failBuildOnCVSS>7.0</failBuildOnCVSS>
+                        </configuration>
                         <executions>
                             <execution>
                                 <goals>

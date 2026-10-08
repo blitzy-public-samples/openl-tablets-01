@@ -4,6 +4,7 @@ import static org.openl.rules.repository.api.Repository.validatePath;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.nio.file.Path;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
@@ -25,6 +26,7 @@ import org.openl.rules.repository.api.Pageable;
 import org.openl.rules.repository.api.Repository;
 import org.openl.rules.repository.api.SearchableRepository;
 import org.openl.rules.repository.api.UserInfo;
+import org.openl.rules.repository.file.FileSystemRepository;
 
 /**
  * A wrapper class to check arguments against path traversal vulnerability in the Repository API.
@@ -248,6 +250,35 @@ public class PathCheckedRepository implements BranchRepository {
         if (!((BranchRepository) delegate).isValidBranchName(branch)) {
             throw new IllegalArgumentException("Invalide branch name");
         }
+    }
+
+    // V1: lets path-containment checks find a file repository's root behind this wrapper
+    /**
+     * Root directory of the wrapped repository, when that repository keeps its content in a local directory.
+     *
+     * <p>Only the root is revealed, never the wrapped repository itself, so every read and write still passes the
+     * path checks of this wrapper. Callers use the root to compare a path's real location with its lexical one.
+     *
+     * @return the configured root of a wrapped {@link FileSystemRepository}, or {@code null} for any other backend
+     */
+    public @Nullable Path getLocalRoot() {
+        return delegate instanceof FileSystemRepository fileSystem ? fileSystem.getRoot() : null;
+    }
+
+    // V1: lets the archive upload check find the working tree a Git repository writes saved files through
+    /**
+     * Working tree of the wrapped repository, when that repository writes the files it saves under a local
+     * directory before it records them.
+     *
+     * <p>Only the directory is revealed, never the wrapped repository itself, so every read and write still passes
+     * the path checks of this wrapper. Callers use the directory to compare a path's real location with its
+     * lexical one.
+     *
+     * @return the working tree of a wrapped {@link LocalWorkingTree}, or {@code null} for any other backend or
+     *         when the wrapped repository is not initialized
+     */
+    public @Nullable Path getLocalWorkingTree() {
+        return delegate instanceof LocalWorkingTree tree ? tree.getLocalWorkingTree() : null;
     }
 
 }

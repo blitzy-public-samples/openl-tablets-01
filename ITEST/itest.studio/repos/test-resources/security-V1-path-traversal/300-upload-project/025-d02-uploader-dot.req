@@ -1,0 +1,16 @@
+PUT /rest/repos/design-flat/projects/SecV1D02Upl?status=CLOSED HTTP/1.1
+Authorization: ${ADMIN_AUTH_TOCKEN}
+Content-Type: multipart/form-data; boundary=WebKitFormBoundary7MA4YWxkTrZu0gW
+
+--WebKitFormBoundary7MA4YWxkTrZu0gW
+Content-Disposition: form-data; name="template"; filename="readme.txt"
+Content-Type: text/plain
+
+security V1 upload probe
+--WebKitFormBoundary7MA4YWxkTrZu0gW
+Content-Disposition: form-data; name="template"; filename="d02-dot.zip"
+Content-Transfer-Encoding: binary
+Content-Type: application/zip
+
+&d02-dot.zip
+--WebKitFormBoundary7MA4YWxkTrZu0gW--

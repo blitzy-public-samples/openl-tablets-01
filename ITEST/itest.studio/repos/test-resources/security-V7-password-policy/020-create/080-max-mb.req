@@ -1,0 +1,14 @@
+PUT /rest/users HTTP/1.1
+Authorization: ${ADMIN_AUTH_TOCKEN}
+Content-Type: application/json; charset=UTF-8
+
+{
+  "displayName": "v7_create_max_mb",
+  "username": "v7_create_max_mb",
+  "internalPassword": {
+    "password": "${V7_MAX_MB}"
+  },
+  "firstName": "V7",
+  "lastName": "Create",
+  "email": "v7_create_max_mb@email"
+}

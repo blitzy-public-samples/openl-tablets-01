@@ -1,6 +1,7 @@
 package org.openl.studio.projects.service.project.changes;
 
 import java.io.IOException;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -18,9 +19,11 @@ import org.springframework.stereotype.Service;
 import org.openl.rules.project.abstraction.RulesProject;
 import org.openl.rules.repository.api.FileData;
 import org.openl.rules.repository.api.FileItem;
+import org.openl.rules.repository.api.Repository;
 import org.openl.studio.projects.model.project.status.ChangeType;
 import org.openl.studio.projects.model.project.status.FileChange;
 import org.openl.studio.projects.model.project.status.PendingChanges;
+import org.openl.studio.projects.service.files.FileRoot;
 
 /**
  * Diffs the local working copy against the design revision the project is opened on.
@@ -75,7 +78,11 @@ public class PendingChangesResolverImpl implements PendingChangesResolver {
         var projectPath = normalize(project.getRealPath());
         var localRepository = project.getLocalRepository();
         var localPrefix = project.getLocalFolderName() + "/";
-        var localFiles = localRepository.list(localPrefix);
+        // V1: a working-copy link leading out of the project folder is not a project file, as in the Files tree
+        var localFiles = contained(localRepository.list(localPrefix),
+                localPrefix,
+                localRepository,
+                project.getLocalFolderName());
 
         if (project.isLocalOnly()) {
             // No design counterpart yet; every local file is a new addition.
@@ -103,6 +110,8 @@ public class PendingChangesResolverImpl implements PendingChangesResolver {
         var designFiles = designRepository.supports().versions() && historyVersion != null
                 ? designRepository.listFiles(designPrefix, historyVersion)
                 : designRepository.list(designPrefix);
+        // V1: a design link leading out of the project folder is not copied on open, so it is not reported deleted
+        designFiles = contained(designFiles, designPrefix, designRepository, projectPath);
 
         var designByPath = indexByProjectScopedPath(designFiles, designPrefix, projectPath);
         var visitedDesign = new HashSet<String>();
@@ -246,5 +255,49 @@ public class PendingChangesResolverImpl implements PendingChangesResolver {
 
     private static String normalize(String path) {
         return path == null ? "" : path.replace('\\', '/');
+    }
+
+    // V1: the entries a file-backed repository lists whose real location stays inside their project folder
+    /**
+     * Keeps the entries whose real location stays inside the project folder, when the repository is file-backed.
+     *
+     * <p>The project folder is the folder resolved lexically under the repository's real root, so a folder that is
+     * itself a link keeps no entry. An entry is kept when its name lies under the prefix and its real location, links
+     * inside the folder followed, stays inside the folder: a link to another project or outside, or to nothing, is
+     * left out. A repository that is not file-backed, such as Git or JDBC, keeps every entry and is not touched on
+     * disk.
+     *
+     * <p>The real locations are resolved once per listing, through {@link FileRoot#resolvesInside(Path, String, Map)}:
+     * the project folder is resolved once, each entry below it is read once without following a link at its end, and
+     * only links are resolved. The verdicts are those of {@link FileRoot#resolvesInside(Path, String)}.
+     *
+     * @param files      the entries the repository lists under the prefix
+     * @param prefix     the folder path the entries are listed under, ending with a slash
+     * @param repository the repository the entries are listed from, possibly wrapped
+     * @param folder     the project folder relative to the repository root
+     * @return the entries that stay inside the project folder
+     */
+    private static List<FileData> contained(List<FileData> files, String prefix, Repository repository, String folder) {
+        var anchor = FileRoot.localRoot(repository);
+        if (anchor.isEmpty()) {
+            return files;
+        }
+        Path boundary;
+        try {
+            boundary = anchor.get().resolve(folder.replaceAll("^/+|/+$", "")).normalize();
+        } catch (IllegalArgumentException e) {
+            // V1: a folder that is not a valid path keeps no entry
+            return List.of();
+        }
+        if (!boundary.startsWith(anchor.get())) {
+            return List.of();
+        }
+        // V1: the checks of one listing share the real locations they resolve, so each entry costs one read
+        var realLocations = new HashMap<Path, Path>();
+        return files.stream().filter(file -> {
+            var name = normalize(file.getName());
+            return name.startsWith(prefix)
+                    && FileRoot.resolvesInside(boundary, name.substring(prefix.length()), realLocations);
+        }).toList();
     }
 }

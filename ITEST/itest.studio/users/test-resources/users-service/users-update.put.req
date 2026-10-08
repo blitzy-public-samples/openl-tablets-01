@@ -1,10 +1,10 @@
 PUT /rest/users/jsmith HTTP/1.1
-Authorization: Basic YWRtaW46YWRtaW4=
+Authorization: ${ADMIN_AUTH_TOCKEN}
 Content-Type: application/json
 
 {
   "displayName": "js",
-  "password": "pass2",
+  "password": "${JSMITH_PASSWORD_2}",
   "firstName": "J",
   "lastName": "S",
   "email": "js@email"

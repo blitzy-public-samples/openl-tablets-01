@@ -8,6 +8,10 @@
         <constructor-arg name="propertyResolver" ref="environment"/>
         <constructor-arg name="designTimeRepository" ref="designTimeRepository"/>
         <property name="enableLocks" value="#{'${user.mode}' != 'single'}"/>
+        <!-- V1: NameChecker-backed user-id check for workspace folders (module cycle prevents a direct import) -->
+        <property name="folderNameCheck">
+            <bean class="org.openl.rules.webstudio.security.WorkspaceFolderNameCheck"/>
+        </property>
     </bean>
 
     <bean id="designTimeRepository" class="org.openl.rules.webstudio.security.SecureDesignTimeRepositoryImpl">

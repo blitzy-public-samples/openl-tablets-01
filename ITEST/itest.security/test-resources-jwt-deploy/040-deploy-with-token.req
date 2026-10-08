@@ -1,0 +1,5 @@
+POST /admin/deploy HTTP/1.1
+Content-Type: application/zip
+Authorization: Bearer ${JWT_TOKEN}
+
+&rules-to-deploy.zip

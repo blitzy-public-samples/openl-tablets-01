@@ -1,0 +1,14 @@
+HTTP/1.1 400
+Content-Type: application/json
+
+{
+  "message": "Bad Request",
+  "fields": [
+    {
+      "code": "openl.error.ProjectNameConstraint",
+      "field": "projectName",
+      "rejectedValue": "CON",
+      "message": "The specified project name is a reserved word."
+    }
+  ]
+}

@@ -230,6 +230,7 @@ public class ZipFileProjectCreator extends AProjectCreator {
      * Adds the incorrect names the entry carries: the name of a file, or the names of the folders of a folder.
      */
     private static void addIncorrectNames(ZipEntry item, List<String> invalidNames) {
+        int before = invalidNames.size();
         if (!item.isDirectory()) {
             String name = FileUtils.getName(item.getName());
 
@@ -244,6 +245,27 @@ public class ZipFileProjectCreator extends AProjectCreator {
                     invalidNames.add(folderName);
                 }
             }
+        }
+        // V1: the whole entry name, not only each of its segments, must also be a valid relative path.
+        if (invalidNames.size() == before && !isValidEntryPath(item.getName())) {
+            invalidNames.add(item.getName());
+        }
+    }
+
+    /**
+     * V1 surface D entry check: the full entry name must pass {@link Repository#validatePath(String)} and
+     * {@link NameChecker#validatePath(String)}.
+     */
+    private static boolean isValidEntryPath(String name) {
+        if (name == null || name.isEmpty()) {
+            return false;
+        }
+        try {
+            Repository.validatePath(name);
+            NameChecker.validatePath(name);
+            return true;
+        } catch (IOException | IllegalArgumentException e) {
+            return false;
         }
     }
 }

@@ -1,0 +1,22 @@
+PUT /rest/repos/design-non-flat/projects/SecV1C10Embed?status=CLOSED&path=SecV1C10Em%07x HTTP/1.1
+Authorization: ${ADMIN_AUTH_TOCKEN}
+Content-Type: multipart/form-data; boundary=WebKitFormBoundary7MA4YWxkTrZu0gW
+
+--WebKitFormBoundary7MA4YWxkTrZu0gW
+Content-Disposition: form-data; name="templateType"
+
+predefined
+--WebKitFormBoundary7MA4YWxkTrZu0gW
+Content-Disposition: form-data; name="templateCategory"
+
+templates
+--WebKitFormBoundary7MA4YWxkTrZu0gW
+Content-Disposition: form-data; name="templateName"
+
+Sample Project
+--WebKitFormBoundary7MA4YWxkTrZu0gW
+Content-Disposition: form-data; name="comment"
+
+EPBDS-0000 Security path check
+--WebKitFormBoundary7MA4YWxkTrZu0gW--
+

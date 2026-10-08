@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -224,6 +225,8 @@ class ProjectDescriptorWriteValidationTest {
         var tree = new AProjectFolder(new HashMap<>(), mock(AProject.class), repository, "");
         when(repoMount.writeFolder()).thenReturn(tree);
         when(repoMount.readFolder(null)).thenReturn(tree);
+        // V1: a mock answers false for the default contains(); this mount holds every path.
+        when(repoMount.contains(anyString())).thenReturn(true);
         when(repository.save(any(FileData.class), any(InputStream.class))).thenReturn(new FileData());
 
         assertDoesNotThrow(() -> service.createResource(repoMount, ProjectDescriptor.FILE_NAME,

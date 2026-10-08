@@ -1,5 +1,5 @@
 PUT /rest/acls/repositories/REVTSUdOOmRlc2lnbg==?principal=true&sid=EPBDS_14670 HTTP/1.1
-Authorization: Basic RVBCRFNfMTQ2NzA6RVBCRFNfMTQ2NzA=
+Authorization: ${EPBDS_14670_BASIC}
 Content-Type: application/json
 
 {

@@ -1,0 +1,14 @@
+PUT /rest/users HTTP/1.1
+Authorization: ${ADMIN_AUTH_TOCKEN}
+Content-Type: application/json
+
+{
+  "displayName": "Audit Basic",
+  "username": "audit_basic",
+  "internalPassword": {
+    "password": "${AUDIT_BASIC_PASSWORD}"
+  },
+  "firstName": "Audit",
+  "lastName": "Basic",
+  "email": "audit_basic@email"
+}

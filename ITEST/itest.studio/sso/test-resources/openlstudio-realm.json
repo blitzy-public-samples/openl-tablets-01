@@ -580,7 +580,7 @@
       "credentials": [
         {
           "type": "password",
-          "value": "admin"
+          "value": "${ITEST_PASSWORD_ADMIN}"
         }
       ],
       "disableableCredentialTypes": [],
@@ -605,7 +605,7 @@
       "credentials": [
         {
           "type": "password",
-          "value": "user1"
+          "value": "${ITEST_PASSWORD_USER1}"
         }
       ],
       "disableableCredentialTypes": [],
@@ -630,7 +630,7 @@
       "credentials": [
         {
           "type": "password",
-          "value": "guest"
+          "value": "${ITEST_PASSWORD_GUEST}"
         }
       ],
       "disableableCredentialTypes": [],
@@ -675,7 +675,7 @@
       "credentials": [
         {
           "type": "password",
-          "value": "epbds12973_deployer",
+          "value": "${ITEST_PASSWORD_EPBDS12973_DEPLOYER}",
           "temporary": false
         }
       ],
@@ -693,7 +693,7 @@
       "credentials": [
         {
           "type": "password",
-          "value": "epbds12973_editor",
+          "value": "${ITEST_PASSWORD_EPBDS12973_EDITOR}",
           "temporary": false
         }
       ],
@@ -711,7 +711,7 @@
       "credentials": [
         {
           "type": "password",
-          "value": "epbds12973_viewer",
+          "value": "${ITEST_PASSWORD_EPBDS12973_VIEWER}",
           "temporary": false
         }
       ],
@@ -729,7 +729,7 @@
       "credentials": [
         {
           "type": "password",
-          "value": "epbds14584_manager",
+          "value": "${ITEST_PASSWORD_EPBDS14584_MANAGER}",
           "temporary": false
         }
       ],
@@ -747,7 +747,7 @@
       "credentials": [
         {
           "type": "password",
-          "value": "epbds14584_contributor",
+          "value": "${ITEST_PASSWORD_EPBDS14584_CONTRIBUTOR}",
           "temporary": false
         }
       ],
@@ -765,7 +765,7 @@
       "credentials": [
         {
           "type": "password",
-          "value": "epbds14584_viewer",
+          "value": "${ITEST_PASSWORD_EPBDS14584_VIEWER}",
           "temporary": false
         }
       ],
@@ -783,7 +783,7 @@
       "credentials": [
         {
           "type": "password",
-          "value": "epbds14670_manager",
+          "value": "${ITEST_PASSWORD_EPBDS14670_MANAGER}",
           "temporary": false
         }
       ],
@@ -801,7 +801,7 @@
       "credentials": [
         {
           "type": "password",
-          "value": "epbds14670_contributor",
+          "value": "${ITEST_PASSWORD_EPBDS14670_CONTRIBUTOR}",
           "temporary": false
         }
       ],
@@ -819,7 +819,7 @@
       "credentials": [
         {
           "type": "password",
-          "value": "epbds14670_viewer",
+          "value": "${ITEST_PASSWORD_EPBDS14670_VIEWER}",
           "temporary": false
         }
       ],
@@ -837,7 +837,7 @@
       "credentials": [
         {
           "type": "password",
-          "value": "epbds14670r_manager",
+          "value": "${ITEST_PASSWORD_EPBDS14670R_MANAGER}",
           "temporary": false
         }
       ],
@@ -855,7 +855,7 @@
       "credentials": [
         {
           "type": "password",
-          "value": "epbds14670r_contributor",
+          "value": "${ITEST_PASSWORD_EPBDS14670R_CONTRIBUTOR}",
           "temporary": false
         }
       ],
@@ -873,7 +873,7 @@
       "credentials": [
         {
           "type": "password",
-          "value": "epbds14670r_viewer",
+          "value": "${ITEST_PASSWORD_EPBDS14670R_VIEWER}",
           "temporary": false
         }
       ],
@@ -891,7 +891,7 @@
       "credentials": [
         {
           "type": "password",
-          "value": "epbds15131_admin",
+          "value": "${ITEST_PASSWORD_EPBDS15131_ADMIN}",
           "temporary": false
         }
       ],
@@ -909,7 +909,7 @@
       "credentials": [
         {
           "type": "password",
-          "value": "epbds15134_user",
+          "value": "${ITEST_PASSWORD_EPBDS15134_USER}",
           "temporary": false
         }
       ],
@@ -925,7 +925,7 @@
       "credentials": [
         {
           "type": "password",
-          "value": "epbds15621_user",
+          "value": "${ITEST_PASSWORD_EPBDS15621_USER}",
           "temporary": false
         }
       ],
@@ -1179,7 +1179,7 @@
       "enabled": true,
       "alwaysDisplayInConsole": false,
       "clientAuthenticatorType": "client-secret",
-      "secret": "kXo86nuTdOYQzPZ7k09G7vQmqeDNNZoM",
+      "secret": "${ITEST_CLIENT_SECRET}",
       "redirectUris": [
         "",
         "*"
@@ -2093,88 +2093,6 @@
         "config": {
           "max-clients": [
             "200"
-          ]
-        }
-      }
-    ],
-    "org.keycloak.keys.KeyProvider": [
-      {
-        "id": "bd299200-3e59-452d-8bac-53ea96f2633c",
-        "name": "rsa-generated",
-        "providerId": "rsa-generated",
-        "subComponents": {},
-        "config": {
-          "privateKey": [
-            "MIIEpAIBAAKCAQEAoCqp1Rep86suOGz7gs3RPFGEm4az8VhlWjfoIQeHyklj8wYZ5D5mxvl7NOmXWuAL8pgcJbamVuMUSwgnjoIpgPlFpjxvadPGaPMqrNQpcX/oZvxwW5fmsJeMnkIgdr2LcRgOCzLZ/U3BMFvusMD4CgluaipwQt5Zw+MhED9WC7w75jdnhpevdgVpp7s38xviWogWQfNCO4yenVzRFM/HmEIsMPL+vr/RQW9o6Wi6mfhzAoOQBBJbsfSZdm802dUXlYiNdYAVjZvj1KhRoPWbTu+7LWcPbYSne0Olx2HAo0Ro140ERyG3zNb6u2cIHVpCiZNtCwf2K3pT7UrOikhz+QIDAQABAoIBABWVdOo01H/0FeLKuktn8Ftq4i48moEv7VtED3HBXF45QlEyBZ6JfjuFdpdXJ0C60pawQugeKLpVbZr9j/8XW//NF8K4KuIdr4OIdBFy9zFxZYsuAkza4olHqE58u3fk69FOHDkMHZjnYoe2y9VhRnZry50I97SQgZOb8bezy/pWqTvorELG4C/K6odbHw2e3VNFX6AgAfFB5VTtabBjL1IcKhmXMUGV9QPAE5y+TpbWlPJhS8TdhdokC148olNw5365HinW8ZD2NrDcOMcikNUFA+6/GCCcegnrYhfgsip02dGK6KumN8lhOGpXESDr0gjtGORzsWayCnBwR9ixxwUCgYEAztwD3cxYjZOLoKq3ns3Tn/qA2sky6iHGEzcGUMn3QPeHdEHd5F2u3/q6OhJH6Ha5OrhgioYpQNBWwJUyRtMLlkUuYTZJx6b5gyp6ZP/5QIWrF/ARX/F2u07eotnEoIHeBS62KgtX0Z7y/4fPdyJuBiKA77Czu1qipkZIlhN8O18CgYEAxjcQzCba/o9DChgRlj6q0Lb3wafRIBw3EqCbve7u1a9h7SuKPgoDY2oi6m1yBaIMeHePuf8TeOd+hGoVbI99rZPamykaFqytWDfFlUM2vA7Uqe7HvePKIg7EiBXGpwKng6PBVB2d6fCaXvKPpij5bRaQHPnOVdHuYW7F65A156cCgYEAyEp/8+JIW8zhBVBHOpxQrDYBTdZCVjEdeL1ugAsOPPlvTkH4d4W+LWC3sELDHXLXJuQflgERMJCJby8G30y5i2aw4a+PAKHMNhSLLgArdy3129e2+w7xx6s2Jrh0inU0ZBA2kb8p6O3em00EtHXB0m7WKT8Ox/maQyUKY0W6pEECgYB+YLOUBp4QOdVbhTcJXVFZm57h2Rar63Ftrfs+oS2kDptYNS+CGK5KX2x9nWRalRRwZoK76xdGOgrfcCfSvLY7yo5R6WXZ2ST4ny6Z2W33f1k2M6kkuCyzhEjoH0I2T6nwc6Ma93ssohw6t1rBbVSCqiUeZGObMitT8eW9KIhF9wKBgQCldW0bTbSGMVBZHjZBolrWXvNH8bZ741LeIrm+KrYDYB1M/hB/I2Sv+6zhd79RVl4630GSz4+cnYhmQZx7m5Xmq3W3DkxxSXUpr0QqZTYcX76uoZnjw64MQ3pqJof611E60mihvK5D/HEckxJmd3aSZqokLX9FdGvCqaCDD9H2/Q=="
-          ],
-          "keyUse": [
-            "SIG"
-          ],
-          "certificate": [
-            "MIICpTCCAY0CBgGPvvSgVzANBgkqhkiG9w0BAQsFADAWMRQwEgYDVQQDDAtvcGVubHN0dWRpbzAeFw0yNDA1MjgxMTI1NTNaFw0zNDA1MjgxMTI3MzNaMBYxFDASBgNVBAMMC29wZW5sc3R1ZGlvMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAoCqp1Rep86suOGz7gs3RPFGEm4az8VhlWjfoIQeHyklj8wYZ5D5mxvl7NOmXWuAL8pgcJbamVuMUSwgnjoIpgPlFpjxvadPGaPMqrNQpcX/oZvxwW5fmsJeMnkIgdr2LcRgOCzLZ/U3BMFvusMD4CgluaipwQt5Zw+MhED9WC7w75jdnhpevdgVpp7s38xviWogWQfNCO4yenVzRFM/HmEIsMPL+vr/RQW9o6Wi6mfhzAoOQBBJbsfSZdm802dUXlYiNdYAVjZvj1KhRoPWbTu+7LWcPbYSne0Olx2HAo0Ro140ERyG3zNb6u2cIHVpCiZNtCwf2K3pT7UrOikhz+QIDAQABMA0GCSqGSIb3DQEBCwUAA4IBAQAR2+J6oyxHiL4SMuJ3yibqxN8WARugMh/FcjVJ5qX799LD7eMbjyGzYlqOTb4T/OodI4GygUrwLsqJ+AyQOpwTRXbW1pxn09WDd+AYbtggztoekNTIYFfWUm2iplycIECutiRCy3FulXOxlcmUsIP6IRhjrl/qz50q5/UrnHwLFVQY57ugz0PDi8NGl7bWyv7sN4ZItIC4sLzbtjCjkjZpfvzUgWtlXVH5QVqt7DS5C6GD9rlnNF4vPEv1LaTJ8b4PSzLI4a7WZL3ASv4jWjXwyP+OrVGYxEKHPjI1Dj7+/b+lzqDiDsnoLIsVPM3xY7a4VAJfeett0I8A4YgnJA5B"
-          ],
-          "priority": [
-            "100"
-          ]
-        }
-      },
-      {
-        "id": "98c56f42-db4b-4036-a4af-559cfbe372e3",
-        "name": "hmac-generated-hs512",
-        "providerId": "hmac-generated",
-        "subComponents": {},
-        "config": {
-          "kid": [
-            "e4670e28-cca1-4514-9b6d-7885e69218d7"
-          ],
-          "secret": [
-            "uatBNL7iox6QihRhnM8utyNX9qiG2MslTFAB--DjuPrSQGe9wv-n1TmVlHe0Nywk7vMDaX7SaBWwqav5W-QWp8q4enouTqWjkKRAq7EAssLJG-dKHlX1lxwM9gWUpdHHxcgloYCRinmPUvTmVoFct9Bh2JYDbNDxh2KwMYCvYFM"
-          ],
-          "priority": [
-            "100"
-          ],
-          "algorithm": [
-            "HS512"
-          ]
-        }
-      },
-      {
-        "id": "b8a9af82-1e12-40a7-afca-3b93cd42002c",
-        "name": "aes-generated",
-        "providerId": "aes-generated",
-        "subComponents": {},
-        "config": {
-          "kid": [
-            "f44c0f48-b0ab-4e6a-a454-661f13f864da"
-          ],
-          "secret": [
-            "o7ra0UKAnpDhQAW6Fybfnw"
-          ],
-          "priority": [
-            "100"
-          ]
-        }
-      },
-      {
-        "id": "dd5ee50f-c117-43c9-8afd-00c67f559f81",
-        "name": "rsa-enc-generated",
-        "providerId": "rsa-enc-generated",
-        "subComponents": {},
-        "config": {
-          "privateKey": [
-            "MIIEogIBAAKCAQEAubNAUdbw+IM80RC3J6Pd60GjjTxBl8zUEHncb2aX5JXprpub8ATu1XatL3SixQsFctS9xuOrmKNxQTkjzioaMxNqCjNcc7VjfG8FKCR3xABiqkSGR+lnqnMbOEGD9nKUrxVyL/pQh+FqlmUDrfmYs5tM+9dTKM5vcoTRdbpaPk+B/G6a2eA4g2nsoLEG5vF3K7GczAB4wXpVtyHwdiacPWKXkgmzXsizaEYTlScZuFggGrSQlxG3wBSvIEHQ/OjvnG6qr+BfmvQ8S7a2KsvxR5JUeUD7OqTlWiu0Fv8cPR7zhmJk3llKsxO/oRRLzle5F1TCUgMxsj8KiRb3AMOQmQIDAQABAoIBADiWkhweVtI0E91VraqLuf2NxAwu94INrfXTXMQpzFGhCVPnIW7T4f/0qTPT5CINiLyEbcxk5o6eB84rXmjd1ZwI54ByRFMSTF3H6xdffYuh3m8qcI0LaEa9yuaquE7qfbqY23IZYl715ygrYiKq88iPo7b+192Qgs+v/7BTeFqSFJXq+cZBkqbX+YGyZRMdcTsFQP7ZRf4VPs0tJrH/pNlJ+S1QVmtMBXu7NZOvST9hRrvTCx33kaWpubllIqTZrddE0WlvOhP43P2HCdKDjsDie+qNHJT5a2RAb5zJVY11zsifOMThHWM0NCSF6loWsJZ44e/5kiBcBhqI53ee2W0CgYEA7bJBOstTbMKkhExM9dS2wfEZrBk0gHL/cyoo7jANpDVbhKe45g93lXuJ/XM15KoWMW5tL24oxOtV1A4r3iBs+/DbAFA22K21lYl/Dv0rBRAzG76VXN9aXRHITIbRET8RF2tH5C4k75FZfTloIKOr44rd2aRiyGOmtoMdNU0JBRsCgYEAx//9J9goASmoV+M6yzQQU0NoEAaWokN9zyAHM2FBekGZIr4ZBNg5/rbzrT1MgIkrE0gUK4bV9NPoVOwu14T3sZDAe7/OZkm+kY084Of0aCC+fexn+SMBNJGcOyghz0Xy8AiEObKaY3WxzriBe/zh+KGOz3C0x17l+i77b5RYQFsCgYBijcc3/nfvn2ChLhW20+SW00WmsqivHX9HG9Lut2PgkvMINJaYZQ9bHmbffHZ7Af7Drhp9UPp8c2sZympr5hvp9jqHjbq/6n5gqyrQZy4AInBeb430fPM1pZrcCAYFVZXblPKw7GUKI8TsA/Jlnhc1+Cz2AY+nsJG+GOzyXaeAwwKBgHdpDuQwOcpf7ePzhpH2ltyvvTz8QgnFlCMLc2Eo6ygsbFsC9vsegpni7+B6XefMfgx4F5rZWXtg3jF+BoWlHSJGU7ZPEdOeqgpLMpLxyso06qdSc82bKcgSPB5R2sXfdKn927x7N5S0m6HaJW060kxZYWPXXgg/T74tOPAouPxLAoGABF2Me6WRcRU6jeme66d5And319G/ZCj+ZPA1WpOONM1wGYbiw7FZA9s3fusi69E2Oz74im7AJHfTqZ8pAPbtdfgbylkzTSh8MpE3cmiL1ZY5WyaLk2kgCMolvJznZ1np/BohXw+cS1m7atmYZbl4DE9xOlFeGO/GRY3h9Wa+ldg="
-          ],
-          "keyUse": [
-            "ENC"
-          ],
-          "certificate": [
-            "MIICpTCCAY0CBgGPvvShgzANBgkqhkiG9w0BAQsFADAWMRQwEgYDVQQDDAtvcGVubHN0dWRpbzAeFw0yNDA1MjgxMTI1NTRaFw0zNDA1MjgxMTI3MzRaMBYxFDASBgNVBAMMC29wZW5sc3R1ZGlvMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAubNAUdbw+IM80RC3J6Pd60GjjTxBl8zUEHncb2aX5JXprpub8ATu1XatL3SixQsFctS9xuOrmKNxQTkjzioaMxNqCjNcc7VjfG8FKCR3xABiqkSGR+lnqnMbOEGD9nKUrxVyL/pQh+FqlmUDrfmYs5tM+9dTKM5vcoTRdbpaPk+B/G6a2eA4g2nsoLEG5vF3K7GczAB4wXpVtyHwdiacPWKXkgmzXsizaEYTlScZuFggGrSQlxG3wBSvIEHQ/OjvnG6qr+BfmvQ8S7a2KsvxR5JUeUD7OqTlWiu0Fv8cPR7zhmJk3llKsxO/oRRLzle5F1TCUgMxsj8KiRb3AMOQmQIDAQABMA0GCSqGSIb3DQEBCwUAA4IBAQA8p/gyBBvn5R1efxNTLNPBzCC6I3zzqFxvxraXvG1pkFOtreRE8aG3GHAl+aBEXTUDRqTPBgJC2clW+j+UZjWyfpjqe9WZsAnYN0iIj6x4sc5hdn0um3mOLk64CvKBA99hoUPCtNOeTE1xp/Hh28s3PljTAwFDiCqcf5BjkkijgWe/ngZV4IPVsQ4NsJfj4Fvg2gHvgVZwjbfHgB389Qgp6K78o1dfLh9130Ota2LZ+kvpcZMxtNH/9BdAczrpBOi7LUlJBRLB2oS8JtaIrIoSZlYHVjaGWSby0S4N4ikMZzVksSuZPc131Ej6//3QTB8Zqk9bfF6V9KJS9oblzcBU"
-          ],
-          "priority": [
-            "100"
-          ],
-          "algorithm": [
-            "RSA-OAEP"
           ]
         }
       }

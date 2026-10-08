@@ -8,11 +8,18 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.IOException;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
+import java.util.Arrays;
+import java.util.Set;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junitpioneer.jupiter.StdErr;
+import org.junitpioneer.jupiter.StdIo;
+import org.mockito.Mockito;
+import org.mockito.stubbing.Answer;
 
 import org.openl.rules.project.impl.local.MetainfoRegistry;
 
@@ -214,6 +221,152 @@ class MigratorWorkspaceTest {
         assertTrue(Files.exists(unsaved), "Uncommitted work in a converted folder must be kept.");
         assertNotNull(MetainfoRegistry.open(userDir).get("Linked"),
                 "The converted project keeps its registry record.");
+    }
+
+    // V1: a .version file that is not valid UTF-8 is unreadable, so its project gets no record and keeps its files.
+    @Test
+    @StdIo
+    void unreadableVersionGetsNoRecord(StdErr err) throws IOException {
+        var studioProps = createProject("Unreadable").resolve(".studioProps");
+        Files.createDirectories(studioProps);
+        var version = Files.write(studioProps.resolve(".version"), INVALID_UTF_8);
+
+        Migrator.migrateUserWorkspacesToMetainfoRegistry(workspacesRoot);
+
+        assertFalse(MetainfoRegistry.exists(userDir, "Unreadable"), "An unreadable .version gives no record.");
+        assertTrue(Files.isRegularFile(version), "The unreadable legacy metainfo is kept.");
+        assertLogged(err, "The '" + version + "' file is unreadable.");
+    }
+
+    // V1: a file-properties entry that is unreadable or has no modification time gets no baseline; the others do.
+    @Test
+    @StdIo
+    void unusableFilePropertiesEntriesAreSkipped(StdErr err) throws IOException {
+        var studioProps = createProject("Partial").resolve(".studioProps");
+        var fileProperties = studioProps.resolve("file-properties").resolve("rules");
+        Files.createDirectories(fileProperties);
+        Files.writeString(studioProps.resolve(".version"), """
+                repository-id=design
+                version=rev-1
+                """);
+        Files.writeString(fileProperties.resolve("Main.xlsx"), """
+                unique-id=9f3c1a7e
+                size=54321
+                modified-at-long=1751979000000
+                """);
+        var unreadable = Files.write(fileProperties.resolve("Unreadable.xlsx"), INVALID_UTF_8);
+        Files.writeString(fileProperties.resolve("Undated.xlsx"), """
+                unique-id=1b2c3d4e
+                size=10
+                """);
+
+        Migrator.migrateUserWorkspacesToMetainfoRegistry(workspacesRoot);
+
+        var metainfo = MetainfoRegistry.open(userDir).get("Partial");
+        assertNotNull(metainfo);
+        assertEquals(Set.of("/rules/Main.xlsx"), metainfo.files().keySet(),
+                "Only the readable baseline with a size and a modification time is kept.");
+        assertLogged(err, "The '" + unreadable + "' file properties are unreadable and are skipped.");
+    }
+
+    // V1: a record that cannot be stored, because .metainfo is a regular file, leaves the legacy metainfo in place.
+    @Test
+    @StdIo
+    void projectWhoseRecordCannotBeStoredKeepsItsLegacyMetainfo(StdErr err) throws IOException {
+        var project = createProject("Blocked");
+        var studioProps = project.resolve(".studioProps");
+        Files.createDirectories(studioProps);
+        Files.writeString(studioProps.resolve(".version"), """
+                repository-id=design
+                version=rev-1
+                """);
+        Files.createDirectories(project.resolve(".history").resolve("Main.xlsx"));
+        var metainfoFile = Files.writeString(userDir.resolve(MetainfoRegistry.METAINFO_FOLDER), "not a folder");
+
+        Migrator.migrateUserWorkspacesToMetainfoRegistry(workspacesRoot);
+
+        assertEquals("not a folder", Files.readString(metainfoFile), "The conflicting .metainfo file is untouched.");
+        assertTrue(Files.isRegularFile(studioProps.resolve(".version")), "The legacy metainfo is kept.");
+        assertTrue(Files.isDirectory(project.resolve(".history")), "The in-project edit history is kept.");
+        assertLogged(err, "Migration of the 'Blocked' project metainfo failed.");
+    }
+
+    // V1: a missing workspace root means there is nothing to convert, and the root is not created.
+    @Test
+    void missingWorkspacesRootIsIgnored() {
+        var missing = workspacesRoot.resolve("missing");
+
+        Migrator.migrateUserWorkspacesToMetainfoRegistry(missing);
+
+        assertFalse(Files.exists(missing, LinkOption.NOFOLLOW_LINKS), "A missing workspace root is not created.");
+    }
+
+    // V1: a user folder that cannot be listed is logged and left as it is.
+    @Test
+    @StdIo
+    void userFolderThatCannotBeListedIsLeftAsItIs(StdErr err) throws IOException {
+        var version = linkedLegacyProject("Unlisted");
+
+        try (var ignored = Mockito.mockStatic(Files.class, failingListing(userDir))) {
+            Migrator.migrateUserWorkspacesToMetainfoRegistry(workspacesRoot);
+        }
+
+        assertTrue(Files.isRegularFile(version), "The legacy metainfo of the unlisted user folder is kept.");
+        assertFalse(MetainfoRegistry.exists(userDir, "Unlisted"), "The unlisted user folder gets no record.");
+        assertLogged(err, "Migration of the user workspace '" + userDir + "' failed.");
+    }
+
+    // V1: a workspace root that cannot be listed is logged, and no user folder is converted.
+    @Test
+    @StdIo
+    void workspacesRootThatCannotBeListedIsLeftAsItIs(StdErr err) throws IOException {
+        var version = linkedLegacyProject("Unlisted");
+
+        try (var ignored = Mockito.mockStatic(Files.class, failingListing(workspacesRoot))) {
+            Migrator.migrateUserWorkspacesToMetainfoRegistry(workspacesRoot);
+        }
+
+        assertTrue(Files.isRegularFile(version), "The legacy metainfo below the unlisted root is kept.");
+        assertFalse(MetainfoRegistry.exists(userDir, "Unlisted"),
+                "No user folder below the unlisted root is converted.");
+        assertLogged(err, "Migration of user workspaces failed.");
+    }
+
+    // V1: helpers of the conversion failure checks, private to this class.
+    /** Bytes that are not valid UTF-8, so the strict UTF-8 reader of the legacy properties fails on them. */
+    private static final byte[] INVALID_UTF_8 = {'k', '=', (byte) 0xFF, '\n'};
+
+    /** Asserts that exactly one captured line holds the message. */
+    private static void assertLogged(StdErr err, String message) {
+        assertEquals(1, Arrays.stream(err.capturedLines()).filter(line -> line.contains(message)).count(),
+                () -> "Exactly one line logs \"" + message + "\".");
+    }
+
+    /**
+     * Calls every method of {@link Files} for real, except the listing of the given folder, which fails. A static
+     * mock is confined to the test thread, so nothing else in the build sees it.
+     */
+    private static Answer<Object> failingListing(Path folder) {
+        return invocation -> {
+            if ("list".equals(invocation.getMethod().getName()) && folder.equals(invocation.getArgument(0))) {
+                throw new IOException("The folder cannot be listed.");
+            }
+            return invocation.callRealMethod();
+        };
+    }
+
+    /**
+     * Creates a project of the user folder whose legacy {@code .version} links it to a repository.
+     *
+     * @return the {@code .version} file
+     */
+    private Path linkedLegacyProject(String name) throws IOException {
+        var studioProps = createProject(name).resolve(".studioProps");
+        Files.createDirectories(studioProps);
+        return Files.writeString(studioProps.resolve(".version"), """
+                repository-id=design
+                version=rev-1
+                """);
     }
 
     private Path createProject(String name) throws IOException {

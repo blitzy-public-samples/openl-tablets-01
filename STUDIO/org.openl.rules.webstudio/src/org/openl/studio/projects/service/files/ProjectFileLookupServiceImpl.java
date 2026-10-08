@@ -3,6 +3,7 @@ package org.openl.studio.projects.service.files;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
 import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
 import java.util.ArrayList;
@@ -10,12 +11,16 @@ import java.util.Comparator;
 import java.util.Date;
 import java.util.List;
 import java.util.Locale;
+import java.util.Optional;
 import java.util.Set;
+import java.util.function.Supplier;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.jspecify.annotations.Nullable;
 import org.springframework.security.acls.domain.BasePermission;
 import org.springframework.stereotype.Service;
+import org.springframework.util.function.SingletonSupplier;
 
 import org.openl.rules.common.ProjectException;
 import org.openl.rules.project.abstraction.AProject;
@@ -47,6 +52,10 @@ import org.openl.util.StringUtils;
  * repository (after unwrapping {@link RepositoryDelegate} and {@link FolderMapper}); only
  * folder-supporting repositories expose a hierarchy outside a project, so flat repositories surface
  * the project's own files alone.
+ *
+ * <p>For a file-backed repository or working copy, a candidate reached through a link is omitted
+ * before its content is read: neither the file nor any directory between it and the real root it is
+ * read from may be a link.
  */
 @RequiredArgsConstructor
 @Service
@@ -87,17 +96,23 @@ public class ProjectFileLookupServiceImpl implements ProjectFileLookupService {
         }
         String anchorDir = FilePaths.parent(FilePaths.trimSlashes(anchorPath));
         String base = FilePaths.trimSlashes(project.getRealPath());
+        // V1: the local project folder that anchors the link check of each candidate; empty when not file-backed.
+        // The folder is resolved at most once, at the first candidate that passes every other check.
+        Supplier<Optional<Path>> boundary = SingletonSupplier.of(() -> FileRoot.projectBoundary(project));
 
         var candidates = new ArrayList<Candidate>();
         // Inside the project: the artefact tree reflects the working copy and unpacks flat projects.
-        collectInProject(project, base, anchorDir, fileName, candidates);
+        collectInProject(project, base, anchorDir, fileName, boundary, candidates);
         // Outside the project: only a folder design repository exposes anything beyond a project. The
         // current project is skipped here, since the artefact tree already covers it. A local-only
         // project has no design repository ({@code null}), so the search covers just its own files.
         // Each match is authorized individually, so the search never surfaces a file the user cannot read.
         if (repository != null && repository.supports().folders()) {
-            collectFromRepository(unwrapRepository(repository), repository.getId(), anchorDir, fileName, base,
-                    candidates);
+            // V1: the unwrapped repository's local root anchors the link check of each match.
+            // The root is resolved at most once, at the first match.
+            var unwrapped = unwrapRepository(repository);
+            collectFromRepository(unwrapped, repository.getId(), anchorDir, fileName, base,
+                    SingletonSupplier.of(() -> FileRoot.localRoot(unwrapped)), candidates);
         }
         return finish(candidates, anchorDir, includeContent);
     }
@@ -110,17 +125,22 @@ public class ProjectFileLookupServiceImpl implements ProjectFileLookupService {
         }
         String anchorDir = FilePaths.parent(FilePaths.trimSlashes(anchorPath));
         var candidates = new ArrayList<Candidate>();
-        collectFromRepository(unwrapRepository(repository), repository.getId(), anchorDir, fileName, null, candidates);
+        // V1: the unwrapped repository's local root anchors the link check of each match.
+        // The root is resolved at most once, at the first match.
+        var unwrapped = unwrapRepository(repository);
+        collectFromRepository(unwrapped, repository.getId(), anchorDir, fileName, null,
+                SingletonSupplier.of(() -> FileRoot.localRoot(unwrapped)), candidates);
         return finish(candidates, anchorDir, includeContent);
     }
 
+    // V1: boundary supplies the local project folder, used to drop linked candidates.
     private void collectInProject(AProjectFolder folder, String base, String anchorDir, String fileName,
-                                  List<Candidate> out) {
+                                  Supplier<Optional<Path>> boundary, List<Candidate> out) {
         for (AProjectArtefact artefact : folder.getArtefacts()) {
             if (artefact.isFolder()) {
-                collectInProject((AProjectFolder) artefact, base, anchorDir, fileName, out);
+                collectInProject((AProjectFolder) artefact, base, anchorDir, fileName, boundary, out);
             } else {
-                var candidate = candidateFromArtefact(artefact, base, anchorDir, fileName);
+                var candidate = candidateFromArtefact(artefact, base, anchorDir, fileName, boundary);
                 if (candidate != null) {
                     out.add(candidate);
                 }
@@ -128,12 +148,15 @@ public class ProjectFileLookupServiceImpl implements ProjectFileLookupService {
         }
     }
 
+    // V1: boundary supplies the local project folder, resolved only for a candidate that passes every other check.
+    // V1: the result is nullable: a candidate that is unacceptable or reached through a link yields none.
     /**
-     * Builds a candidate for a project file that matches by name, lies on the anchor's upward line and
-     * is readable by the current user; {@code null} when any of these does not hold.
+     * Builds a candidate for a project file that matches by name, lies on the anchor's upward line, is
+     * readable by the current user and, in a file-backed project, sits at its own path under the
+     * project folder; {@code null} when any of these does not hold.
      */
-    private Candidate candidateFromArtefact(AProjectArtefact artefact, String base, String anchorDir,
-                                            String fileName) {
+    private @Nullable Candidate candidateFromArtefact(AProjectArtefact artefact, String base, String anchorDir,
+                                                      String fileName, Supplier<Optional<Path>> boundary) {
         if (!fileName.equals(artefact.getName()) || exceedsSizeLimit(artefact.getFileData())) {
             return null;
         }
@@ -143,19 +166,27 @@ public class ProjectFileLookupServiceImpl implements ProjectFileLookupService {
                 || !aclProjectsHelper.hasPermission(artefact, BasePermission.READ)) {
             return null;
         }
+        // V1: last; the ancestor walk leaves the project by design, so each candidate is its own boundary.
+        if (!boundary.get().map(root -> FileRoot.atOwnPath(root, rel)).orElse(true)) {
+            return null; // V1: a linked in-project candidate is never read
+        }
         var resource = (AProjectResource) artefact;
         return new Candidate(path, sizeOf(artefact.getFileData()), modifiedOf(artefact.getFileData()),
                 () -> readContent(resource));
     }
 
+    // V1: anchor supplies the repository's real root, resolved only for a match that passes every other check.
     /**
      * Collects matches from a repository listing that lie on the anchor's upward line — the anchor
      * folder and its ancestors up to the repository root, never a descendant or a sibling branch —
      * keeping only files the current user is granted READ on. {@code excludeBase}, when set, drops the
-     * current project (already covered by its artefact tree).
+     * current project (already covered by its artefact tree). {@code anchor} supplies, at the first
+     * match, the real root of a file-backed repository; a match that does not sit at its own path under
+     * it is dropped.
      */
     private void collectFromRepository(Repository repository, String repositoryId, String anchorDir, String fileName,
-                                       String excludeBase, List<Candidate> out) throws IOException {
+                                       String excludeBase, Supplier<Optional<Path>> anchor,
+                                       List<Candidate> out) throws IOException {
         var aclService = aclServiceProvider.getDesignRepoAclService();
         for (FileData data : repository.list("")) {
             String path = FilePaths.trimSlashes(data.getName());
@@ -164,7 +195,9 @@ public class ProjectFileLookupServiceImpl implements ProjectFileLookupService {
                     && fileName.equals(FilePaths.name(path))
                     && !isExcluded(path, excludeBase)
                     && isAncestorOrSelf(FilePaths.parent(path), anchorDir)
-                    && aclService.isGranted(repositoryId, path, true, BasePermission.READ);
+                    && aclService.isGranted(repositoryId, path, true, BasePermission.READ)
+                    // V1: last, and only for matches: a candidate reached through a link is dropped unread.
+                    && anchor.get().map(root -> FileRoot.atOwnPath(root, path)).orElse(true);
             if (match) {
                 out.add(new Candidate(path, sizeOf(data), modifiedOf(data), () -> readContent(repository, path)));
             }

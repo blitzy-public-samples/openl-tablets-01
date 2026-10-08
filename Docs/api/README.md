@@ -267,10 +267,14 @@ The Personal Access Token (PAT) API enables users to generate and manage authent
 **Key Features:**
 - Create, list, retrieve, and delete personal access tokens
 - Cryptographically secure token generation (Base62 encoding, 285 bits entropy)
-- Optional token expiration for time-limited access
+- Mandatory expiration for every new token: the requested `expiresAt` is optional, but an omitted one defaults to
+  `security.pat.default-expiration-days` (default 90) days, and a date more than `security.pat.max-expiration-days`
+  (default 365) days ahead is rejected; tokens created before 6.5.0 without an expiration keep working and never expire
 - User isolation (users manage only their own tokens)
 - An authenticated user mode required for management operations (not available in single-user mode)
 - PAT authentication cannot be used to manage PATs
+
+<!-- V8: new tokens always expire, after the configured default or by a requested date within the configured maximum -->
 
 **Use Cases:**
 - Service-to-service authentication
@@ -293,7 +297,7 @@ POST /rest/users/personal-access-tokens
 Authorization: Bearer <oauth2-token>
 {
   "name": "CI/CD Pipeline Token",
-  "expiresAt": "2026-12-31T23:59:59Z"
+  "expiresAt": "2026-12-22T23:59:59Z"
 }
 
 # Response (token shown only once!)
@@ -303,7 +307,7 @@ Authorization: Bearer <oauth2-token>
   "loginName": "jenkins",
   "token": "openl_pat_x1Y2z3A4b5C6d7E8.f9G0h1I2j3K4l5M6n7O8p9Q0r1S2t3U4v5W6",
   "createdAt": "2025-12-23T10:30:00Z",
-  "expiresAt": "2026-12-31T23:59:59Z"
+  "expiresAt": "2026-12-22T23:59:59Z"
 }
 
 # Use token for API access
@@ -608,7 +612,7 @@ Refer to the specific API documentation for detailed test cases and expected res
 | Delete Token | ✅ Complete | Immediate revocation |
 | Token Validation | ✅ Complete | Constant-time, secure |
 | PAT Authentication | ✅ Complete | Spring Security filter integration |
-| Expiration Support | ✅ Complete | Optional time-limited tokens |
+| Expiration Support | ✅ Complete | Every new token expires: 90-day default, 365-day maximum (both configurable) |
 | Security Hardening | ✅ Complete | Timing attack prevention, BCrypt hashing |
 | @NotPatAuth | ✅ Complete | PATs cannot manage PATs |
 | Unit Tests | ✅ Complete | Comprehensive coverage |

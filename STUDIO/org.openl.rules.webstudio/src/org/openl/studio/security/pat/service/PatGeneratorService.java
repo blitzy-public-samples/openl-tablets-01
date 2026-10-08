@@ -24,12 +24,21 @@ public interface PatGeneratorService {
      * stores the token in the database with a hashed secret, and returns the complete
      * token value. The actual token secret is only returned once and cannot be retrieved later.
      * </p>
+     * <p>
+     * V8: every token created by this method expires. A missing expiration is replaced by the
+     * configured default lifetime, and an expiration beyond the configured maximum lifetime is refused.
+     * </p>
      *
      * @param loginName the login name of the user who owns the token (must not be blank)
      * @param name      a human-readable name for the token (must not be blank)
-     * @param expiresAt the expiration date of the token (null for never-expiring tokens)
+     * @param expiresAt the expiration instant of the token. When null, the token expires after the
+     *                  configured default lifetime ({@code security.pat.default-expiration-days},
+     *                  90 days by default). A value later than now plus
+     *                  {@code security.pat.max-expiration-days} (365 days by default) is rejected.
      * @return the created token response containing the full token value (shown only once)
      * @throws IllegalArgumentException if expiresAt is in the past
+     * @throws org.openl.studio.common.exception.BadRequestException if expiresAt exceeds the maximum
+     *                  lifetime (HTTP 400, {@code openl.error.400.pat.expires-at.max.message})
      */
     CreatedPersonalAccessTokenResponse generateToken(@NotBlank String loginName,
                                                      @NotBlank String name,

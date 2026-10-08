@@ -1,0 +1,44 @@
+POST /rest/acls HTTP/1.1
+Authorization: ${ADMIN_AUTH_TOCKEN}
+Content-Type: application/json
+
+{
+  "resources": [
+    {
+      "resourceRef": {
+        "repositoryType": "DESIGN",
+        "repositoryId": "design"
+      },
+      "aces": [
+        {
+          "role": "VIEWER",
+          "sub": {
+            "sid": "audit_basic",
+            "principal": true
+          }
+        },
+        {
+          "role": "CONTRIBUTOR",
+          "sub": {
+            "sid": "audit_form",
+            "principal": true
+          }
+        },
+        {
+          "role": "VIEWER",
+          "sub": {
+            "sid": "audit_delete",
+            "principal": true
+          }
+        },
+        {
+          "role": "VIEWER",
+          "sub": {
+            "sid": "${SECRET_LOOKING_GROUP}",
+            "principal": false
+          }
+        }
+      ]
+    }
+  ]
+}

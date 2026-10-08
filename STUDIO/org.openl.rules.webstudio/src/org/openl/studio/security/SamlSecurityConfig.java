@@ -35,12 +35,14 @@ import org.springframework.security.web.authentication.LoginUrlAuthenticationEnt
 import org.springframework.security.web.authentication.logout.LogoutFilter;
 import org.springframework.security.web.authentication.session.SessionAuthenticationStrategy;
 import org.springframework.security.web.context.SecurityContextPersistenceFilter;
+import org.springframework.security.web.header.HeaderWriterFilter;
 import org.springframework.security.web.savedrequest.HttpSessionRequestCache;
 
 import org.openl.rules.security.SimpleUser;
 import org.openl.studio.security.pat.filter.PatAuthenticationFilter;
 import org.openl.studio.security.saml.OpenLResponseAuthenticationConverter;
 import org.openl.studio.security.saml.OpenLSamlBuilder;
+import org.openl.studio.security.saml.RelayStateSaml2AuthenticationRequestRepository;
 import org.openl.studio.security.saml.SamlLogoutSuccessHandler;
 
 @Configuration
@@ -49,11 +51,15 @@ import org.openl.studio.security.saml.SamlLogoutSuccessHandler;
 @ComponentScan("org.springframework.security.saml2")
 public class SamlSecurityConfig {
 
+    // V4: every SAML chain sends the default security headers through securityHeadersFilter.
+    // The filter runs right after the security context filter, as on the HttpSecurity-built chains.
+
     // Logout endpoint
     @Bean
     @Order(1)
     public SecurityFilterChain logoutFilterChain(
             @Qualifier("securityContextPersistenceFilter") SecurityContextPersistenceFilter securityContextPersistenceFilter,
+            @Qualifier("securityHeadersFilter") HeaderWriterFilter securityHeadersFilter, // V4: default headers
             Saml2LogoutRequestFilter logoutFilter,
             SamlLogoutSuccessHandler samlLogoutHandler) {
 
@@ -61,6 +67,7 @@ public class SamlSecurityConfig {
         // Logout Service, ending the IdP session. A no-op handler here would log out locally only.
         return new DefaultSecurityFilterChain(RequestMatchers.matcher("/logout"),
                 securityContextPersistenceFilter,
+                securityHeadersFilter,
                 logoutFilter,
                 new LogoutFilter("/", samlLogoutHandler)
         );
@@ -71,10 +78,12 @@ public class SamlSecurityConfig {
     @Order(2)
     public SecurityFilterChain samlMetadataFilterChain(
             @Qualifier("securityContextPersistenceFilter") SecurityContextPersistenceFilter securityContextPersistenceFilter,
+            @Qualifier("securityHeadersFilter") HeaderWriterFilter securityHeadersFilter, // V4: default headers
             @Qualifier("metadataGeneratorFilter") Saml2MetadataFilter metadataGeneratorFilter) {
 
         return new DefaultSecurityFilterChain(RequestMatchers.matcher("/saml2/service-provider-metadata/**"),
                 securityContextPersistenceFilter,
+                securityHeadersFilter,
                 metadataGeneratorFilter);
     }
 
@@ -83,10 +92,12 @@ public class SamlSecurityConfig {
     @Order(3)
     public SecurityFilterChain samlLoginFilterChain(
             @Qualifier("securityContextPersistenceFilter") SecurityContextPersistenceFilter securityContextPersistenceFilter,
+            @Qualifier("securityHeadersFilter") HeaderWriterFilter securityHeadersFilter, // V4: default headers
             @Qualifier("samlFilter") Saml2WebSsoAuthenticationFilter samlFilter) {
 
         return new DefaultSecurityFilterChain(RequestMatchers.matcher("/login/saml2/**"),
                 securityContextPersistenceFilter,
+                securityHeadersFilter,
                 samlFilter);
     }
 
@@ -95,10 +106,12 @@ public class SamlSecurityConfig {
     @Order(4)
     public SecurityFilterChain samlAuthenticateFilterChain(
             @Qualifier("securityContextPersistenceFilter") SecurityContextPersistenceFilter securityContextPersistenceFilter,
+            @Qualifier("securityHeadersFilter") HeaderWriterFilter securityHeadersFilter, // V4: default headers
             @Qualifier("samlRequestFilter") Saml2WebSsoAuthenticationRequestFilter samlRequestFilter) {
 
         return new DefaultSecurityFilterChain(RequestMatchers.matcher("/saml2/authenticate/**"),
                 securityContextPersistenceFilter,
+                securityHeadersFilter,
                 samlRequestFilter);
     }
 
@@ -106,12 +119,14 @@ public class SamlSecurityConfig {
     @Order(5)
     public SecurityFilterChain restEndpointsFilterChain(
             @Qualifier("securityContextPersistenceFilter") SecurityContextPersistenceFilter securityContextPersistenceFilter,
+            @Qualifier("securityHeadersFilter") HeaderWriterFilter securityHeadersFilter, // V4: default headers
             PatAuthenticationFilter patAuthenticationFilter,
             @Qualifier("webExceptionTranslationFilter") ExceptionTranslationFilter webExceptionTranslationFilter,
             @Qualifier("filterSecurityInterceptor") AuthorizationFilter filterSecurityInterceptor) {
 
         return new DefaultSecurityFilterChain(RequestMatchers.matcher("/rest/**"),
                 securityContextPersistenceFilter,
+                securityHeadersFilter,
                 patAuthenticationFilter,
                 webExceptionTranslationFilter,
                 filterSecurityInterceptor);
@@ -122,12 +137,14 @@ public class SamlSecurityConfig {
     @Order(Ordered.LOWEST_PRECEDENCE)
     public SecurityFilterChain defaultFilterChain(
             @Qualifier("securityContextPersistenceFilter") SecurityContextPersistenceFilter securityContextPersistenceFilter,
+            @Qualifier("securityHeadersFilter") HeaderWriterFilter securityHeadersFilter, // V4: default headers
             Saml2LogoutRequestFilter logoutFilter,
             @Qualifier("exceptionTranslationFilter") ExceptionTranslationFilter exceptionTranslationFilter,
             @Qualifier("filterSecurityInterceptor") AuthorizationFilter filterSecurityInterceptor) {
 
         return new DefaultSecurityFilterChain(RequestMatchers.matcher("/**"),
                 securityContextPersistenceFilter,
+                securityHeadersFilter,
                 logoutFilter,
                 exceptionTranslationFilter,
                 filterSecurityInterceptor);
@@ -197,9 +214,23 @@ public class SamlSecurityConfig {
         return openLSamlBuilder.relyingPartyRegistrationResolver();
     }
 
+    // V3: the SAML filters keep each AuthnRequest in a RelayState-keyed store, not in the HTTP session.
+    // A SameSite=Lax session cookie is not sent on the IdP's cross-site POST to the callback.
     @Bean
-    public Saml2WebSsoAuthenticationRequestFilter samlRequestFilter(@Qualifier("authenticationRequestContextResolver") Saml2AuthenticationRequestResolver authenticationRequestResolver) {
-        return new Saml2WebSsoAuthenticationRequestFilter(authenticationRequestResolver);
+    public RelayStateSaml2AuthenticationRequestRepository samlAuthenticationRequestRepository() {
+        return new RelayStateSaml2AuthenticationRequestRepository();
+    }
+
+    @Bean
+    public Saml2WebSsoAuthenticationRequestFilter samlRequestFilter(
+            @Qualifier("authenticationRequestContextResolver")
+            Saml2AuthenticationRequestResolver authenticationRequestResolver,
+            @Qualifier("samlAuthenticationRequestRepository")
+            RelayStateSaml2AuthenticationRequestRepository samlAuthenticationRequestRepository) {
+        var filter = new Saml2WebSsoAuthenticationRequestFilter(authenticationRequestResolver);
+        // V3: save the AuthnRequest by its RelayState, so the cross-site callback finds it without the session cookie
+        filter.setAuthenticationRequestRepository(samlAuthenticationRequestRepository);
+        return filter;
     }
 
     @Bean
@@ -216,12 +247,17 @@ public class SamlSecurityConfig {
             @Qualifier("relyingPartyRegistration") RelyingPartyRegistrationRepository relyingPartyRegistration,
             AuthenticationManager authenticationManager,
             AuthenticationSuccessHandler authenticationSuccessHandler,
-            @Qualifier("sessionAuthenticationStrategy") SessionAuthenticationStrategy sessionAuthenticationStrategy) {
+            @Qualifier("sessionAuthenticationStrategy") SessionAuthenticationStrategy sessionAuthenticationStrategy,
+            @Qualifier("samlAuthenticationRequestRepository")
+            RelayStateSaml2AuthenticationRequestRepository samlAuthenticationRequestRepository) {
 
         var filter = new Saml2WebSsoAuthenticationFilter(relyingPartyRegistration);
         filter.setAuthenticationManager(authenticationManager);
         filter.setAuthenticationSuccessHandler(authenticationSuccessHandler);
         filter.setSessionAuthenticationStrategy(sessionAuthenticationStrategy);
+        // V3: the callback claims its AuthnRequest by RelayState once, so a replayed response finds none.
+        // The setter also gives the store to the token converter, so InResponseTo is checked against the saved request.
+        filter.setAuthenticationRequestRepository(samlAuthenticationRequestRepository);
         return filter;
     }
 

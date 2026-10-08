@@ -1,5 +1,5 @@
 PATCH /rest/projects/EPBDS-12973 HTTP/1.1
-Authorization: Basic RVBCRFNfMTI5NzNfMjpwYXNz
+Authorization: ${EPBDS_12973_2_BASIC}
 Content-Type: application/json
 
 {

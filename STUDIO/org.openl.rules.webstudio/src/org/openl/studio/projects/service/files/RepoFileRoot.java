@@ -1,12 +1,15 @@
 package org.openl.studio.projects.service.files;
 
 import java.io.IOException;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 import lombok.RequiredArgsConstructor;
+import org.jspecify.annotations.Nullable;
 import org.springframework.security.acls.domain.BasePermission;
 
 import org.openl.rules.project.abstraction.AProject;
@@ -48,6 +51,26 @@ public class RepoFileRoot implements FileRoot {
     private final AclProjectsHelper aclProjectsHelper;
     private final ProjectFileLookupService fileLookupService;
     private final ProjectLockGuard lockGuard;
+
+    // V1: the real local root of a file-backed repository, the anchor of the containment check.
+    /**
+     * Real root directory of the repository when it is file-backed.
+     *
+     * <p>Resolved on the first call of {@link #contains(String)} from
+     * {@link FileRoot#localRoot(Repository)}, which then sets {@link #anchorResolved}. After that,
+     * {@code null} means the repository is not file-backed. No synchronization is needed, because the
+     * mount is built per request by {@link RepoFileRootFactory#of(Repository, String)} and is not
+     * shared between threads.
+     */
+    private @Nullable Path anchor;
+    private boolean anchorResolved;
+    // V1: the real locations contains() resolved under the anchor, reused by its later checks.
+    /**
+     * Real locations of the anchor and of the directories and links below it that {@link #contains(String)}
+     * resolved, keyed by absolute normalized path, for {@link FileRoot#atOwnPath(Path, String, Map)}. They live
+     * as long as the anchor, and they need no synchronization for the same reason it needs none.
+     */
+    private final Map<Path, Path> realLocations = new HashMap<>();
 
     @Override
     public AProjectFolder readFolder(String version) {
@@ -111,6 +134,55 @@ public class RepoFileRoot implements FileRoot {
         } catch (IOException e) {
             throw new ConflictException("file.archive.upload.failed.message");
         }
+    }
+
+    // V1: strict containment; a repository path must sit at its own lexical place under the real root.
+    /**
+     * Tells whether the repository path sits at its own lexical place under the repository's real
+     * root directory.
+     *
+     * <p>This mount is rooted at the repository root and authorizes each repository path separately:
+     * {@code aclProjectsHelper} checks the permission of the artefact at that path. A link at the
+     * entry itself, or at any directory between the real root and it, would read or write a different
+     * repository path, or a location outside the repository, whose ACL was never checked. So no such
+     * link is accepted, even one that stays inside the repository; the check is stricter than the
+     * project boundary of a project mount.
+     *
+     * <p>Links in the root's own path are trusted, because {@link FileRoot#localRoot(Repository)}
+     * returns the real root, which the check starts from. A path that does not exist yet is accepted
+     * when its deepest existing ancestor sits at its own place, so new files and folders can be created.
+     *
+     * <p>Which repositories are checked: {@link RepoFileRootFactory#of(Repository, String)} mounts the
+     * repository inside {@code AuthoringRepository}. {@code localRoot} unwraps that wrapper itself, then
+     * every {@code RepositoryDelegate}, then reads the root of the path-checked repository it reaches. For
+     * a mapped file design repository the wrapper holds the {@code PathCheckedRepository} that
+     * {@code SecureMappedRepository.getDelegate()} returns; for a flat one it holds
+     * {@code SecureBranchRepository}, whose original is that {@code PathCheckedRepository}. Both reveal the
+     * file repository's root and engage the check. The mount itself still reads and writes through the
+     * wrapper. Any other backend accepts every path, including Git, whose {@code PathCheckedRepository}
+     * reveals no root: Git reads blobs from its object database, never through working-tree links.
+     *
+     * <p>The checks of the mount reuse what the earlier ones resolved, through
+     * {@link FileRoot#atOwnPath(Path, String, Map)}: the root is resolved once, and the real locations of the
+     * directories and links below it are kept for the lifetime of the mount. A listing, export or search
+     * therefore reads each entry once without following a link at its end, with the verdicts of
+     * {@link FileRoot#atOwnPath(Path, String)}.
+     *
+     * @param path repository-relative path; empty for the repository root
+     * @return {@code false} when the path, or a directory above it, is a link, or when it cannot be
+     *         resolved
+     */
+    @Override
+    public boolean contains(String path) {
+        if (!anchorResolved) {
+            // V1: resolved once per mount; the mount lives for one request.
+            anchor = FileRoot.localRoot(repository).orElse(null);
+            anchorResolved = true;
+        }
+        var root = anchor;
+        // V1: a repository that is not file-backed has no filesystem links to follow.
+        // V1: the checks of the mount share the real locations they resolve, so each entry costs one read.
+        return root == null || FileRoot.atOwnPath(root, path, realLocations);
     }
 
     /**

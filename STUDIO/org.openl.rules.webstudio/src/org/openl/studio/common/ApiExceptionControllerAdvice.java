@@ -10,7 +10,9 @@ import com.fasterxml.jackson.databind.exc.InvalidFormatException;
 import com.fasterxml.jackson.databind.exc.UnrecognizedPropertyException;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.lang3.exception.ExceptionUtils;
 import org.springframework.beans.TypeMismatchException;
+import org.springframework.beans.factory.BeanCreationException;
 import org.springframework.core.annotation.AnnotationUtils;
 import org.springframework.core.convert.ConversionFailedException;
 import org.springframework.http.HttpHeaders;
@@ -141,9 +143,32 @@ public class ApiExceptionControllerAdvice extends ResponseEntityExceptionHandler
         if (e.getCause() instanceof RestRuntimeException ex) {
             return handleAllRestRuntimeExceptions(ex, request);
         }
+        // V1: a refusal raised while creating a session bean the converter needs answers as a direct refusal does
+        if (e.getCause() instanceof BeanCreationException cause) {
+            var refusal = ExceptionUtils.throwableOfType(cause, RestRuntimeException.class);
+            if (refusal != null) {
+                log.debug(e.getMessage(), e);
+                return handleAllRestRuntimeExceptions(refusal, request);
+            }
+        }
         // A value that cannot be converted to the target type is a malformed request, not a server error.
         var message = e.getCause() != null ? e.getCause().getMessage() : e.getMessage();
         return handleExceptionInternal(e, message, new HttpHeaders(), HttpStatus.BAD_REQUEST, request);
+    }
+
+    // V1: a session refused for a user id that is not a valid workspace folder name answers 403 without bean names
+    /**
+     * Answers a bean-creation failure that a REST refusal caused with that refusal, so the response names no internal
+     * bean or class. Every other bean-creation failure is answered as an internal error, as before.
+     */
+    @ExceptionHandler(BeanCreationException.class)
+    public ResponseEntity<?> handleBeanCreationException(BeanCreationException e, WebRequest request) {
+        var refusal = ExceptionUtils.throwableOfType(e, RestRuntimeException.class);
+        if (refusal != null) {
+            log.debug(e.getMessage(), e);
+            return handleAllRestRuntimeExceptions(refusal, request);
+        }
+        return handleInternalErrors(e, request);
     }
 
     @Override

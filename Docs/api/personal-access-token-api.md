@@ -31,9 +31,15 @@ The Personal Access Token (PAT) API enables users to generate and manage authent
 
 - **Secure Token Generation**: Cryptographically secure tokens using Base62 encoding
 - **Token Management**: Full CRUD operations for personal access tokens
-- **Expiration Support**: Optional token expiration for enhanced security
+- **Expiration Support**: Every new token expires. When no expiration date is given, the token lives for
+  `security.pat.default-expiration-days` (default 90) days; a requested date may be at most
+  `security.pat.max-expiration-days` (default 365) days ahead. Both properties are positive whole numbers of days, and
+  the default must not exceed the maximum; otherwise Studio does not start in a mode that offers PATs. Tokens created
+  before 6.5.0 without an expiration keep working and never expire
 - **User Isolation**: Users can only manage their own tokens
 - **Authenticated Modes Only**: Available in every authenticated user mode (OAuth2, SAML, AD, multi); not in single-user mode
+
+<!-- V8: new tokens expire after the configured default; the maximum lifetime is enforced. -->
 
 ### Token Format
 
@@ -110,14 +116,19 @@ POST /rest/users/personal-access-tokens
 ```json
 {
   "name": "MCP Client Token",
-  "expiresAt": "2026-12-31T23:59:59Z"
+  "expiresAt": "2026-12-22T23:59:59Z"
 }
 ```
 
 | Field | Type | Required | Constraints | Description |
 |-------|------|----------|-------------|-------------|
 | `name` | String | Yes | Max 100 chars, not blank | Human-readable token name (must be unique per user) |
-| `expiresAt` | ISO 8601 DateTime | No | Must be future date | Token expiration date (null = never expires) |
+| `expiresAt` | ISO 8601 DateTime | No | Future, within the maximum lifetime | Default lifetime if omitted |
+
+When `expiresAt` is omitted or `null`, the token expires `security.pat.default-expiration-days` (default 90) days after
+creation. A date more than `security.pat.max-expiration-days` (default 365) days ahead is rejected.
+
+<!-- V8: an omitted expiresAt gets the configured default lifetime; dates after the configured maximum are rejected. -->
 
 #### Response
 
@@ -130,7 +141,7 @@ POST /rest/users/personal-access-tokens
   "loginName": "john.doe",
   "token": "openl_pat_a1B2c3D4e5F6g7H8.i9J0k1L2m3N4o5P6q7R8s9T0u1V2w3X4y5Z6",
   "createdAt": "2025-12-23T10:30:00Z",
-  "expiresAt": "2026-12-31T23:59:59Z"
+  "expiresAt": "2026-12-22T23:59:59Z"
 }
 ```
 
@@ -143,9 +154,12 @@ POST /rest/users/personal-access-tokens
 | `400 Bad Request` | `pat.duplicate.name.message` | Token with this name already exists |
 | `400 Bad Request` | - | Token name is blank or too long |
 | `400 Bad Request` | - | Expiration date is in the past |
+| `400 Bad Request` | `openl.error.400.pat.expires-at.max.message` | Expiration date is beyond the configured maximum |
 | `401 Unauthorized` | - | Invalid or missing Bearer token |
 | `403 Forbidden` | - | User mode is `single` |
 | `403 Forbidden` | - | Request authenticated with PAT (not allowed) |
+
+<!-- V8: an expiration date beyond security.pat.max-expiration-days is rejected with 400. -->
 
 ---
 
@@ -176,7 +190,7 @@ GET /rest/users/personal-access-tokens
     "name": "MCP Client Token",
     "loginName": "john.doe",
     "createdAt": "2025-12-23T10:30:00Z",
-    "expiresAt": "2026-12-31T23:59:59Z"
+    "expiresAt": "2026-12-22T23:59:59Z"
   },
   {
     "publicId": "z9Y8x7W6v5U4t3S2",
@@ -188,7 +202,10 @@ GET /rest/users/personal-access-tokens
 ]
 ```
 
-**Note**: Token secrets are **never** returned by this endpoint.
+**Note**: Token secrets are **never** returned by this endpoint. An `expiresAt` of `null` appears only for tokens
+created before 6.5.0 without an expiration; such tokens never expire, and every newly created token carries a date.
+
+<!-- V8: null expiresAt identifies only legacy tokens created without an expiration date. -->
 
 #### Error Responses
 
@@ -232,7 +249,7 @@ GET /rest/users/personal-access-tokens/{publicId}
   "name": "MCP Client Token",
   "loginName": "john.doe",
   "createdAt": "2025-12-23T10:30:00Z",
-  "expiresAt": "2026-12-31T23:59:59Z"
+  "expiresAt": "2026-12-22T23:59:59Z"
 }
 ```
 
@@ -295,7 +312,12 @@ Request model for creating a new token.
 | Field | Type | Required | Constraints | Description |
 |-------|------|----------|-------------|-------------|
 | `name` | String | Yes | 1-100 characters | Unique name for the token (per user) |
-| `expiresAt` | ISO 8601 DateTime | No | Future date or null | Expiration date (null = never expires) |
+| `expiresAt` | ISO 8601 DateTime | No | Future, within the maximum lifetime | Default lifetime if omitted |
+
+When `expiresAt` is omitted or `null`, the token expires `security.pat.default-expiration-days` (default 90) days after
+creation. A date more than `security.pat.max-expiration-days` (default 365) days ahead is rejected.
+
+<!-- V8: an omitted expiresAt gets the configured default lifetime; dates after the configured maximum are rejected. -->
 
 **Example**:
 ```json
@@ -318,7 +340,9 @@ Response model returned when a token is created. **Contains the full token - sho
 | `loginName` | String | Owner's login name |
 | `token` | String | **Full token value** (only shown once) |
 | `createdAt` | ISO 8601 DateTime | Creation timestamp |
-| `expiresAt` | ISO 8601 DateTime | Expiration timestamp (null = never expires) |
+| `expiresAt` | ISO 8601 DateTime | Expiration timestamp, always set (default lifetime if `expiresAt` was omitted) |
+
+<!-- V8: a newly created token always carries an expiration timestamp. -->
 
 **Example**:
 ```json
@@ -344,7 +368,11 @@ Response model for listing and retrieving tokens (without secret).
 | `name` | String | Token name |
 | `loginName` | String | Owner's login name |
 | `createdAt` | ISO 8601 DateTime | Creation timestamp |
-| `expiresAt` | ISO 8601 DateTime | Expiration timestamp (null = never expires) |
+| `expiresAt` | ISO 8601 DateTime | Expiration timestamp; `null` only for legacy tokens, which never expire |
+
+Legacy tokens are tokens created before 6.5.0 without an expiration date.
+
+<!-- V8: null expiresAt identifies only legacy tokens created without an expiration date. -->
 
 **Example**:
 ```json
@@ -399,6 +427,8 @@ pat.not.found.message=Personal Access Token not found
 
 ### Example 1: Create a Token with Expiration
 
+<!-- V8: this example's expiration date lies within the default 365-day maximum of its creation time. -->
+
 **Request**:
 ```http
 POST /rest/users/personal-access-tokens HTTP/1.1
@@ -408,7 +438,7 @@ Content-Type: application/json
 
 {
   "name": "CI/CD Pipeline Token",
-  "expiresAt": "2026-12-31T23:59:59Z"
+  "expiresAt": "2026-12-22T23:59:59Z"
 }
 ```
 
@@ -423,7 +453,7 @@ Content-Type: application/json
   "loginName": "jenkins",
   "token": "openl_pat_x1Y2z3A4b5C6d7E8.f9G0h1I2j3K4l5M6n7O8p9Q0r1S2t3U4v5W6",
   "createdAt": "2025-12-23T10:30:00Z",
-  "expiresAt": "2026-12-31T23:59:59Z"
+  "expiresAt": "2026-12-22T23:59:59Z"
 }
 ```
 
@@ -431,20 +461,23 @@ Content-Type: application/json
 
 ---
 
-### Example 2: Create a Token Without Expiration
+### Example 2: Create a Token with the Default Expiration
+
+<!-- V8: new tokens expire after the configured default; the maximum lifetime is enforced. -->
 
 **Request**:
 ```http
 POST /rest/users/personal-access-tokens HTTP/1.1
 Host: localhost:8080
-Authorization: Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9...
+Authorization: Bearer ${OAUTH2_ACCESS_TOKEN}
 Content-Type: application/json
 
 {
-  "name": "Development Token",
-  "expiresAt": null
+  "name": "Development Token"
 }
 ```
+
+Sending `"expiresAt": null` has the same effect.
 
 **Response**:
 ```http
@@ -455,9 +488,35 @@ Content-Type: application/json
   "publicId": "m1N2o3P4q5R6s7T8",
   "name": "Development Token",
   "loginName": "developer",
-  "token": "openl_pat_m1N2o3P4q5R6s7T8.u9V0w1X2y3Z4a5B6c7D8e9F0g1H2i3J4k5L6",
+  "token": "${PAT_TOKEN}",
   "createdAt": "2025-12-23T10:30:00Z",
-  "expiresAt": null
+  "expiresAt": "2026-03-23T10:30:00Z"
+}
+```
+
+The token expires 90 days after creation, the lifetime set by `security.pat.default-expiration-days`.
+
+**Request** with an expiration date beyond the maximum (400 days ahead):
+```http
+POST /rest/users/personal-access-tokens HTTP/1.1
+Host: localhost:8080
+Authorization: Bearer ${OAUTH2_ACCESS_TOKEN}
+Content-Type: application/json
+
+{
+  "name": "Long-Lived Token",
+  "expiresAt": "2027-01-27T10:30:00Z"
+}
+```
+
+**Response**:
+```http
+HTTP/1.1 400 Bad Request
+Content-Type: application/json
+
+{
+  "code": "openl.error.400.pat.expires-at.max.message",
+  "message": "The expiration date must be within 365 days."
 }
 ```
 
@@ -483,17 +542,21 @@ Content-Type: application/json
     "name": "CI/CD Pipeline Token",
     "loginName": "jenkins",
     "createdAt": "2025-12-23T10:30:00Z",
-    "expiresAt": "2026-12-31T23:59:59Z"
+    "expiresAt": "2026-12-22T23:59:59Z"
   },
   {
-    "publicId": "m1N2o3P4q5R6s7T8",
-    "name": "Development Token",
+    "publicId": "q1R2s3T4u5V6w7X8",
+    "name": "Legacy Token",
     "loginName": "jenkins",
-    "createdAt": "2025-12-23T11:00:00Z",
+    "createdAt": "2025-11-20T11:00:00Z",
     "expiresAt": null
   }
 ]
 ```
+
+The second token was created before 6.5.0 without an expiration date, so its `expiresAt` is `null` and it never expires.
+
+<!-- V8: the second listed token predates 6.5.0, so its expiresAt is null and it never expires -->
 
 ---
 

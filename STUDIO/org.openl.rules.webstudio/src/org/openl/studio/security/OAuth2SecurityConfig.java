@@ -32,6 +32,7 @@ import org.springframework.security.web.authentication.logout.LogoutFilter;
 import org.springframework.security.web.authentication.logout.LogoutHandler;
 import org.springframework.security.web.authentication.session.SessionAuthenticationStrategy;
 import org.springframework.security.web.context.SecurityContextPersistenceFilter;
+import org.springframework.security.web.header.HeaderWriterFilter;
 import org.springframework.security.web.savedrequest.HttpSessionRequestCache;
 
 import org.openl.rules.security.SimpleUser;
@@ -48,15 +49,19 @@ import org.openl.studio.security.pat.filter.PatAuthenticationFilter;
 @ComponentScan("org.springframework.security.oauth2")
 public class OAuth2SecurityConfig {
 
+    // V4: each OIDC chain below sends the default security headers, as the form-based chains already do
+
     // Logout endpoint
     @Bean
     @Order(1)
     public SecurityFilterChain logoutFilterChain(
             @Qualifier("securityContextPersistenceFilter") SecurityContextPersistenceFilter securityContextPersistenceFilter,
+            @Qualifier("securityHeadersFilter") HeaderWriterFilter securityHeadersFilter,
             @Qualifier("logoutFilter") LogoutFilter logoutFilter) {
 
         return new DefaultSecurityFilterChain(RequestMatchers.matcher("/logout"),
                 securityContextPersistenceFilter,
+                securityHeadersFilter,
                 logoutFilter);
     }
 
@@ -65,10 +70,12 @@ public class OAuth2SecurityConfig {
     @Order(2)
     public SecurityFilterChain oauth2CallbackFilterChain(
             @Qualifier("securityContextPersistenceFilter") SecurityContextPersistenceFilter securityContextPersistenceFilter,
+            @Qualifier("securityHeadersFilter") HeaderWriterFilter securityHeadersFilter,
             @Qualifier("oauth2Filter") OAuth2LoginAuthenticationFilter oauth2Filter) {
 
         return new DefaultSecurityFilterChain(RequestMatchers.matcher("/login/oauth2/code/**"),
                 securityContextPersistenceFilter,
+                securityHeadersFilter,
                 oauth2Filter);
     }
 
@@ -77,10 +84,12 @@ public class OAuth2SecurityConfig {
     @Order(3)
     public SecurityFilterChain oauth2AuthorizationFilterChain(
             @Qualifier("securityContextPersistenceFilter") SecurityContextPersistenceFilter securityContextPersistenceFilter,
+            @Qualifier("securityHeadersFilter") HeaderWriterFilter securityHeadersFilter,
             @Qualifier("oauth2RedirectFilter") OAuth2AuthorizationRequestRedirectFilter oauth2RedirectFilter) {
 
         return new DefaultSecurityFilterChain(RequestMatchers.matcher("/oauth2/authorization/**"),
                 securityContextPersistenceFilter,
+                securityHeadersFilter,
                 oauth2RedirectFilter);
     }
 
@@ -89,6 +98,7 @@ public class OAuth2SecurityConfig {
     @Order(4)
     public SecurityFilterChain restEndpointsFilterChain(
             @Qualifier("securityContextPersistenceFilter") SecurityContextPersistenceFilter securityContextPersistenceFilter,
+            @Qualifier("securityHeadersFilter") HeaderWriterFilter securityHeadersFilter,
             PatAuthenticationFilter patAuthenticationFilter,
             @Qualifier("bearerTokenAuthenticationFilter") Filter bearerTokenAuthenticationFilter,
             @Qualifier("bearerExceptionTranslationFilter") ExceptionTranslationFilter bearerExceptionTranslationFilter,
@@ -96,6 +106,7 @@ public class OAuth2SecurityConfig {
 
         return new DefaultSecurityFilterChain(RequestMatchers.matcher("/rest/**"),
                 securityContextPersistenceFilter,
+                securityHeadersFilter,
                 patAuthenticationFilter,
                 bearerTokenAuthenticationFilter,
                 bearerExceptionTranslationFilter,
@@ -107,11 +118,13 @@ public class OAuth2SecurityConfig {
     @Order(Ordered.LOWEST_PRECEDENCE)
     public SecurityFilterChain defaultFilterChain(
             @Qualifier("securityContextPersistenceFilter") SecurityContextPersistenceFilter securityContextPersistenceFilter,
+            @Qualifier("securityHeadersFilter") HeaderWriterFilter securityHeadersFilter,
             @Qualifier("exceptionTranslationFilter") ExceptionTranslationFilter exceptionTranslationFilter,
             @Qualifier("filterSecurityInterceptor") AuthorizationFilter filterSecurityInterceptor) {
 
         return new DefaultSecurityFilterChain(RequestMatchers.matcher("/**"),
                 securityContextPersistenceFilter,
+                securityHeadersFilter,
                 exceptionTranslationFilter,
                 filterSecurityInterceptor);
     }

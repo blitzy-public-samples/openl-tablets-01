@@ -1,0 +1,4 @@
+POST /login HTTP/1.1
+Content-type: application/x-www-form-urlencoded
+
+username=audit_form&password=${AUDIT_FORM_PASSWORD}

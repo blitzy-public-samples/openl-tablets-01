@@ -8,7 +8,7 @@ Content-Type: application/json
   "groups": [],
   "username": "user16256",
   "internalPassword": {
-    "password": "user16256"
+    "password": "${USER16256_PASSWORD}"
   },
   "firstName": "User",
   "lastName": "16256",

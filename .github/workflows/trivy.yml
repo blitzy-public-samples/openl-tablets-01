@@ -125,3 +125,16 @@ jobs:
           name: ${{ matrix.image }}
           path: report-${{ matrix.image }}.json
           archive: false
+
+      # V13: fail the job on fixable HIGH/CRITICAL findings; steps 1-2 still publish the reports
+      - name: Fail on fixable HIGH and CRITICAL vulnerabilities
+        env:
+          IMAGE_REF: ${{ env.REGISTRY }}/${{ env.NAME }}:${{ env.VERSION }}${{ env.SUFFIX }}
+        run: >-
+          trivy image "$IMAGE_REF"
+          --exit-code 1
+          --severity CRITICAL,HIGH
+          --ignore-unfixed
+          --skip-db-update
+          --skip-java-db-update
+          --format table

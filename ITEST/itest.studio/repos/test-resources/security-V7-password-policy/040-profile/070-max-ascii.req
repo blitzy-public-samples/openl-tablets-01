@@ -1,0 +1,24 @@
+PUT /rest/users/profile HTTP/1.1
+Authorization: ${V7_PROFILE_BASIC_MIN_MB}
+Cookie: NO_JSESSIONID=noAuth
+Content-Type: application/json; charset=UTF-8
+
+{
+  "changePassword": {
+    "newPassword": "${V7_MAX_ASCII}",
+    "currentPassword": "${V7_MIN_MB}",
+    "confirmPassword": "${V7_MAX_ASCII}"
+  },
+  "firstName": "V7",
+  "lastName": "Profile",
+  "displayName": "V7 Profile",
+  "showHeader": false,
+  "showFormulas": true,
+  "testsPerPage": 20,
+  "testsFailuresOnly": true,
+  "testsFailuresPerTest": 20,
+  "showComplexResult": true,
+  "showRealNumbers": true,
+  "treeView": "type",
+  "email": "v7_profile@email"
+}

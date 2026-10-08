@@ -3,6 +3,7 @@ package org.openl.studio.projects.service.files;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
@@ -132,6 +133,8 @@ class RepoFilesLockGuardTest {
         RepoFileRoot mount = mock(RepoFileRoot.class);
         var tree = treeWithDataFile("a.txt");
         when(mount.readFolder(null)).thenReturn(tree);
+        // V1: a mock answers false for contains(); this mount holds every path.
+        when(mount.contains(anyString())).thenReturn(true);
 
         service.deleteResource(mount, "data/a.txt");
 

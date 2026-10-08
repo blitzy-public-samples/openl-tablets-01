@@ -153,7 +153,8 @@ public class RuleServicesFilter implements Filter {
         }
 
         // Security
-        if (authorizationCheckers.length > 0 && !skipAuthorization(path)) {
+        // V2: CXF routes inside /admin by the URI as sent, so a request URI with dot segments is never skipped.
+        if (authorizationCheckers.length > 0 && !(skipAuthorization(path) && NormalizedRequestUri.isNormalized(request.getRequestURI()))) {
             var authorized = false;
             try {
                 for (AuthorizationChecker validator : authorizationCheckers) {

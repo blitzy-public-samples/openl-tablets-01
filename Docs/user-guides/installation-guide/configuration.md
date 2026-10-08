@@ -583,44 +583,83 @@ security.administrators = jsmith
 
 ## Encrypting Passwords
 
-Any property value, not only a password, can be stored encrypted. Define a master password in `secret.key` and wrap the
-encrypted value in `ENC(...)`:
+<!-- V6: ENC(v2:...) AES-256-GCM values, password/secret/token settings, instance key file -->
+
+Any property value, not only a password, can be stored encrypted inside `ENC(...)`, except the values of the settings
+described after this example. OpenL decodes every `ENC(...)` value of the other settings, whatever the name of its
+property:
 
 ```properties
-secret.key = MyMasterPassword
-db.password = ENC(AP7hs0n88JJMcFlV/7VQTg==)
+secret.key = ${SECRET_KEY}
+db.password = ENC(v2:${ENCRYPTED_VALUE})
 ```
 
-The value inside `ENC(...)` is Base64, so it cannot be invented — the example above is the password `MyDbPassword`
-encrypted with the `secret.key` shown next to it. Produce your own value as described at the end of this section.
+The settings that OpenL reads to locate the settings file and the keys of the other values must stay unencrypted:
+`secret.key`, and `openl.home.shared`, the folder of the settings file and of `.openl-secret-key`, together with
+`openl.home` while `openl.home.shared` keeps its default `${openl.home}`. Where OpenL reads an `ENC(v2:...)` value of
+one of them while it resolves the keys of another `ENC(v2:...)` value, it uses an empty value and logs an ERROR.
+
+Values that OpenL saves are written as `ENC(v2:<Base64>)`, where the Base64 text holds the salt, the nonce and the
+ciphertext with its authentication tag, in that order. The cipher is AES-256-GCM with a 128-bit authentication tag.
+The 256-bit key is derived from the key material with PBKDF2-HMAC-SHA256 at 600,000 iterations. Each value gets its
+own random 16-byte salt and random 12-byte nonce, so the same password encrypts to a different value every time. A
+value that keeps its `ENC(v2:` start and its final `)` but whose salt, nonce, ciphertext or tag is modified or
+truncated cannot be decrypted: it reads as an empty value, and OpenL logs an ERROR that does not contain the value. A
+value that loses its `ENC(` start or its final `)` is not recognized as encrypted and is used as written. A value whose
+`v2:` marker is changed or removed is read in the legacy format described later in this section, without that ERROR.
 
 Keep `secret.key` out of `application.properties` in a shared environment — pass it as a Java system property or an
 environment variable instead. Quote the value if it contains spaces or shell metacharacters, so that
 `-Dsecret.key=...` reaches the application intact.
 
-`secret.key` also protects the passwords that the **Administration** area saves. When a repository, database, or mail
-password is entered in the UI, it is stored as `ENC(...)` in the settings file, encrypted with the current
-`secret.key`.
+When the **Administration** area saves a setting whose name ends in `password`, `secret` or `token`, it stores that
+setting encrypted in the settings file. This covers, for example, a repository, database, or mail password and
+`security.oauth2.client-secret`. `secret.key` itself is the one exception and is never encrypted. Settings whose names
+end in `secret-key`, `account-key` or `local-key`, such as `repository.<id>.secret-key`, `repository.<id>.account-key`
+and `security.saml.local-key`, are not covered and are saved as plain text. Such a value can still be encrypted by hand
+in `application.properties` with the command at the end of this section; a hand-made value requires `secret.key` to be
+set.
+
+The key material is `secret.key` when it is set, and a configured `secret.key` always takes precedence. When
+`secret.key` is blank, which is the default, OpenL creates the instance key file
+`${openl.home.shared}/.openl-secret-key` on the first save of a matching setting and encrypts with the key it holds, so
+the settings file never holds a plain-text secret. The key file holds a random 32-byte key and is readable and writable
+by its owner only, where the file system supports such permissions.
+
+The next time the settings file, `${openl.home.shared}/<application-name>.properties`, is saved, OpenL rewrites the
+legacy `ENC(...)` and plain-text values of matching settings as `ENC(v2:...)`, also when they have not changed. A value
+already stored as `ENC(v2:...)` that has not changed keeps its ciphertext and is not rewritten. A legacy value that
+cannot be decrypted is kept as stored, and OpenL logs a WARN that names the property, never the value.
+`application.properties` and the other configuration files are only read and are never rewritten.
 
 > [!Note]
-> Define `secret.key` before creating any connection that stores a password. Passwords saved while `secret.key` was
-> blank are stored as plain text, and passwords saved under a different `secret.key` decode to an empty value once the
-> key changes — the affected connections then fail to authenticate and their passwords have to be entered again.
+> Back up and move `.openl-secret-key` together with the settings file when copying the settings to another
+> installation, or define `secret.key` before the first save. If the key file is lost, or `secret.key` changes, the
+> values encrypted with the old key read as an empty value — the affected connections then fail to authenticate and
+> their passwords have to be entered again.
 
-To produce an encrypted value on Linux, substituting the `secret.key` value for `MyMasterPassword`:
+A value inside `ENC(...)` without the `v2:` prefix is in the legacy AES-128-CBC format. OpenL still accepts it on read,
+decrypting it with `secret.key` and the cipher in `secret.cipher`. `secret.cipher` applies only to the legacy format;
+`ENC(v2:...)` values always use AES-256-GCM. OpenL Rule Services versions older than 6.5.0 cannot read `ENC(v2:...)`
+values.
+
+The following command produces a value in the legacy format only. To run it on Linux, substitute the `secret.key`
+value for `${SECRET_KEY}` and the value to encrypt for `${PLAIN_PASSWORD}`:
 
 ```bash
-echo -n "plain password" \
+printf '%s' "${PLAIN_PASSWORD}" \
   | openssl aes-128-cbc \
-    -K $(echo -n "MyMasterPassword" | sha1sum | awk '{ print substr($1, 1, 32) }') \
+    -K "$(printf '%s' "${SECRET_KEY}" | sha1sum | awk '{ print substr($1, 1, 32) }')" \
     -e \
     -iv 00000000000000000000000000000000 \
-    -base64 \
+    -base64 -A \
   | awk '{ print "ENC("$1")" }'
 ```
 
+`-A` keeps the Base64 text on one line, so that the command prints a single `ENC(...)` value.
 The value passed to `-K` is the first 32 characters of the SHA-1 hash of `secret.key`. On macOS, use `shasum` instead
-of `sha1sum`. The encoding cipher is configurable through `secret.cipher`.
+of `sha1sum`. The cipher of the legacy format is configurable through `secret.cipher`; it does not affect
+`ENC(v2:...)` values.
 
 ---
 
@@ -641,11 +680,21 @@ the old location and requires moving it manually.
 
 ### What Moves to the Shared Directory
 
+<!-- V6: instances share one secret.key or the shared instance key file -->
+
 - **Administration settings** — every instance reads the same `<application-name>.properties`, so a change applied in
   one instance's **Administration** area takes effect everywhere. The passwords in that file are stored as `ENC(...)`,
-  so every instance needs the same `secret.key`: an instance configured with a different key reads such a password as
-  an empty value. Changing the key therefore means changing it on all instances together and re-entering the affected
-  passwords afterwards, which saves them encrypted with the new key.
+  so every instance must be able to decrypt them. Two arrangements are supported: the same explicit `secret.key` on
+  every instance, or `secret.key` left blank on every instance, so that all of them use the shared instance key file
+  `.openl-secret-key` beside the settings file. An instance decrypts an `ENC(v2:...)` value with its configured
+  `secret.key` first and then with the instance key file. A value encrypted with the instance key therefore stays
+  readable on an instance that configures a `secret.key`, while a value encrypted with a configured `secret.key` reads
+  as an empty value on an instance whose `secret.key` is blank or different, and OpenL logs an ERROR. Legacy `ENC(...)`
+  values without the `v2:` prefix are decrypted with `secret.key` only, so they need the same `secret.key` on every
+  instance until a save rewrites them as `ENC(v2:...)`. Changing a configured `secret.key` means changing it on all
+  instances together and re-entering the passwords it encrypted, which saves them encrypted with the new key. Losing or
+  replacing `.openl-secret-key` makes the values it encrypted read as an empty value on every instance, and their
+  passwords then have to be entered again.
 - **User workspace and project history** — users see the same open projects and history on whichever instance serves
   them.
 - **Locks** — an instance sees projects locked by users on other instances.

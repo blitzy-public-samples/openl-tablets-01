@@ -1,0 +1,5 @@
+POST /rest/projects/{PROJECT_ID}/files//x.xlsx HTTP/1.1
+Authorization: ${ADMIN_AUTH_TOCKEN}
+Content-Type: application/octet-stream
+
+&../../task_EPBDS-15494-2-project-design-flat/100-files/Rating.xlsx

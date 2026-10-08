@@ -11,6 +11,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.function.Predicate;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 import java.util.zip.ZipOutputStream;
@@ -423,13 +424,15 @@ public class AProject extends AProjectFolder implements IProject {
     }
 
     private void transformAndArchive(AProject projectFrom, CommonUser user) throws ProjectException {
+        // V1: decided once, before anything is read, which source files stay inside the source project folder
+        var contained = containedFiles(projectFrom);
         // Archive the folder using zip
         var fileData = getFileData();
         var out = new ByteArrayOutputStream();
         try {
             List<FileItem> changes = new ArrayList<>();
             for (AProjectArtefact artefact : projectFrom.getArtefacts()) {
-                writeArtefact(changes, artefact);
+                writeArtefact(changes, artefact, contained); // V1: only contained files
             }
 
             if (getResourceTransformer() != null) {
@@ -474,23 +477,37 @@ public class AProject extends AProjectFolder implements IProject {
             try (var stream = new ZipInputStream(fileItem.getStream())) {
                 var fileData = getFileData();
                 fileData.setAuthor(user == null ? null : user.getUserInfo());
-                return repositoryTo
-                        .save(fileData, new FileChangesFromZip(stream, folderTo), ChangesetType.FULL);
+                Iterable<FileItem> files = new FileChangesFromZip(stream, folderTo);
+                // V1: unpacked into this project's folder, each file is checked against the links already in it; the
+                // fresh temporary repository an archive is transformed through holds none
+                if (Objects.equals(repositoryTo, getRepository())) {
+                    files = containedWrites(files, ChangesetType.FULL);
+                }
+                return repositoryTo.save(fileData, files, ChangesetType.FULL);
             }
+        } catch (UncontainedWriteException e) {
+            // V1: a write the destination check refuses fails the copy as a project error, its refusal the cause
+            throw new ProjectException(e.getMessage(), e);
         } catch (IOException e) {
             throw new ProjectException(e.getMessage(), e);
         }
     }
 
-    private void writeArtefact(List<FileItem> files, AProjectArtefact artefact) throws IOException,
-            ProjectException {
+    private void writeArtefact(List<FileItem> files,
+                               AProjectArtefact artefact,
+                               Predicate<String> contained) // V1: the source files a copy may read
+            throws IOException, ProjectException {
         if (artefact instanceof AProjectResource resource) {
+            // V1: a source file whose real location leaves the source project folder is neither read nor archived
+            if (!contained.test(resource.getFileData().getName())) {
+                return;
+            }
             InputStream content = getResourceTransformer() != null ? getResourceTransformer().transform(resource) : resource.getContent();
             files.add(new FileItem(resource.getInternalPath(), content));
         } else {
             var folder = (AProjectFolder) artefact;
             for (AProjectArtefact a : folder.getArtefacts()) {
-                writeArtefact(files, a);
+                writeArtefact(files, a, contained); // V1: the same source files
             }
         }
     }

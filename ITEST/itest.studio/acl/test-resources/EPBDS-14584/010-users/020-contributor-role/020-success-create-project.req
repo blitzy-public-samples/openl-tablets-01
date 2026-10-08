@@ -1,5 +1,5 @@
 PUT /rest/repos/design/projects/EPBDS_14584_Project HTTP/1.1
-Authorization: Basic RVBCRFNfMTQ1ODQ6RVBCRFNfMTQ1ODQ=
+Authorization: ${EPBDS_14584_BASIC}
 Cookie: NO_JSESSIONID=noAuth
 Content-Type: multipart/form-data; boundary=WebKitFormBoundary7MA4YWxkTrZu0gW
 

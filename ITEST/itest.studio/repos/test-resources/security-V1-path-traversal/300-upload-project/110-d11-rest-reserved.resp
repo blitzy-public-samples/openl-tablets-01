@@ -1,0 +1,7 @@
+HTTP/1.1 400
+Content-Type: application/json
+
+{
+  "code": "openl.error.zip-archive.unknown.archive.path.message",
+  "message": "*"
+}
