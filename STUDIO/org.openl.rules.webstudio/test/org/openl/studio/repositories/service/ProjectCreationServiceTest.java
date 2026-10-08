@@ -1694,7 +1694,7 @@ class ProjectCreationServiceTest {
     }
 
     // V1-C: an overwrite that writes through a link its folder holds is refused, whatever the link leads to.
-    // The repository refuses it as it takes the write.
+    // The save refuses it before anything is written through the link.
     // Nothing outside the project changes, and the uploaded files are released.
     @ParameterizedTest(name = "{0} by {1} on {2}")
     @MethodSource("writesThroughLinks")
@@ -1896,8 +1896,8 @@ class ProjectCreationServiceTest {
     }
 
     // V1-C: a copy into a file repository is refused when its folder becomes a link after the path check passed.
-    // The whole changeset is checked before the repository takes any of it, so the refusal reaches the copy
-    // unwrapped: still the 400, never a copy conflict, and nothing is written through the link.
+    // The whole changeset is checked before the repository takes any of it, by the workspace copy first, so the
+    // refusal is still the 400, never a copy conflict, and nothing is written through the link.
     @Test
     @DisabledOnOs(OS.WINDOWS)
     void refuses_a_file_copy_whose_folder_a_link_redirects_after_the_path_check() throws IOException {
@@ -1925,6 +1925,31 @@ class ProjectCreationServiceTest {
         assertEquals(outsideBefore, snapshot(outside), "Nothing is written through the link");
         // The source was read for the write, so the refusal came from the write check, not from the path check.
         verify(copySource.files()).read("DESIGN/rules/Src/src.txt");
+    }
+
+    // V1-C: a Git copy is refused when its folder, already in the working tree untracked, holds a file link out of it.
+    // The workspace copy finds the link before the write check does, and its refusal is still the 400, never a copy
+    // conflict. Nothing is written through the link and nothing of the copy is committed.
+    @Test
+    @DisabledOnOs(OS.WINDOWS)
+    void refuses_a_git_copy_whose_workspace_check_finds_a_file_link_in_the_untracked_folder() throws Exception {
+        realUploads();
+        var root = tmp.resolve("repo");
+        var git = seededGit(root);
+        var target = secured(git);
+        var outside = outsideFolder();
+        var folder = Files.createDirectories(root.resolve("DESIGN/rules/NewProject"));
+        Files.createSymbolicLink(folder.resolve("src.txt"), outside.resolve("canary.txt"));
+        var source = sourceInFlatFileRepository();
+        var outsideBefore = snapshot(outside);
+
+        // A blank path and revision are read as none: the copy goes to the rules location from the latest state.
+        assertPathRejected(() -> service.copyProject(target, "NewProject", "", source, "comment", ""));
+
+        assertEquals(outsideBefore, snapshot(outside), "Nothing is written through the link");
+        assertNull(git.check("DESIGN/rules/NewProject/rules.xml"), "Nothing of the copy is committed");
+        assertTrue(Files.isSymbolicLink(folder.resolve("src.txt")), "The working tree is left as it was");
+        assertNothingOutside("repo", "design", "outside");
     }
 
     // V1-C: a valid copy into a Git repository is committed in its own folder of the working tree.

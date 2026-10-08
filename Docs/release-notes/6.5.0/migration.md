@@ -147,7 +147,11 @@ browser.
   is `repo-git`, `repo-file` or JDBC; Local changes do not list such entries either. Opening or saving a project whose
   folder is itself reached through such a link is refused, and saving into a `repo-file` design repository removes
   such a link from the project folder there, as it already removed links to folders, leaving the file it points to
-  untouched.
+  untouched. Saving, opening, copying or deploying a project is refused when a symbolic link in the project folder it
+  writes to, in a `repo-file` repository or in the working tree of a `repo-git` repository, would lead a written file
+  out of that folder: nothing is written through the link and no commit is made. Saving answers its existing `409`
+  with `openl.error.409.project.status.update.failed.message`, and copying answers `400` with
+  `openl.error.400.file.path.invalid.message`.
 
   In a `repo-file` design repository, and in the working tree of a `repo-git` design repository, uploading files or a
   template over an existing project answers that `400` when any entry of the existing project folder is a symbolic

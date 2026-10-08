@@ -477,9 +477,17 @@ public class AProject extends AProjectFolder implements IProject {
             try (var stream = new ZipInputStream(fileItem.getStream())) {
                 var fileData = getFileData();
                 fileData.setAuthor(user == null ? null : user.getUserInfo());
-                return repositoryTo
-                        .save(fileData, new FileChangesFromZip(stream, folderTo), ChangesetType.FULL);
+                Iterable<FileItem> files = new FileChangesFromZip(stream, folderTo);
+                // V1: unpacked into this project's folder, each file is checked against the links already in it; the
+                // fresh temporary repository an archive is transformed through holds none
+                if (Objects.equals(repositoryTo, getRepository())) {
+                    files = containedWrites(files, ChangesetType.FULL);
+                }
+                return repositoryTo.save(fileData, files, ChangesetType.FULL);
             }
+        } catch (UncontainedWriteException e) {
+            // V1: a write the destination check refuses fails the copy as a project error, its refusal the cause
+            throw new ProjectException(e.getMessage(), e);
         } catch (IOException e) {
             throw new ProjectException(e.getMessage(), e);
         }

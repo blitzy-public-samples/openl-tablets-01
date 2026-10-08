@@ -35,6 +35,7 @@ import org.openl.rules.project.abstraction.AProject;
 import org.openl.rules.project.abstraction.ProjectStatus;
 import org.openl.rules.project.abstraction.ProjectTags;
 import org.openl.rules.project.abstraction.RulesProject;
+import org.openl.rules.project.abstraction.UncontainedWriteException;
 import org.openl.rules.repository.LocalWorkingTree;
 import org.openl.rules.repository.PathCheckedRepository;
 import org.openl.rules.repository.api.BranchRepository;
@@ -631,6 +632,10 @@ public class ProjectCreationService {
                 if (cause instanceof WriteRefused refused) {
                     throw refused.refusal;
                 }
+                // V1: the workspace save refuses a write through a link in the project folder, often before this check
+                if (cause instanceof UncontainedWriteException) {
+                    throw new BadRequestException("file.path.invalid.message");
+                }
             }
             throw new ConflictException("project.create.failed.message");
         }
@@ -803,6 +808,10 @@ public class ProjectCreationService {
             for (Throwable cause = e.getCause(); cause != null; cause = cause.getCause()) {
                 if (cause instanceof WriteRefused refused) {
                     throw refused.refusal;
+                }
+                // V1: the workspace copy refuses a write through a link in the copy's folder, often before this check
+                if (cause instanceof UncontainedWriteException) {
+                    throw new BadRequestException("file.path.invalid.message");
                 }
             }
             // The answer carries a code only, so without this the failure leaves no trace anywhere.
